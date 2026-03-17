@@ -14,8 +14,6 @@ from __future__ import annotations
 import logging
 from typing import Any, AsyncIterator
 
-from claude_agent_sdk import query, ClaudeAgentOptions, AgentDefinition
-
 from miya.shared.attack_graph import AttackGraph, GraphNode, GraphEdge
 from miya.shared.blackboard import Blackboard
 from miya.shared.events import (
@@ -25,7 +23,7 @@ from miya.shared.events import (
     MissionFailed,
     PhaseTransition,
 )
-from miya.shared.ports import EventStorePort
+from miya.shared.ports import CoordinatorPort, EventStorePort
 from miya.shared.types import Mission
 from miya.topology.base import Topology, TopologyRegistry, AgentHandle
 
@@ -121,8 +119,13 @@ OBJECTIVE_REACHED: <yes/no>
 class AttackGraphTopology:
     """Graph-based attack planning and execution topology."""
 
-    def __init__(self, max_steps: int = 20) -> None:
+    def __init__(
+        self,
+        max_steps: int = 20,
+        coordinator: CoordinatorPort | None = None,
+    ) -> None:
         self._max_steps = max_steps
+        self._coordinator = coordinator
 
     @property
     def name(self) -> str:
@@ -315,23 +318,35 @@ class AttackGraphTopology:
         blackboard: Blackboard,
     ) -> str:
         """Run coordinator with prompt, return text output."""
-        from miya.infra.mcp_registry import MCPRegistry
-
-        registry = MCPRegistry()
-
-        agent_defs = {
-            name: AgentDefinition(**handle.to_agent_definition())
-            for name, handle in agents.items()
-        }
-
         all_mcp_names: set[str] = set()
         for handle in agents.values():
             all_mcp_names.update(handle.mcp_servers)
 
+        agent_defs = {
+            name: handle.to_agent_definition()
+            for name, handle in agents.items()
+        }
+
+        if self._coordinator is not None:
+            return await self._coordinator.run(
+                prompt=prompt,
+                agents=agent_defs,
+                mcp_servers=list(all_mcp_names),
+            )
+
+        # Fallback: Claude Agent SDK
+        from claude_agent_sdk import query, ClaudeAgentOptions, AgentDefinition
+        from miya.infra.mcp_registry import MCPRegistry
+
+        registry = MCPRegistry()
+        sdk_agents = {
+            name: AgentDefinition(**defn)
+            for name, defn in agent_defs.items()
+        }
         mcp_configs = registry.get_configs_for_agent(list(all_mcp_names))
 
         options = ClaudeAgentOptions(
-            agents=agent_defs,
+            agents=sdk_agents,
             mcp_servers=mcp_configs,
             allowed_tools=[
                 "Read", "Write", "Edit", "Bash", "Grep", "Glob",

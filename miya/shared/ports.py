@@ -47,6 +47,30 @@ class EventStorePort(Protocol):
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  Coordinator Port (LLM abstraction)
+# ═══════════════════════════════════════════════════════════════════
+
+
+@runtime_checkable
+class CoordinatorPort(Protocol):
+    """Abstraction over the LLM coordinator call.
+
+    The topology delegates agent execution through this port.
+    In production: calls Claude Agent SDK's query().
+    In tests: returns mock responses.
+    """
+
+    async def run(
+        self,
+        prompt: str,
+        agents: dict[str, Any],
+        mcp_servers: list[str],
+    ) -> str:
+        """Run the coordinator with a prompt and return text output."""
+        ...
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  Repository Port (generic)
 # ═══════════════════════════════════════════════════════════════════
 

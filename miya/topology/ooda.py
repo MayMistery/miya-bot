@@ -18,8 +18,6 @@ from __future__ import annotations
 import logging
 from typing import Any, AsyncIterator
 
-from claude_agent_sdk import query, ClaudeAgentOptions, AgentDefinition
-
 from miya.shared.blackboard import Blackboard
 from miya.shared.events import (
     DomainEvent,
@@ -29,7 +27,7 @@ from miya.shared.events import (
     PhaseTransition,
     ReflectionCompleted,
 )
-from miya.shared.ports import EventStorePort
+from miya.shared.ports import CoordinatorPort, EventStorePort
 from miya.shared.types import Mission, OODAPhase, MissionType
 from miya.topology.base import Topology, TopologyRegistry, AgentHandle
 
@@ -148,8 +146,13 @@ NEXT_FOCUS: <what to focus on in the next loop iteration, if continuing>
 class OODATopology:
     """OODA loop orchestration with reflection gate."""
 
-    def __init__(self, max_iterations: int = 10) -> None:
+    def __init__(
+        self,
+        max_iterations: int = 10,
+        coordinator: CoordinatorPort | None = None,
+    ) -> None:
         self._max_iterations = max_iterations
+        self._coordinator = coordinator
 
     @property
     def name(self) -> str:
@@ -317,41 +320,59 @@ class OODATopology:
         blackboard: Blackboard,
     ) -> str:
         """Run the coordinator agent with a prompt and collect text output."""
-        from miya.infra.mcp_registry import MCPRegistry
-
-        registry = MCPRegistry()
-
-        # Build agent definitions
-        agent_defs = {
-            name: AgentDefinition(**handle.to_agent_definition())
-            for name, handle in agents.items()
-        }
-
-        # Collect all MCP servers needed
         all_mcp_names: set[str] = set()
         for handle in agents.values():
             all_mcp_names.update(handle.mcp_servers)
 
-        mcp_configs = registry.get_configs_for_agent(list(all_mcp_names))
+        agent_defs = {
+            name: handle.to_agent_definition()
+            for name, handle in agents.items()
+        }
+
+        # Use injected coordinator port if available
+        if self._coordinator is not None:
+            return await self._coordinator.run(
+                prompt=prompt,
+                agents=agent_defs,
+                mcp_servers=list(all_mcp_names),
+            )
+
+        # Fallback: use Claude Agent SDK directly
+        return await self._run_sdk_coordinator(
+            prompt, agent_defs, list(all_mcp_names)
+        )
+
+    async def _run_sdk_coordinator(
+        self,
+        prompt: str,
+        agent_defs: dict[str, Any],
+        mcp_names: list[str],
+    ) -> str:
+        """Run coordinator via Claude Agent SDK (production path)."""
+        from claude_agent_sdk import query, ClaudeAgentOptions, AgentDefinition
+        from miya.infra.mcp_registry import MCPRegistry
+
+        registry = MCPRegistry()
+        sdk_agents = {
+            name: AgentDefinition(**defn)
+            for name, defn in agent_defs.items()
+        }
+        mcp_configs = registry.get_configs_for_agent(mcp_names)
 
         options = ClaudeAgentOptions(
-            agents=agent_defs,
+            agents=sdk_agents,
             mcp_servers=mcp_configs,
             allowed_tools=[
                 "Read", "Write", "Edit", "Bash", "Grep", "Glob",
                 "WebSearch", "WebFetch", "Agent",
-            ] + [
-                f"mcp__{name}__*" for name in all_mcp_names
-            ],
+            ] + [f"mcp__{name}__*" for name in mcp_names],
             permission_mode="acceptEdits",
             max_turns=30,
         )
 
         output_parts: list[str] = []
-
         try:
             async for message in query(prompt=prompt, options=options):
-                # Extract text content from messages
                 if hasattr(message, "content"):
                     for block in message.content:
                         if hasattr(block, "text"):

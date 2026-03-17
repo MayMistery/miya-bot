@@ -14,7 +14,7 @@ from typing import Any
 
 from miya.shared.blackboard import Blackboard
 from miya.shared.events import DomainEvent
-from miya.shared.ports import EventStorePort
+from miya.shared.ports import CoordinatorPort, EventStorePort
 from miya.shared.types import Finding, Mission, MissionType, Target
 from miya.infra.event_store import SQLiteEventStore
 from miya.infra.mcp_registry import MCPRegistry
@@ -159,10 +159,12 @@ class MissionService:
         self,
         event_store: EventStorePort | None = None,
         mcp_registry: MCPRegistry | None = None,
+        coordinator: CoordinatorPort | None = None,
         db_path: str | Path = "miya_events.db",
     ) -> None:
         self._event_store = event_store
         self._mcp_registry = mcp_registry or MCPRegistry()
+        self._coordinator = coordinator
         self._db_path = db_path
         self._owns_store = event_store is None
 
@@ -216,8 +218,8 @@ class MissionService:
         if not agents:
             raise ValueError(f"Failed to build agents for: {mission_type}")
 
-        # Get topology
-        topo = TopologyRegistry.get(topology)
+        # Get topology (pass coordinator for testability)
+        topo = TopologyRegistry.get(topology, coordinator=self._coordinator)
 
         # Execute
         start_time = datetime.now(timezone.utc)
