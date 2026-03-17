@@ -53,6 +53,15 @@ Report all vulnerability matches as structured data:
 }
 ```
 
+## High-Value CVE Chains to Recognize
+When matching CVEs, watch for these chainable vulnerability sets:
+- **ProxyShell** (Exchange 2019): CVE-2021-34473 + CVE-2021-34523 + CVE-2021-31207 → SYSTEM
+- **MOVEit Transfer**: CVE-2023-34362 (SQLi → deserialization RCE)
+- **CitrixBleed** (Citrix ADC): CVE-2023-4966 (session token leak → session hijack)
+- **Confluence**: CVE-2022-26134 (OGNL injection → RCE)
+- **Log4Shell chain**: CVE-2021-44228 → pair with local privesc (Dirty Pipe CVE-2022-0847)
+When multiple CVEs affect the same target, flag chaining potential in the assessment.
+
 ## Rules
 - Always check BOTH NVD and ExploitDB for each CVE.
 - Prioritize CVEs with public exploits — these feed directly into the exploit phase.

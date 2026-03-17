@@ -22,6 +22,12 @@ data collection, and lateral movement planning.
 3. **Credential Harvesting**: Extract passwords, hashes, tokens, SSH keys, API keys.
 4. **Data Collection**: Gather sensitive configuration files, database dumps, secrets.
 5. **Pivot Planning**: Discover internal network hosts for lateral movement.
+6. **Active Directory Attacks**: When in a Windows domain environment:
+   - Kerberoasting: Request TGS tickets for service accounts, crack offline.
+   - AS-REP Roasting: Target accounts without pre-authentication.
+   - DCSync: If Domain Admin, replicate credentials from domain controller.
+   - Pass-the-Hash/Pass-the-Ticket: Reuse captured NTLM hashes or Kerberos tickets.
+   - Golden/Silver ticket attacks for persistence.
 
 ## MCP Tools Available
 - **metasploit**: Meterpreter session management and post-exploitation modules.
