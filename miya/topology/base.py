@@ -7,12 +7,17 @@ without touching domain code.
 
 from __future__ import annotations
 
+import json
+import logging
+import re
 from typing import Any, AsyncIterator, Callable, Protocol, runtime_checkable
 
 from miya.shared.blackboard import Blackboard
 from miya.shared.events import DomainEvent
 from miya.shared.ports import EventStorePort
 from miya.shared.types import Mission
+
+logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -99,6 +104,96 @@ class Topology(Protocol):
 # ═══════════════════════════════════════════════════════════════════
 #  Topology Registry
 # ═══════════════════════════════════════════════════════════════════
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Event Extraction from Coordinator Output
+# ═══════════════════════════════════════════════════════════════════
+
+
+def extract_events_from_output(output: str, mission: Mission) -> list[DomainEvent]:
+    """Extract structured domain events from coordinator/agent output.
+
+    The coordinator can embed events in the format:
+        [EVENT:EventTypeName {"field": "value", ...}]
+
+    This allows topologies to yield real domain events from LLM output,
+    populating the blackboard with findings, assets, CVEs, etc.
+    """
+    import dataclasses
+    from miya.shared.events import _EVENT_REGISTRY
+
+    events: list[DomainEvent] = []
+    pattern = r'\[EVENT:(\w+)\s+'
+
+    for match in re.finditer(pattern, output):
+        event_type_name = match.group(1)
+
+        # Extract JSON with balanced braces, respecting string quoting
+        json_start = match.end()
+        depth = 0
+        json_end = json_start
+        in_string = False
+        escape_next = False
+        for i in range(json_start, len(output)):
+            ch = output[i]
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == '\\' and in_string:
+                escape_next = True
+                continue
+            if ch == '"' and not escape_next:
+                in_string = not in_string
+                continue
+            if not in_string:
+                if ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0:
+                        json_end = i + 1
+                        break
+        if depth != 0:
+            continue
+        raw_json = output[json_start:json_end]
+
+        try:
+            data = json.loads(raw_json)
+        except json.JSONDecodeError:
+            logger.warning(f"Failed to parse event data: {raw_json[:100]}")
+            continue
+
+        # Map class name to event class
+        event_cls = None
+        for etype, cls in _EVENT_REGISTRY.items():
+            if cls.__name__ == event_type_name:
+                event_cls = cls
+                break
+
+        if event_cls is None:
+            logger.warning(f"Unknown event type: {event_type_name}")
+            continue
+
+        # Add mission context if not present
+        data.setdefault("mission", mission.mission_type.value)
+        data.setdefault("aggregate_id", mission.id)
+
+        # Handle tuple fields
+        for f_name in ("ports", "services", "input_vectors", "path", "technology_stack", "target_ports"):
+            if f_name in data and isinstance(data[f_name], list):
+                data[f_name] = tuple(data[f_name])
+
+        # Filter to valid fields
+        valid_fields = {f.name for f in dataclasses.fields(event_cls)}
+        filtered = {k: v for k, v in data.items() if k in valid_fields}
+
+        try:
+            events.append(event_cls(**filtered))
+        except Exception as e:
+            logger.warning(f"Failed to create {event_type_name}: {e}")
+
+    return events
 
 
 TopologyFactory = Callable[..., Topology]

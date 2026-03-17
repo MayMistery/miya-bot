@@ -231,7 +231,8 @@ class MissionService:
             ):
                 collected_events.append(event)
                 await self._event_store.append([event])
-                blackboard.apply(event)
+                # Note: blackboard.apply() is handled by the topology itself
+                # to ensure state is up-to-date for prompt generation between phases.
 
             mission.complete()
         except Exception as e:

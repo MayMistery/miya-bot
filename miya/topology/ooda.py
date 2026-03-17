@@ -29,7 +29,7 @@ from miya.shared.events import (
 )
 from miya.shared.ports import CoordinatorPort, EventStorePort
 from miya.shared.types import Mission, OODAPhase, MissionType
-from miya.topology.base import Topology, TopologyRegistry, AgentHandle
+from miya.topology.base import Topology, TopologyRegistry, AgentHandle, extract_events_from_output
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +219,11 @@ class OODATopology:
                 observe_prompt, mission, agents, blackboard
             )
 
+            # Extract and yield any structured events from OBSERVE output
+            for extracted in extract_events_from_output(observe_output, mission):
+                yield extracted
+                blackboard.apply(extracted)
+
             # ── ORIENT ────────────────────────────────────────────
             yield PhaseTransition(
                 from_phase=OODAPhase.OBSERVE.value,
@@ -234,6 +239,11 @@ class OODATopology:
             orient_output = await self._run_coordinator(
                 orient_prompt, mission, agents, blackboard
             )
+
+            # Extract and yield any structured events from ORIENT output
+            for extracted in extract_events_from_output(orient_output, mission):
+                yield extracted
+                blackboard.apply(extracted)
 
             # ── DECIDE ────────────────────────────────────────────
             yield PhaseTransition(
@@ -252,6 +262,11 @@ class OODATopology:
                 decide_prompt, mission, agents, blackboard
             )
 
+            # Extract and yield any structured events from DECIDE output
+            for extracted in extract_events_from_output(decide_output, mission):
+                yield extracted
+                blackboard.apply(extracted)
+
             # ── ACT ───────────────────────────────────────────────
             yield PhaseTransition(
                 from_phase=OODAPhase.DECIDE.value,
@@ -269,6 +284,11 @@ class OODATopology:
             act_output = await self._run_coordinator(
                 act_prompt, mission, agents, blackboard
             )
+
+            # Extract and yield any structured events from ACT output
+            for extracted in extract_events_from_output(act_output, mission):
+                yield extracted
+                blackboard.apply(extracted)
 
             # ── REFLECT ───────────────────────────────────────────
             yield PhaseTransition(

@@ -25,7 +25,7 @@ from miya.shared.events import (
 )
 from miya.shared.ports import CoordinatorPort, EventStorePort
 from miya.shared.types import Mission
-from miya.topology.base import Topology, TopologyRegistry, AgentHandle
+from miya.topology.base import Topology, TopologyRegistry, AgentHandle, extract_events_from_output
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +198,12 @@ class AttackGraphTopology:
                 f"entry points, and potential vulnerabilities found.\n"
                 f"Blackboard:\n{blackboard.to_context_prompt()}"
             )
-            await self._run_agent(recon_prompt, mission, agents, blackboard)
+            recon_output = await self._run_agent(recon_prompt, mission, agents, blackboard)
+
+            # Extract and yield events from recon output
+            for extracted in extract_events_from_output(recon_output, mission):
+                yield extracted
+                blackboard.apply(extracted)
 
         # ── Phase 2: Plan-Execute Loop ────────────────────────────
         for step in range(1, self._max_steps + 1):
@@ -283,6 +288,11 @@ class AttackGraphTopology:
             )
 
             exec_output = await self._run_agent(exec_prompt, mission, agents, blackboard)
+
+            # Extract and yield events from execution output
+            for extracted in extract_events_from_output(exec_output, mission):
+                yield extracted
+                blackboard.apply(extracted)
 
             # Update edge status
             if "success" in exec_output.lower():
