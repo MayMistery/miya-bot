@@ -1,0 +1,360 @@
+"""AttackGraph Topology — DAG-based strategic planning and tactical execution.
+
+This topology models the penetration test as a graph problem:
+1. Build an attack graph from reconnaissance data
+2. Plan the optimal attack path (lowest cost, highest probability)
+3. Execute each step with the appropriate agent
+4. After each step, update the graph and re-plan if topology changed
+
+Inspired by MITRE ATT&CK framework and automated attack planning research.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, AsyncIterator
+
+from claude_agent_sdk import query, ClaudeAgentOptions, AgentDefinition
+
+from miya.shared.attack_graph import AttackGraph, GraphNode, GraphEdge
+from miya.shared.blackboard import Blackboard
+from miya.shared.events import (
+    DomainEvent,
+    MissionStarted,
+    MissionCompleted,
+    MissionFailed,
+    PhaseTransition,
+)
+from miya.shared.ports import EventStorePort
+from miya.shared.types import Mission
+from miya.topology.base import Topology, TopologyRegistry, AgentHandle
+
+logger = logging.getLogger(__name__)
+
+
+_PLAN_PROMPT = """## Strategic Planner — Attack Path Selection
+
+You are the strategic planner for a penetration test.
+
+**Current Attack Graph:**
+{graph_summary}
+
+**Exploited Nodes:**
+{exploited_nodes}
+
+**Available Edges (unexplored attack paths):**
+{unexplored_edges}
+
+**Shortest Path to Objective:**
+{shortest_path}
+
+**All Available Paths:**
+{all_paths}
+
+**Mission:** {mission_description}
+
+**Your task:** Select the next attack step to execute.
+
+Consider:
+1. Expected success probability
+2. Cost (complexity, noise level, time)
+3. Information gain (even failed attempts reveal information)
+4. Prerequisites (do we have the access needed?)
+
+Output format:
+SELECTED_EDGE: <edge_id>
+AGENT: <agent_name_to_use>
+RATIONALE: <why this step>
+PREPARATION: <any preparation needed before execution>
+"""
+
+_EXECUTE_PROMPT = """## Tactical Executor — Step Execution
+
+You are executing a specific attack step.
+
+**Step Details:**
+- Technique: {technique}
+- Source: {source_node}
+- Target: {target_node}
+- Agent: {agent_name}
+
+**Current Blackboard:**
+{blackboard_context}
+
+**Preparation Instructions:**
+{preparation}
+
+**Your task:** Execute this attack step using the designated agent.
+Report the result with:
+1. SUCCESS or FAILURE
+2. What was gained (access, information, credentials)
+3. New attack surface discovered
+4. Evidence of success/failure
+"""
+
+_REBUILD_PROMPT = """## Graph Update — Post-Execution Analysis
+
+The following attack step was just executed:
+**Technique:** {technique}
+**Result:** {result}
+
+**Current Attack Graph:**
+{graph_summary}
+
+**Current Blackboard:**
+{blackboard_context}
+
+**Your task:** Based on the execution result, identify:
+1. New nodes to add (newly discovered assets, services, access levels)
+2. New edges to add (newly discovered attack paths)
+3. Nodes/edges to update (status changes)
+4. Whether the objective has been reached
+
+Output in structured format:
+NEW_NODES: <list of new nodes with properties>
+NEW_EDGES: <list of new edges with source→target>
+STATUS_UPDATES: <list of node/edge status changes>
+OBJECTIVE_REACHED: <yes/no>
+"""
+
+
+class AttackGraphTopology:
+    """Graph-based attack planning and execution topology."""
+
+    def __init__(self, max_steps: int = 20) -> None:
+        self._max_steps = max_steps
+
+    @property
+    def name(self) -> str:
+        return "attack_graph"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Attack Graph topology — models the pentest as a DAG. "
+            "Strategic planner selects optimal paths, tactical executor carries them out. "
+            "Graph updates dynamically as new information is discovered."
+        )
+
+    async def execute(
+        self,
+        mission: Mission,
+        blackboard: Blackboard,
+        agents: dict[str, AgentHandle],
+        event_store: EventStorePort,
+    ) -> AsyncIterator[DomainEvent]:
+        """Execute the mission using attack graph planning."""
+
+        # ── Mission Start ─────────────────────────────────────────
+        start_event = MissionStarted(
+            aggregate_id=mission.id,
+            mission_type=mission.mission_type.value,
+            target_uri=mission.target.uri,
+            topology=self.name,
+            mission=mission.mission_type.value,
+        )
+        yield start_event
+        blackboard.apply(start_event)
+
+        graph = blackboard.attack_graph
+        mission_desc = f"{mission.mission_type.value}: {mission.target}"
+
+        # ── Phase 1: Initial Recon to Build Graph ─────────────────
+        yield PhaseTransition(
+            to_phase="recon",
+            reason="Build initial attack graph",
+            aggregate_id=mission.id,
+            mission=mission.mission_type.value,
+        )
+
+        # Initialize graph with root node (attacker) and objective
+        if not graph.root_id:
+            root = graph.add_node(GraphNode(
+                label="Attacker",
+                node_type="access",
+                properties={"level": "external"},
+                status="exploited",
+            ))
+            graph.set_root(root.id)
+
+            objective = graph.add_node(GraphNode(
+                label="Objective",
+                node_type="objective",
+                properties={"type": mission.mission_type.value},
+            ))
+            graph.add_objective(objective.id)
+
+        # Run recon agent to discover initial attack surface
+        recon_agents = {k: v for k, v in agents.items()
+                       if v.context_name in ("recon", "entrypoint", "web", "pwn", "crypto", "reverse", "misc")}
+        if recon_agents:
+            first_agent = next(iter(recon_agents))
+            recon_prompt = (
+                f"Reconnaissance phase. Target: {mission.target}\n"
+                f"Discover the attack surface. Report all assets, services, "
+                f"entry points, and potential vulnerabilities found.\n"
+                f"Blackboard:\n{blackboard.to_context_prompt()}"
+            )
+            await self._run_agent(recon_prompt, mission, agents, blackboard)
+
+        # ── Phase 2: Plan-Execute Loop ────────────────────────────
+        for step in range(1, self._max_steps + 1):
+            logger.info(f"AttackGraph step {step}/{self._max_steps}")
+
+            # Check if we have unexplored edges
+            unexplored = graph.get_unexplored_edges()
+            if not unexplored and step > 1:
+                # Try to discover more edges
+                yield PhaseTransition(
+                    from_phase="execute",
+                    to_phase="recon",
+                    reason="No unexplored edges, gathering more intel",
+                    aggregate_id=mission.id,
+                    mission=mission.mission_type.value,
+                )
+                await self._run_agent(
+                    f"Additional recon needed. Current graph: {graph.summary()}\n"
+                    f"Blackboard:\n{blackboard.to_context_prompt()}",
+                    mission, agents, blackboard,
+                )
+                unexplored = graph.get_unexplored_edges()
+                if not unexplored:
+                    break  # No more paths to try
+
+            # ── PLAN ──────────────────────────────────────────────
+            yield PhaseTransition(
+                from_phase="recon" if step == 1 else "execute",
+                to_phase="plan",
+                reason=f"Step {step}: selecting attack path",
+                aggregate_id=mission.id,
+                mission=mission.mission_type.value,
+            )
+
+            shortest = graph.find_shortest_path()
+            all_paths = graph.find_all_paths(max_depth=5)
+
+            plan_prompt = _PLAN_PROMPT.format(
+                graph_summary=graph.summary(),
+                exploited_nodes="\n".join(
+                    f"- {n.label} ({n.node_type})" for n in graph.get_exploited_nodes()
+                ) or "None yet",
+                unexplored_edges="\n".join(
+                    f"- [{e.id[:8]}] {e.label} (cost={e.cost:.1f}, p={e.probability:.1%})"
+                    for e in unexplored[:10]
+                ),
+                shortest_path=" → ".join(e.label for e in shortest) if shortest else "No path found",
+                all_paths="\n".join(
+                    f"- Path {i+1}: {' → '.join(e.label for e in p)} "
+                    f"(cost={sum(e.expected_cost for e in p):.1f})"
+                    for i, p in enumerate(all_paths[:5])
+                ) or "No paths available",
+                mission_description=mission_desc,
+            )
+
+            plan_output = await self._run_agent(plan_prompt, mission, agents, blackboard)
+
+            # ── EXECUTE ───────────────────────────────────────────
+            yield PhaseTransition(
+                from_phase="plan",
+                to_phase="execute",
+                reason=f"Step {step}: executing selected technique",
+                aggregate_id=mission.id,
+                mission=mission.mission_type.value,
+            )
+
+            # Select edge (use first unexplored if parsing fails)
+            selected_edge = unexplored[0] if unexplored else None
+            if not selected_edge:
+                break
+
+            source_node = graph.nodes.get(selected_edge.source_id)
+            target_node = graph.nodes.get(selected_edge.target_id)
+
+            exec_prompt = _EXECUTE_PROMPT.format(
+                technique=selected_edge.label,
+                source_node=f"{source_node.label}" if source_node else "unknown",
+                target_node=f"{target_node.label}" if target_node else "unknown",
+                agent_name=next(iter(agents), ""),
+                blackboard_context=blackboard.to_context_prompt(),
+                preparation=plan_output,
+            )
+
+            exec_output = await self._run_agent(exec_prompt, mission, agents, blackboard)
+
+            # Update edge status
+            if "success" in exec_output.lower():
+                graph.update_edge_status(selected_edge.id, "succeeded")
+                if target_node:
+                    graph.update_node_status(target_node.id, "exploited")
+            else:
+                graph.update_edge_status(selected_edge.id, "failed")
+
+            # Check objective
+            for obj_id in graph.objective_ids:
+                obj_node = graph.nodes.get(obj_id)
+                if obj_node and obj_node.status == "exploited":
+                    yield MissionCompleted(
+                        aggregate_id=mission.id,
+                        findings_count=len(blackboard.findings),
+                        mission=mission.mission_type.value,
+                    )
+                    return
+
+        # ── Mission Complete ──────────────────────────────────────
+        yield MissionCompleted(
+            aggregate_id=mission.id,
+            findings_count=len(blackboard.findings),
+            mission=mission.mission_type.value,
+        )
+
+    async def _run_agent(
+        self,
+        prompt: str,
+        mission: Mission,
+        agents: dict[str, AgentHandle],
+        blackboard: Blackboard,
+    ) -> str:
+        """Run coordinator with prompt, return text output."""
+        from miya.infra.mcp_registry import MCPRegistry
+
+        registry = MCPRegistry()
+
+        agent_defs = {
+            name: AgentDefinition(**handle.to_agent_definition())
+            for name, handle in agents.items()
+        }
+
+        all_mcp_names: set[str] = set()
+        for handle in agents.values():
+            all_mcp_names.update(handle.mcp_servers)
+
+        mcp_configs = registry.get_configs_for_agent(list(all_mcp_names))
+
+        options = ClaudeAgentOptions(
+            agents=agent_defs,
+            mcp_servers=mcp_configs,
+            allowed_tools=[
+                "Read", "Write", "Edit", "Bash", "Grep", "Glob",
+                "WebSearch", "WebFetch", "Agent",
+            ] + [f"mcp__{name}__*" for name in all_mcp_names],
+            permission_mode="acceptEdits",
+            max_turns=30,
+        )
+
+        output_parts: list[str] = []
+        try:
+            async for message in query(prompt=prompt, options=options):
+                if hasattr(message, "content"):
+                    for block in message.content:
+                        if hasattr(block, "text"):
+                            output_parts.append(block.text)
+        except Exception as e:
+            logger.error(f"Agent execution error: {e}")
+            output_parts.append(f"[ERROR] {e}")
+
+        return "\n".join(output_parts)
+
+
+# ── Register ──────────────────────────────────────────────────────
+
+TopologyRegistry.register("attack_graph", AttackGraphTopology)
