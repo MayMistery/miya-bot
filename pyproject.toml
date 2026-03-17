@@ -1,0 +1,22 @@
+[project]
+name = "miya"
+version = "0.1.0"
+description = "DDD Pentest Agent — 0day discovery, 1day exploitation, CTF solving"
+requires-python = ">=3.10"
+dependencies = [
+    "claude-agent-sdk>=0.1.48",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+
+[project.scripts]
+miya = "miya.main:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
