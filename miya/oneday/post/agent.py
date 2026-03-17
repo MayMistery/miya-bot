@@ -84,6 +84,9 @@ Report all post-exploitation results as structured data:
 - Document the source of every piece of loot for the final report.
 - Plan pivot targets but do NOT execute lateral movement without authorization.
 - Preserve operational security — avoid noisy operations that trigger alerts.
+- For containerized targets: check /proc/1/cgroup, mount namespace, and capabilities \
+to determine if container escape is possible (e.g., privileged container, \
+CAP_SYS_ADMIN, mounted Docker socket, exploitable kernel via Dirty Pipe).
 """
 
 

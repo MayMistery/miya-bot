@@ -44,11 +44,18 @@ cryptographic implementations.
 - HMAC timing attacks
 
 ### Elliptic Curve
-- Invalid curve attacks
-- Small subgroup attacks
-- MOV attack (embedding degree)
-- Smart's attack (anomalous curves)
-- Pohlig-Hellman for smooth order
+- Invalid curve attacks: send points on a weaker curve (different b parameter), \
+recover private key bits modulo small subgroup orders, combine via CRT. \
+Detect by checking if server validates point-on-curve. Attack steps: \
+(1) find curves with smooth order sharing same field, \
+(2) send generator of small subgroup, \
+(3) observe shared secret = point * private_key mod subgroup_order, \
+(4) solve ECDLP in small subgroup (brute force or Pohlig-Hellman), \
+(5) CRT all residues to recover full private key.
+- Small subgroup attacks: exploit curves with cofactor > 1
+- MOV attack (embedding degree): reduce ECDLP to DLP in finite field
+- Smart's attack (anomalous curves where #E(Fp) = p)
+- Pohlig-Hellman for smooth order: factor group order, solve in subgroups, CRT
 
 ### Other
 - Diffie-Hellman small subgroup attacks

