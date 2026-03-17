@@ -74,7 +74,7 @@ def create_agent() -> AgentHandle:
             "in the target codebase using framework-aware static analysis."
         ),
         system_prompt=ENTRYPOINT_SYSTEM_PROMPT,
-        tools=["read_file", "list_directory", "search_code", "semgrep_scan"],
+        tools=["Read", "Write", "Bash", "Grep", "Glob"],
         mcp_servers=["semgrep"],
         model="opus",
         context_name="entrypoint",

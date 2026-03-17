@@ -79,7 +79,7 @@ def create_agent() -> AgentHandle:
             "and assesses exploitability using CVSS-like scoring."
         ),
         system_prompt=SINK_SYSTEM_PROMPT,
-        tools=["read_file", "search_code", "semgrep_scan"],
+        tools=["Read", "Write", "Bash", "Grep", "Glob"],
         mcp_servers=["semgrep"],
         model="opus",
         context_name="sink",
