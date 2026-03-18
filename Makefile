@@ -1,12 +1,19 @@
-.PHONY: install dev test test-unit test-int test-e2e lint fmt check clean run
+.PHONY: install dev update test test-unit test-int test-e2e lint fmt check clean run
 
 UV := uv
+BRANCH ?= main
 
 install:            ## Install production deps
 	$(UV) sync
 
 dev:                ## Install with dev deps
 	$(UV) sync --extra dev
+
+update:             ## Pull latest from GitHub + re-sync deps
+	git fetch origin $(BRANCH)
+	git reset --hard origin/$(BRANCH)
+	$(UV) sync --extra dev
+	@echo "\033[32m[miya]\033[0m Updated to $$(git rev-parse --short HEAD)"
 
 test:               ## Run all tests
 	$(UV) run pytest -v

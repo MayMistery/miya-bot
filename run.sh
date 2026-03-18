@@ -13,6 +13,8 @@ uv sync --extra dev
 CMD="${1:-help}"
 shift 2>/dev/null || true
 
+BRANCH="${MIYA_BRANCH:-main}"
+
 case "$CMD" in
     test)      uv run pytest -v "$@" ;;
     test-unit) uv run pytest tests/unit -v "$@" ;;
@@ -22,6 +24,13 @@ case "$CMD" in
     lint)      uv run ruff check miya tests "$@" ;;
     fmt)       uv run ruff format miya tests "$@" ;;
     run)       uv run miya "$@" ;;
+    update)
+        echo "[miya] Pulling latest from origin/$BRANCH..."
+        git fetch origin "$BRANCH"
+        git reset --hard "origin/$BRANCH"
+        uv sync --extra dev
+        echo "[miya] Updated to $(git rev-parse --short HEAD)"
+        ;;
     help)
         echo "Usage: ./run.sh <command> [args...]"
         echo ""
@@ -34,6 +43,7 @@ case "$CMD" in
         echo "  lint       Run ruff linter"
         echo "  fmt        Auto-format code"
         echo "  run        Run miya CLI"
+        echo "  update     Pull latest from GitHub + re-sync deps"
         ;;
     *)
         echo "Unknown command: $CMD"

@@ -21,12 +21,36 @@ Uses event sourcing (DDD), OODA/attack-graph topologies, and Claude Agent SDK wi
 
 ## Installation
 
+### One-click install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MayMistery/miya-bot/main/install.sh | bash
+```
+
+This will:
+1. Install `uv` if not present
+2. Clone the repo to `~/miya-bot`
+3. Install all dependencies
+4. Add `miya` command to `~/.local/bin`
+
+### Manual install
+
 ```bash
 git clone https://github.com/MayMistery/miya-bot
 cd miya-bot
 make dev          # install with dev deps
 # or
 ./run.sh          # auto-installs on first run
+```
+
+### Update
+
+```bash
+make update           # pull latest + re-sync deps
+# or
+./run.sh update
+# or
+./install.sh update
 ```
 
 ---
@@ -107,17 +131,33 @@ miya ctf --target ./ciphertext.txt --category crypto
 miya ctf --target ./crackme --category reverse
 ```
 
-### Interactive REPL
+### Interactive REPL (recommended)
+
+The interactive mode is the primary way to use Miya. It provides a persistent session with runtime configuration, mission history, and blackboard inspection.
 
 ```bash
 miya interactive
-# or with options:
 miya interactive --model sonnet --api-key sk-ant-...
 
-miya > oneday 192.168.1.100
-miya > zeroday ./my-app --language python
-miya > ctf https://ctf.example.com/chall/1 --category web
-miya > exit
+# In the REPL:
+miya (opus) > set model sonnet              # switch model
+miya (sonnet) > set topology attack_graph   # change default topology
+miya (sonnet) > set api_key sk-ant-...      # set API key
+miya (sonnet) > set base_url https://...    # set base URL
+
+miya (sonnet) > oneday 192.168.1.100
+miya (sonnet) > oneday 10.0.0.1 --source ./app-src   # white-box
+miya (sonnet) > zeroday ./my-app --language python
+miya (sonnet) > zeroday ./app --service https://app.example.com
+miya (sonnet) > ctf https://ctf.example.com/chall/1 --category web
+
+miya (sonnet) > status                      # show config + session stats
+miya (sonnet) > history                     # mission history
+miya (sonnet) > events                      # recent domain events
+miya (sonnet) > blackboard                  # current blackboard state
+miya (sonnet) > info                        # MCP server info
+miya (sonnet) > clear                       # clear screen
+miya (sonnet) > exit
 ```
 
 ---
