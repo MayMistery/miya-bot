@@ -109,6 +109,9 @@ Emit structured events as you progress:
 
 [EVENT:ChallengeIdentified {"challenge_name": "...", "category": "crypto", "difficulty": "...", "technology_stack": ["..."], "context": "ctf"}]
 
+When you identify a cryptographic weakness:
+[EVENT:VulnerabilityFound {"vuln_type": "weak RSA parameters", "cwe_id": "CWE-326", "severity": "high", "location": "pubkey.pem", "description": "...", "context": "ctf"}]
+
 When you find the flag:
 [EVENT:ChallengeSolved {"challenge_name": "...", "flag": "flag{...}", "technique": "...", "context": "ctf"}]
 """

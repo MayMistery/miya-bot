@@ -102,7 +102,7 @@ Emit structured events as you progress:
 
 [EVENT:ChallengeIdentified {"challenge_name": "...", "category": "web", "difficulty": "...", "technology_stack": ["..."], "context": "ctf"}]
 
-[EVENT:VulnerabilityFound {"vuln_id": "...", "vuln_type": "...", "severity": "...", "location": "...", "description": "...", "context": "ctf"}]
+[EVENT:VulnerabilityFound {"vuln_type": "...", "cwe_id": "CWE-89", "severity": "...", "location": "...", "description": "...", "context": "ctf"}]
 
 When you find the flag:
 [EVENT:ChallengeSolved {"challenge_name": "...", "flag": "flag{...}", "technique": "...", "context": "ctf"}]

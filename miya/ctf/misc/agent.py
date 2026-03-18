@@ -105,6 +105,9 @@ Emit structured events as you progress:
 
 [EVENT:ChallengeIdentified {"challenge_name": "...", "category": "misc", "difficulty": "...", "technology_stack": ["..."], "context": "ctf"}]
 
+When you identify a key finding:
+[EVENT:VulnerabilityFound {"vuln_type": "hidden data", "severity": "medium", "location": "image.png", "description": "...", "context": "ctf"}]
+
 When you find the flag:
 [EVENT:ChallengeSolved {"challenge_name": "...", "flag": "flag{...}", "technique": "...", "context": "ctf"}]
 """

@@ -102,6 +102,9 @@ Emit structured events as you progress:
 
 [EVENT:ChallengeIdentified {"challenge_name": "...", "category": "pwn", "difficulty": "...", "technology_stack": ["..."], "context": "ctf"}]
 
+When you identify a vulnerability:
+[EVENT:VulnerabilityFound {"vuln_type": "buffer overflow", "cwe_id": "CWE-787", "severity": "critical", "location": "main+0x42", "description": "...", "context": "ctf"}]
+
 When you find the flag:
 [EVENT:ChallengeSolved {"challenge_name": "...", "flag": "flag{...}", "technique": "...", "context": "ctf"}]
 """
