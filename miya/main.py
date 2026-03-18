@@ -374,15 +374,19 @@ def health() -> None:
         sdk_msg = f"error: {exc}"
     checks.append(("SDK Ready", sdk_ok, sdk_msg))
 
-    # 7. Git info
+    # 7. Project root
+    project_root = str(Path(__file__).resolve().parent.parent)
+    checks.append(("Project Root", True, project_root))
+
+    # 8. Git info
     try:
         import subprocess
         git_hash = subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"],
+            ["git", "-C", project_root, "rev-parse", "--short", "HEAD"],
             stderr=subprocess.DEVNULL, text=True,
         ).strip()
         git_branch = subprocess.check_output(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            ["git", "-C", project_root, "rev-parse", "--abbrev-ref", "HEAD"],
             stderr=subprocess.DEVNULL, text=True,
         ).strip()
         checks.append(("Git", True, f"{git_branch}@{git_hash}"))
@@ -419,14 +423,18 @@ def update(branch: str | None) -> None:
     """Pull latest code from git and re-sync dependencies."""
     import subprocess
 
+    # Resolve project root from this package's location (works from any cwd)
+    project_root = str(Path(__file__).resolve().parent.parent)
+
     target_branch = branch or os.environ.get("MIYA_BRANCH", "main")
 
     console.print(f"[cyan]Updating from origin/{target_branch}...[/cyan]")
+    console.print(f"[dim]Project: {project_root}[/dim]")
 
     steps = [
-        ("Fetching", ["git", "fetch", "origin", target_branch]),
-        ("Resetting", ["git", "reset", "--hard", f"origin/{target_branch}"]),
-        ("Syncing deps", ["uv", "sync", "--extra", "dev"]),
+        ("Fetching", ["git", "-C", project_root, "fetch", "origin", target_branch]),
+        ("Resetting", ["git", "-C", project_root, "reset", "--hard", f"origin/{target_branch}"]),
+        ("Syncing deps", ["uv", "sync", "--extra", "dev", "--directory", project_root]),
     ]
 
     for label, cmd in steps:
@@ -438,7 +446,7 @@ def update(branch: str | None) -> None:
             console.print(f"[red]command not found: {cmd[0]}[/red]")
             raise SystemExit(1)
         except subprocess.CalledProcessError as exc:
-            console.print(f"[red]failed[/red]")
+            console.print("[red]failed[/red]")
             if exc.stderr:
                 console.print(f"  [dim]{exc.stderr.strip()}[/dim]")
             raise SystemExit(1)
@@ -446,7 +454,7 @@ def update(branch: str | None) -> None:
     # Show new version
     try:
         git_hash = subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"],
+            ["git", "-C", project_root, "rev-parse", "--short", "HEAD"],
             text=True,
         ).strip()
         console.print(f"\n[bold green]Updated to {git_hash}[/bold green]")

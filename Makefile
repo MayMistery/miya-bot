@@ -1,19 +1,19 @@
-.PHONY: install dev update test test-unit test-int test-e2e lint fmt check clean run
+.PHONY: install install-dev uninstall update test test-unit test-int test-e2e lint fmt check clean run
 
 UV := uv
 BRANCH ?= main
 
-install:            ## Install production deps
-	$(UV) sync
+install:            ## Install miya + create 'miya' command on PATH
+	./run.sh install
 
-dev:                ## Install with dev deps
-	$(UV) sync --extra dev
+install-dev:        ## Install with dev deps (pytest, ruff)
+	./run.sh install-dev
 
-update:             ## Pull latest from GitHub + re-sync deps
-	git fetch origin $(BRANCH)
-	git reset --hard origin/$(BRANCH)
-	$(UV) sync --extra dev
-	@echo "\033[32m[miya]\033[0m Updated to $$(git rev-parse --short HEAD)"
+uninstall:          ## Remove 'miya' command from PATH
+	./run.sh uninstall
+
+update:             ## Pull latest from git + re-sync deps
+	MIYA_BRANCH=$(BRANCH) ./run.sh update
 
 test:               ## Run all tests
 	$(UV) run pytest -v
