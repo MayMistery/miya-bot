@@ -55,18 +55,6 @@ class CryptoAttack:
     applicable: bool = True
     requirements: tuple[str, ...] = ()  # conditions needed
 
-    @classmethod
-    def rsa_attacks(cls) -> list[CryptoAttack]:
-        return [
-            cls(name="wiener", description="Small private exponent d via continued fractions"),
-            cls(name="hastad", description="Small public exponent with multiple ciphertexts"),
-            cls(name="coppersmith", description="Partial knowledge of plaintext/key"),
-            cls(name="fermat", description="Close prime factors p and q"),
-            cls(name="pollard_p1", description="Smooth prime factor p-1"),
-            cls(name="common_modulus", description="Same modulus, different exponents"),
-            cls(name="franklin_reiter", description="Related messages with linear relation"),
-            cls(name="bleichenbacher", description="PKCS#1 v1.5 padding oracle"),
-        ]
 
 
 @dataclass(frozen=True)
@@ -76,11 +64,6 @@ class PlainText:
     value: str
     encoding: str = "utf-8"  # or "hex", "base64"
     partial: bool = False
-
-    @property
-    def contains_flag(self) -> bool:
-        import re
-        return bool(re.search(r"[A-Za-z0-9_]+\{.+\}", self.value))
 
 
 # ═══════════════════════════════════════════════════════════════════

@@ -5,9 +5,6 @@ Orchestrates vulnerability scanning using Nuclei and other scanning tools.
 
 from __future__ import annotations
 
-from typing import Any
-
-from miya.shared.events import DomainEvent
 from miya.shared.ports import EventStorePort, VulnScannerPort
 from miya.oneday.scan.domain import ScanTask, ScanTarget, ScanResult
 

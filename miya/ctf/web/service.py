@@ -8,9 +8,9 @@ from miya.ctf.web.domain import (
     WebChallenge,
     WebVulnType,
 )
-from miya.ctf.shared.domain import Flag, SolveStrategy, WriteUp
+from miya.ctf.shared.domain import WriteUp
 from miya.ctf.shared.service import submit_challenge_flag
-from miya.shared.events import ChallengeSolved, DomainEvent, VulnerabilityFound
+from miya.shared.events import DomainEvent, VulnerabilityFound
 from miya.shared.ports import RepositoryPort, WebScannerPort
 
 

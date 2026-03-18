@@ -12,6 +12,7 @@ Inspired by MITRE ATT&CK framework and automated attack planning research.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, AsyncIterator
 
 from miya.shared.attack_graph import AttackGraph, GraphNode, GraphEdge
@@ -326,7 +327,6 @@ class AttackGraphTopology:
                 blackboard.apply(extracted)
 
             # Check if objective reached (via OBJECTIVE_REACHED or graph state)
-            import re
             obj_reached = bool(re.search(
                 r"OBJECTIVE_REACHED\s*:\s*yes", rebuild_output, re.IGNORECASE
             ))
@@ -365,8 +365,6 @@ class AttackGraphTopology:
 
         Returns (edge, agent_name). agent_name may be empty if not parsed.
         """
-        import re
-
         # Parse agent name
         agent_name = ""
         agent_match = re.search(r"AGENT\s*:\s*(\S+)", plan_output, re.IGNORECASE)
@@ -403,8 +401,6 @@ class AttackGraphTopology:
 
         Uses RESULT: line if present, falls back to heuristics.
         """
-        import re
-
         # Primary: look for RESULT: SUCCESS / RESULT: FAILURE
         match = re.search(r"RESULT\s*:\s*(SUCCESS|FAILURE)", exec_output, re.IGNORECASE)
         if match:

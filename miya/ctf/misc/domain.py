@@ -47,11 +47,6 @@ class HiddenData:
     encoding: str = "raw"  # "raw", "base64", "hex"
     confidence: float = 1.0
 
-    @property
-    def contains_flag(self) -> bool:
-        import re
-        return bool(re.search(r"[A-Za-z0-9_]+\{.+\}", self.data))
-
 
 # ═══════════════════════════════════════════════════════════════════
 #  Entities

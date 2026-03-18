@@ -9,6 +9,7 @@ Call chain: EntryPoint → DataFlow → Sink → PoC
 
 from __future__ import annotations
 
+from miya.zeroday.dataflow.service import _SINK_CWE_MAP
 from miya.zeroday.entrypoint.domain import CodeBase, EntryPoint, InputVector
 from miya.zeroday.dataflow.domain import TaintPath, TaintSession, TaintSink, TaintSource
 from miya.zeroday.sink.domain import Exploitability, SinkAnalysis, SinkPattern
@@ -103,25 +104,32 @@ def _source_pattern_for(iv: InputVector) -> str:
 #  DataFlow → Sink
 # ═══════════════════════════════════════════════════════════════════
 
-# Map dataflow sink types to CWE IDs for the sink context
-_SINK_TYPE_TO_CWE: dict[str, tuple[str, str]] = {
-    "sql_query": ("CWE-89", "SQL Injection"),
-    "command_exec": ("CWE-78", "OS Command Injection"),
-    "file_write": ("CWE-73", "External Control of File Name or Path"),
-    "file_read": ("CWE-22", "Path Traversal"),
-    "html_render": ("CWE-79", "Cross-site Scripting (XSS)"),
-    "ldap_query": ("CWE-90", "LDAP Injection"),
-    "xpath_query": ("CWE-643", "XPath Injection"),
-    "xml_parse": ("CWE-611", "XML External Entity (XXE)"),
-    "deserialization": ("CWE-502", "Deserialization of Untrusted Data"),
-    "redirect": ("CWE-601", "Open Redirect"),
-    "ssrf": ("CWE-918", "Server-Side Request Forgery (SSRF)"),
-    "path_traversal": ("CWE-22", "Path Traversal"),
-    "code_eval": ("CWE-94", "Code Injection"),
-    "template_render": ("CWE-1336", "Server-Side Template Injection (SSTI)"),
-    "log_injection": ("CWE-117", "Log Injection"),
-    "crypto_key": ("CWE-321", "Use of Hard-coded Cryptographic Key"),
+# CWE names for human-readable output (keyed by CWE ID)
+_CWE_NAMES: dict[str, str] = {
+    "CWE-89": "SQL Injection",
+    "CWE-78": "OS Command Injection",
+    "CWE-73": "External Control of File Name or Path",
+    "CWE-22": "Path Traversal",
+    "CWE-79": "Cross-site Scripting (XSS)",
+    "CWE-90": "LDAP Injection",
+    "CWE-643": "XPath Injection",
+    "CWE-611": "XML External Entity (XXE)",
+    "CWE-502": "Deserialization of Untrusted Data",
+    "CWE-601": "Open Redirect",
+    "CWE-918": "Server-Side Request Forgery (SSRF)",
+    "CWE-94": "Code Injection",
+    "CWE-1336": "Server-Side Template Injection (SSTI)",
+    "CWE-117": "Log Injection",
+    "CWE-321": "Use of Hard-coded Cryptographic Key",
 }
+
+# Derive from canonical _SINK_CWE_MAP (dataflow/service.py), enriched with names.
+# ACL-only entries (not in the dataflow map) are appended below.
+_SINK_TYPE_TO_CWE: dict[str, tuple[str, str]] = {
+    sink_type: (cwe_id, _CWE_NAMES.get(cwe_id, "Unknown"))
+    for sink_type, cwe_id in _SINK_CWE_MAP.items()
+}
+_SINK_TYPE_TO_CWE["crypto_key"] = ("CWE-321", "Use of Hard-coded Cryptographic Key")
 
 
 def taint_path_to_sink_analysis(

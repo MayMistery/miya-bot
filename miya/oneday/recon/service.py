@@ -6,9 +6,6 @@ service fingerprinting, and OSINT gathering.
 
 from __future__ import annotations
 
-from typing import Any
-
-from miya.shared.events import DomainEvent
 from miya.shared.ports import (
     EventStorePort,
     NetworkScannerPort,
@@ -17,7 +14,6 @@ from miya.shared.ports import (
 from miya.oneday.recon.domain import (
     ReconMission,
     Asset,
-    Fingerprint,
     ServiceBanner,
 )
 

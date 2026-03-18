@@ -10,9 +10,9 @@ from miya.ctf.pwn.domain import (
     Protection,
     PwnChallenge,
 )
-from miya.ctf.shared.domain import Flag, SolveStrategy, WriteUp
+from miya.ctf.shared.domain import WriteUp
 from miya.ctf.shared.service import submit_challenge_flag
-from miya.shared.events import ChallengeSolved, DomainEvent
+from miya.shared.events import DomainEvent
 from miya.shared.ports import DebuggerPort, DisassemblerPort, RepositoryPort
 
 

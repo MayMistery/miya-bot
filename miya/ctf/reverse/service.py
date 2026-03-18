@@ -8,9 +8,9 @@ from miya.ctf.reverse.domain import (
     Constraint,
     ReverseChallenge,
 )
-from miya.ctf.shared.domain import Flag, WriteUp
+from miya.ctf.shared.domain import WriteUp
 from miya.ctf.shared.service import submit_challenge_flag
-from miya.shared.events import ChallengeSolved, DomainEvent
+from miya.shared.events import DomainEvent
 from miya.shared.ports import DebuggerPort, DisassemblerPort, RepositoryPort
 
 
