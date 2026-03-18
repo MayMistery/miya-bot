@@ -1025,7 +1025,8 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
             mission_model = options.pop("_model_override", cfg["model"])
             mission_prompt = options.pop("_prompt", "")
 
-            kind_map = {"oneday": "service", "zeroday": "source", "ctf": "challenge"}
+            kind_map = {"oneday": "service", "zeroday": "source"}
+            target_kind = kind_map.get(mission_type, _detect_target_kind(target))
 
             panel_lines = [
                 f"[bold]Mission:[/bold]  {mission_type.upper()}",
@@ -1059,13 +1060,15 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
 
             # Create HITL operator queue
             import asyncio as _aio
+            import threading
             op_queue: _aio.Queue[str] = _aio.Queue()
+            loop = asyncio.get_event_loop()
 
             async def _execute_mission() -> MissionReport:
                 return await service.execute(
                     mission_type=mission_type,
                     target_uri=target,
-                    target_kind=kind_map[mission_type],
+                    target_kind=target_kind,
                     topology=topology,
                     model=mission_model,
                     prompt=mission_prompt,
@@ -1074,30 +1077,51 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                     **options,
                 )
 
+            # Thread-safe HITL input: one dedicated thread reads stdin,
+            # posts to an asyncio.Queue, and exits when stop_event is set.
+            hitl_queue: _aio.Queue[str] = _aio.Queue()
+            stop_input = threading.Event()
+
+            def _hitl_reader() -> None:
+                """Blocking input reader running in a dedicated thread."""
+                while not stop_input.is_set():
+                    try:
+                        text = session.prompt(
+                            HTML(
+                                '<ansiyellow><b>hitl</b></ansiyellow> '
+                                '<ansibrightblack>&gt;</ansibrightblack> '
+                            ),
+                        )
+                        text = text.strip()
+                        if text and not stop_input.is_set():
+                            loop.call_soon_threadsafe(hitl_queue.put_nowait, text)
+                    except (EOFError, KeyboardInterrupt):
+                        break
+
             try:
                 console.print("[dim]── Events (type to inject HITL, Ctrl+C to cancel) ──[/dim]")
                 mission_task = _aio.create_task(_execute_mission())
 
-                # HITL input loop — runs while mission is executing
+                # Start HITL reader in a daemon thread (exits with process)
+                input_thread = threading.Thread(
+                    target=_hitl_reader, daemon=True, name="hitl-reader",
+                )
+                input_thread.start()
+
+                # Main loop: transfer hitl_queue → op_queue, wait for mission
                 while not mission_task.done():
-                    try:
-                        hitl_input = await asyncio.wait_for(
-                            asyncio.get_event_loop().run_in_executor(
-                                None,
-                                lambda: session.prompt(
-                                    HTML('<ansiyellow><b>hitl</b></ansiyellow> <ansibrightblack>&gt;</ansibrightblack> '),
-                                ),
-                            ),
-                            timeout=1.0,
-                        )
-                        hitl_input = hitl_input.strip()
-                        if hitl_input:
-                            op_queue.put_nowait(hitl_input)
-                            console.print(f"  [yellow]📨 queued:[/yellow] {hitl_input[:80]}")
-                    except asyncio.TimeoutError:
-                        continue  # check if mission is done
-                    except EOFError:
-                        break
+                    # Wait a bit, then drain any HITL input
+                    await _aio.sleep(0.3)
+                    while not hitl_queue.empty():
+                        try:
+                            msg = hitl_queue.get_nowait()
+                            op_queue.put_nowait(msg)
+                            console.print(f"  [yellow]📨 queued:[/yellow] {msg[:80]}")
+                        except _aio.QueueEmpty:
+                            break
+
+                # Signal input thread to stop (it will exit on next prompt or EOFError)
+                stop_input.set()
 
                 report = await mission_task
                 console.print(f"[dim]── {len(live_events)} events ──[/dim]")
@@ -1109,6 +1133,7 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
 
             except KeyboardInterrupt:
                 console.print("\n[yellow]Mission cancelled by user.[/yellow]")
+                stop_input.set()
                 if not mission_task.done():
                     mission_task.cancel()
                     try:
@@ -1117,6 +1142,7 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                         pass
             except Exception as e:
                 console.print(f"[bold red]Error:[/bold red] {e}")
+                stop_input.set()
 
             console.print()
 

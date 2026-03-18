@@ -225,6 +225,38 @@ class OODATopology:
             "REFLECT": "evaluating results",
         }
 
+        # Helper: drain HITL queue, emit events, return operator suffix
+        def _drain_hitl() -> tuple[list[OperatorMessage], str]:
+            """Non-blocking drain of operator_queue.
+
+            Returns (events_to_yield, operator_text_suffix).
+            Caller must yield the events and apply them to blackboard.
+            """
+            msgs: list[str] = []
+            if operator_queue is not None:
+                while not operator_queue.empty():
+                    try:
+                        msgs.append(operator_queue.get_nowait())
+                    except asyncio.QueueEmpty:
+                        break
+            if not msgs:
+                return [], operator_prompt
+
+            events = []
+            for m in msgs:
+                logger.info("📨 Operator HITL: %s", m[:120])
+                events.append(OperatorMessage(
+                    aggregate_id=mission.id,
+                    content=m,
+                    mission=mission.mission_type.value,
+                ))
+            suffix = operator_prompt + (
+                "\n\n## Operator Live Directives\n"
+                + "\n".join(f"- {m}" for m in msgs)
+                + "\n"
+            )
+            return events, suffix
+
         for iteration in range(1, self._max_iterations + 1):
             logger.info(
                 "━━━━ OODA #%d/%d ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -233,36 +265,12 @@ class OODATopology:
             if previous_insights:
                 logger.info("  focus: %s", previous_insights[:120])
 
-            # ── Drain HITL queue ──────────────────────────────────
-            hitl_messages: list[str] = []
-            if operator_queue is not None:
-                while not operator_queue.empty():
-                    try:
-                        msg = operator_queue.get_nowait()
-                        hitl_messages.append(msg)
-                    except asyncio.QueueEmpty:
-                        break
-            if hitl_messages:
-                for msg in hitl_messages:
-                    logger.info("📨 Operator HITL: %s", msg[:120])
-                    ev = OperatorMessage(
-                        aggregate_id=mission.id,
-                        content=msg,
-                        mission=mission.mission_type.value,
-                    )
-                    yield ev
-                    blackboard.apply(ev)
-
-            # Build per-iteration operator context (initial + HITL)
-            _iter_operator = operator_prompt
-            if hitl_messages:
-                _iter_operator += (
-                    "\n\n## Operator Live Directives\n"
-                    + "\n".join(f"- {m}" for m in hitl_messages)
-                    + "\n"
-                )
-
             # ── OBSERVE ───────────────────────────────────────────
+            hitl_events, op_suffix = _drain_hitl()
+            for ev in hitl_events:
+                yield ev
+                blackboard.apply(ev)
+
             phase_event = PhaseTransition(
                 from_phase=OODAPhase.REFLECT.value if iteration > 1 else "",
                 to_phase=OODAPhase.OBSERVE.value,
@@ -279,7 +287,7 @@ class OODATopology:
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
                 agent_descriptions=agent_desc,
-            ) + _iter_operator + EVENT_INSTRUCTION
+            ) + op_suffix + EVENT_INSTRUCTION
 
             observe_output = await self._run_coordinator(
                 observe_prompt, mission, agents, blackboard, phase_label="OBSERVE"
@@ -290,6 +298,11 @@ class OODATopology:
                 blackboard.apply(extracted)
 
             # ── ORIENT ────────────────────────────────────────────
+            hitl_events, op_suffix = _drain_hitl()
+            for ev in hitl_events:
+                yield ev
+                blackboard.apply(ev)
+
             yield PhaseTransition(
                 from_phase=OODAPhase.OBSERVE.value,
                 to_phase=OODAPhase.ORIENT.value,
@@ -302,7 +315,7 @@ class OODATopology:
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
                 observe_output=observe_output[:4000],
-            ) + _iter_operator + EVENT_INSTRUCTION
+            ) + op_suffix + EVENT_INSTRUCTION
             orient_output = await self._run_coordinator(
                 orient_prompt, mission, agents, blackboard, phase_label="ORIENT"
             )
@@ -312,6 +325,11 @@ class OODATopology:
                 blackboard.apply(extracted)
 
             # ── DECIDE ────────────────────────────────────────────
+            hitl_events, op_suffix = _drain_hitl()
+            for ev in hitl_events:
+                yield ev
+                blackboard.apply(ev)
+
             yield PhaseTransition(
                 from_phase=OODAPhase.ORIENT.value,
                 to_phase=OODAPhase.DECIDE.value,
@@ -324,12 +342,17 @@ class OODATopology:
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
                 orient_output=orient_output[:4000],
-            ) + _iter_operator
+            ) + op_suffix
             decide_output = await self._run_coordinator(
                 decide_prompt, mission, agents, blackboard, phase_label="DECIDE"
             )
 
             # ── ACT ───────────────────────────────────────────────
+            hitl_events, op_suffix = _drain_hitl()
+            for ev in hitl_events:
+                yield ev
+                blackboard.apply(ev)
+
             yield PhaseTransition(
                 from_phase=OODAPhase.DECIDE.value,
                 to_phase=OODAPhase.ACT.value,
@@ -343,7 +366,7 @@ class OODATopology:
                 mission_description=mission_desc,
                 decide_output=decide_output[:4000],
                 agent_descriptions=agent_desc,
-            ) + _iter_operator + EVENT_INSTRUCTION
+            ) + op_suffix + EVENT_INSTRUCTION
             act_output = await self._run_coordinator(
                 act_prompt, mission, agents, blackboard, phase_label="ACT"
             )
@@ -353,6 +376,11 @@ class OODATopology:
                 blackboard.apply(extracted)
 
             # ── REFLECT ───────────────────────────────────────────
+            hitl_events, op_suffix = _drain_hitl()
+            for ev in hitl_events:
+                yield ev
+                blackboard.apply(ev)
+
             yield PhaseTransition(
                 from_phase=OODAPhase.ACT.value,
                 to_phase=OODAPhase.REFLECT.value,
@@ -366,7 +394,7 @@ class OODATopology:
                 mission_description=mission_desc,
                 act_output=act_output[:4000],
                 previous_insights=previous_insights or "(first iteration)",
-            )
+            ) + op_suffix
             reflect_output = await self._run_coordinator(
                 reflect_prompt, mission, agents, blackboard, phase_label="REFLECT"
             )

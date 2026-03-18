@@ -221,32 +221,39 @@ class AttackGraphTopology:
                 yield extracted
                 blackboard.apply(extracted)
 
+        # Helper: drain HITL queue, emit events, return operator suffix
+        def _drain_hitl() -> tuple[list[OperatorMessage], str]:
+            msgs: list[str] = []
+            if operator_queue is not None:
+                while not operator_queue.empty():
+                    try:
+                        msgs.append(operator_queue.get_nowait())
+                    except asyncio.QueueEmpty:
+                        break
+            if not msgs:
+                return [], operator_prompt
+            events = []
+            for m in msgs:
+                logger.info("📨 Operator HITL: %s", m[:120])
+                events.append(OperatorMessage(
+                    aggregate_id=mission.id, content=m,
+                    mission=mission.mission_type.value,
+                ))
+            suffix = operator_prompt + (
+                "\n\n## Operator Live Directives\n"
+                + "\n".join(f"- {m}" for m in msgs) + "\n"
+            )
+            return events, suffix
+
         # ── Phase 2: Plan-Execute Loop ────────────────────────────
         for step in range(1, self._max_steps + 1):
             logger.info("━━━━ AG step %d/%d ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", step, self._max_steps)
 
             # ── Drain HITL queue ──────────────────────────────────
-            hitl_extra = ""
-            if operator_queue is not None:
-                hitl_msgs: list[str] = []
-                while not operator_queue.empty():
-                    try:
-                        hitl_msgs.append(operator_queue.get_nowait())
-                    except asyncio.QueueEmpty:
-                        break
-                if hitl_msgs:
-                    for m in hitl_msgs:
-                        logger.info("📨 Operator HITL: %s", m[:120])
-                        ev = OperatorMessage(
-                            aggregate_id=mission.id, content=m,
-                            mission=mission.mission_type.value,
-                        )
-                        yield ev
-                        blackboard.apply(ev)
-                    hitl_extra = (
-                        "\n\n## Operator Live Directives\n"
-                        + "\n".join(f"- {m}" for m in hitl_msgs) + "\n"
-                    )
+            hitl_events, op_suffix = _drain_hitl()
+            for ev in hitl_events:
+                yield ev
+                blackboard.apply(ev)
 
             # Check if we have unexplored edges
             unexplored = graph.get_unexplored_edges()
@@ -296,7 +303,7 @@ class AttackGraphTopology:
                     for i, p in enumerate(all_paths[:5])
                 ) or "No paths available",
                 mission_description=mission_desc,
-            ) + operator_prompt + hitl_extra
+            ) + op_suffix
 
             plan_output = await self._run_agent(plan_prompt, mission, agents, blackboard)
 
@@ -328,7 +335,7 @@ class AttackGraphTopology:
                 agent_name=selected_agent or next(iter(agents), ""),
                 blackboard_context=blackboard.to_context_prompt(),
                 preparation=plan_output[:3000],
-            ) + operator_prompt + hitl_extra + EVENT_INSTRUCTION
+            ) + op_suffix + EVENT_INSTRUCTION
 
             exec_output = await self._run_agent(exec_prompt, mission, agents, blackboard)
 
@@ -347,12 +354,17 @@ class AttackGraphTopology:
                 graph.update_edge_status(selected_edge.id, "failed")
 
             # ── REBUILD — analyze result and update graph ─────────
+            hitl_events, op_suffix = _drain_hitl()
+            for ev in hitl_events:
+                yield ev
+                blackboard.apply(ev)
+
             rebuild_prompt = _REBUILD_PROMPT.format(
                 technique=selected_edge.label,
                 result=exec_output[:3000],
                 graph_summary=graph.summary(),
                 blackboard_context=blackboard.to_context_prompt(),
-            )
+            ) + op_suffix
             rebuild_output = await self._run_agent(rebuild_prompt, mission, agents, blackboard)
 
             # Extract events from rebuild analysis

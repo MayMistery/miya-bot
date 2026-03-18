@@ -18,7 +18,6 @@ from typing import Any, AsyncIterator, Callable, Protocol, runtime_checkable
 from claude_agent_sdk.types import (
     AssistantMessage,
     ResultMessage,
-    SystemMessage,
     TextBlock,
     ThinkingBlock,
     ToolResultBlock,
@@ -379,6 +378,7 @@ async def run_sdk_coordinator(
         ] + [f"mcp__{name}__*" for name in mcp_names],
         permission_mode="acceptEdits",
         max_turns=cfg["max_turns"],
+        cwd=os.getcwd(),
         env=_sdk_env(),
     )
 
@@ -438,10 +438,12 @@ async def run_sdk_coordinator(
 
         # ── ResultMessage: final stats from SDK ──
         elif isinstance(message, ResultMessage):
-            if logger.isEnabledFor(TRACE) and message.usage:
-                logger.log(TRACE, "%s⏱ SDK: %dms api, cost=$%.4f",
-                           tag, message.duration_api_ms,
-                           message.total_cost_usd or 0)
+            if logger.isEnabledFor(TRACE):
+                api_ms = getattr(message, "duration_api_ms", 0) or 0
+                cost = getattr(message, "total_cost_usd", 0) or 0
+                turns = getattr(message, "num_turns", 0) or 0
+                logger.log(TRACE, "%s⏱ SDK: %dms, %d turns, $%.4f",
+                           tag, api_ms, turns, cost)
 
     elapsed = time.monotonic() - t0
     logger.debug(
