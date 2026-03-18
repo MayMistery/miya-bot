@@ -206,8 +206,21 @@ class OODATopology:
         act_output = ""
         previous_insights = ""
 
+        _PHASE_DESC = {
+            "OBSERVE": "gathering intelligence",
+            "ORIENT":  "analyzing findings",
+            "DECIDE":  "planning next action",
+            "ACT":     "executing plan",
+            "REFLECT": "evaluating results",
+        }
+
         for iteration in range(1, self._max_iterations + 1):
-            logger.info(f"OODA iteration {iteration}/{self._max_iterations}")
+            logger.info(
+                "━━━━ OODA #%d/%d ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                iteration, self._max_iterations,
+            )
+            if previous_insights:
+                logger.info("  focus: %s", previous_insights[:120])
 
             # ── OBSERVE ───────────────────────────────────────────
             phase_event = PhaseTransition(
@@ -221,6 +234,7 @@ class OODATopology:
             yield phase_event
             blackboard.apply(phase_event)
 
+            logger.info("▶ OBSERVE — %s", _PHASE_DESC["OBSERVE"])
             observe_prompt = _OBSERVE_PROMPT.format(
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
@@ -228,9 +242,8 @@ class OODATopology:
             ) + EVENT_INSTRUCTION
 
             observe_output = await self._run_coordinator(
-                observe_prompt, mission, agents, blackboard
+                observe_prompt, mission, agents, blackboard, phase_label="OBSERVE"
             )
-            logger.debug("OBSERVE output (%d chars): %.500s", len(observe_output), observe_output)
 
             for extracted in extract_events_from_output(observe_output, mission):
                 yield extracted
@@ -244,15 +257,15 @@ class OODATopology:
                 mission=mission.mission_type.value,
             )
 
+            logger.info("▶ ORIENT — %s", _PHASE_DESC["ORIENT"])
             orient_prompt = _ORIENT_PROMPT.format(
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
                 observe_output=observe_output[:4000],
             ) + EVENT_INSTRUCTION
             orient_output = await self._run_coordinator(
-                orient_prompt, mission, agents, blackboard
+                orient_prompt, mission, agents, blackboard, phase_label="ORIENT"
             )
-            logger.debug("ORIENT output (%d chars): %.500s", len(orient_output), orient_output)
 
             for extracted in extract_events_from_output(orient_output, mission):
                 yield extracted
@@ -266,15 +279,15 @@ class OODATopology:
                 mission=mission.mission_type.value,
             )
 
+            logger.info("▶ DECIDE — %s", _PHASE_DESC["DECIDE"])
             decide_prompt = _DECIDE_PROMPT.format(
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
                 orient_output=orient_output[:4000],
             )
             decide_output = await self._run_coordinator(
-                decide_prompt, mission, agents, blackboard
+                decide_prompt, mission, agents, blackboard, phase_label="DECIDE"
             )
-            logger.debug("DECIDE output (%d chars): %.500s", len(decide_output), decide_output)
 
             # ── ACT ───────────────────────────────────────────────
             yield PhaseTransition(
@@ -284,6 +297,7 @@ class OODATopology:
                 mission=mission.mission_type.value,
             )
 
+            logger.info("▶ ACT — %s", _PHASE_DESC["ACT"])
             act_prompt = _ACT_PROMPT.format(
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
@@ -291,9 +305,8 @@ class OODATopology:
                 agent_descriptions=agent_desc,
             ) + EVENT_INSTRUCTION
             act_output = await self._run_coordinator(
-                act_prompt, mission, agents, blackboard
+                act_prompt, mission, agents, blackboard, phase_label="ACT"
             )
-            logger.debug("ACT output (%d chars): %.500s", len(act_output), act_output)
 
             for extracted in extract_events_from_output(act_output, mission):
                 yield extracted
@@ -307,6 +320,7 @@ class OODATopology:
                 mission=mission.mission_type.value,
             )
 
+            logger.info("▶ REFLECT — %s", _PHASE_DESC["REFLECT"])
             reflect_prompt = _REFLECT_PROMPT.format(
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
@@ -314,24 +328,30 @@ class OODATopology:
                 previous_insights=previous_insights or "(first iteration)",
             )
             reflect_output = await self._run_coordinator(
-                reflect_prompt, mission, agents, blackboard
+                reflect_prompt, mission, agents, blackboard, phase_label="REFLECT"
             )
-            logger.debug("REFLECT output (%d chars): %.500s", len(reflect_output), reflect_output)
 
             decision = self._parse_reflection(reflect_output)
             previous_insights = decision.get("next_focus", "") or decision.get("insights", "")
+            d = decision.get("decision", "continue")
+            _DECISION_ICONS = {"complete": "✓", "pivot": "↻", "continue": "⟳"}
+            logger.info(
+                "%s %s — %s",
+                _DECISION_ICONS.get(d, "?"), d.upper(),
+                (decision.get("assessment", "") or decision.get("insights", ""))[:120],
+            )
 
             reflection_event = ReflectionCompleted(
                 aggregate_id=mission.id,
                 assessment=decision.get("assessment", ""),
-                decision=decision.get("decision", "continue"),
+                decision=d,
                 insights=decision.get("insights", ""),
                 mission=mission.mission_type.value,
             )
             yield reflection_event
             blackboard.apply(reflection_event)
 
-            if decision.get("decision") == "complete":
+            if d == "complete":
                 break
         else:
             # Loop exhausted without explicit completion
@@ -355,6 +375,7 @@ class OODATopology:
         mission: Mission,
         agents: dict[str, AgentHandle],
         blackboard: Blackboard,
+        phase_label: str = "",
     ) -> str:
         """Run the coordinator agent with a prompt and collect text output."""
         all_mcp_names: set[str] = set()
@@ -375,7 +396,9 @@ class OODATopology:
             )
 
         # Fallback: use shared Claude Agent SDK coordinator
-        return await run_sdk_coordinator(prompt, agent_defs, list(all_mcp_names))
+        return await run_sdk_coordinator(
+            prompt, agent_defs, list(all_mcp_names), phase_label=phase_label
+        )
 
     @staticmethod
     def _parse_reflection(output: str) -> dict[str, str]:

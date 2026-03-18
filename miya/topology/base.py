@@ -13,9 +13,14 @@ import os
 import re
 from typing import Any, AsyncIterator, Callable, Protocol, runtime_checkable
 
+import time
+
 from claude_agent_sdk.types import (
     AssistantMessage,
+    ResultMessage,
+    SystemMessage,
     TextBlock,
+    ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
@@ -302,10 +307,42 @@ def _truncate_for_log(text: str, max_len: int = 200) -> str:
     return text[:max_len] + f"... ({len(text)} chars)"
 
 
+def _format_tool_input(tool_input: dict[str, Any] | Any, max_len: int = 400) -> str:
+    """Format tool input for log display, highlighting key fields."""
+    if isinstance(tool_input, dict):
+        # For Bash, show command directly; for others, show compact JSON
+        if "command" in tool_input:
+            return _truncate_for_log(tool_input["command"], max_len)
+        if "pattern" in tool_input:
+            path = tool_input.get("path", "")
+            return f"{tool_input['pattern']}" + (f" in {path}" if path else "")
+        if "file_path" in tool_input:
+            return _truncate_for_log(str(tool_input["file_path"]), max_len)
+        if "query" in tool_input:
+            return _truncate_for_log(str(tool_input["query"]), max_len)
+        if "url" in tool_input:
+            return _truncate_for_log(str(tool_input["url"]), max_len)
+        return _truncate_for_log(json.dumps(tool_input, default=str), max_len)
+    return _truncate_for_log(str(tool_input), max_len)
+
+
+def _format_tool_result_content(block: ToolResultBlock) -> str:
+    """Extract displayable text from a ToolResultBlock."""
+    content = block.content or ""
+    if isinstance(content, list):
+        content = " ".join(
+            c.get("text", str(c)) if isinstance(c, dict) else str(c)
+            for c in content
+        )
+    return str(content)
+
+
 async def run_sdk_coordinator(
     prompt: str,
     agent_defs: dict[str, Any],
     mcp_names: list[str],
+    *,
+    phase_label: str = "",
 ) -> str:
     """Shared coordinator execution via Claude Agent SDK.
 
@@ -314,7 +351,7 @@ async def run_sdk_coordinator(
 
     Logging behaviour (controlled via ``-v`` / ``-vv``):
         TRACE  — every tool_use call (name + input), tool_result, and text block
-        DEBUG  — prompt summary and total output length
+        DEBUG  — prompt summary, per-phase summary with timing
     """
     from claude_agent_sdk import query, ClaudeAgentOptions, AgentDefinition
     from miya.infra.mcp_registry import MCPRegistry
@@ -340,66 +377,71 @@ async def run_sdk_coordinator(
         env=_sdk_env(),
     )
 
-    logger.debug("SDK coordinator prompt (%d chars): %s", len(prompt), _truncate_for_log(prompt, 300))
+    tag = f"[{phase_label}] " if phase_label else ""
+    logger.debug("%sprompt (%d chars): %s", tag, len(prompt), _truncate_for_log(prompt, 300))
 
     output_parts: list[str] = []
     turn_count = 0
     tool_use_count = 0
+    t0 = time.monotonic()
+    current_tool: str | None = None  # track which tool is running
 
     async for message in query(prompt=prompt, options=options):
         turn_count += 1
 
-        # ── AssistantMessage: contains text, tool_use, tool_result blocks ──
+        # ── AssistantMessage: text, thinking, tool_use blocks ──
         if isinstance(message, AssistantMessage):
             for block in message.content:
                 if isinstance(block, TextBlock):
                     output_parts.append(block.text)
                     if logger.isEnabledFor(TRACE):
-                        logger.log(TRACE, "text_block: %s", _truncate_for_log(block.text, 500))
+                        logger.log(TRACE, "%s▍ %s", tag, _truncate_for_log(block.text, 500))
+
+                elif isinstance(block, ThinkingBlock):
+                    if logger.isEnabledFor(TRACE):
+                        logger.log(TRACE, "%s💭 %s", tag, _truncate_for_log(block.thinking, 300))
 
                 elif isinstance(block, ToolUseBlock):
                     tool_use_count += 1
+                    current_tool = block.name
                     if logger.isEnabledFor(TRACE):
-                        input_str = json.dumps(block.input, default=str) if isinstance(block.input, dict) else str(block.input)
                         logger.log(
-                            TRACE,
-                            "tool_use  #%d: %s(%s)",
-                            tool_use_count, block.name, _truncate_for_log(input_str, 400),
+                            TRACE, "%s→ #%d %s: %s",
+                            tag, tool_use_count, block.name,
+                            _format_tool_input(block.input),
                         )
 
                 elif isinstance(block, ToolResultBlock):
                     if logger.isEnabledFor(TRACE):
-                        content = block.content or ""
-                        if isinstance(content, list):
-                            content = " ".join(
-                                c.get("text", str(c)) if isinstance(c, dict) else str(c)
-                                for c in content
-                            )
+                        result_text = _format_tool_result_content(block)
+                        error_mark = " ✗" if block.is_error else ""
                         logger.log(
-                            TRACE,
-                            "tool_result: %s",
-                            _truncate_for_log(str(content), 400),
+                            TRACE, "%s← %s%s (%d chars)",
+                            tag, current_tool or "result", error_mark, len(result_text),
                         )
 
-        # ── UserMessage: tool results come back as UserMessage ──
+        # ── UserMessage: tool results come back here ──
         elif isinstance(message, UserMessage) and isinstance(message.content, list):
             for block in message.content:
                 if isinstance(block, ToolResultBlock) and logger.isEnabledFor(TRACE):
-                    content = block.content or ""
-                    if isinstance(content, list):
-                        content = " ".join(
-                            c.get("text", str(c)) if isinstance(c, dict) else str(c)
-                            for c in content
-                        )
+                    result_text = _format_tool_result_content(block)
+                    error_mark = " ✗" if block.is_error else ""
                     logger.log(
-                        TRACE,
-                        "tool_result: %s",
-                        _truncate_for_log(str(content), 400),
+                        TRACE, "%s← %s%s (%d chars)",
+                        tag, current_tool or "result", error_mark, len(result_text),
                     )
 
+        # ── ResultMessage: final stats from SDK ──
+        elif isinstance(message, ResultMessage):
+            if logger.isEnabledFor(TRACE) and message.usage:
+                logger.log(TRACE, "%s⏱ SDK: %dms api, cost=$%.4f",
+                           tag, message.duration_api_ms,
+                           message.total_cost_usd or 0)
+
+    elapsed = time.monotonic() - t0
     logger.debug(
-        "SDK coordinator done: %d turns, %d tool calls, %d chars output",
-        turn_count, tool_use_count, sum(len(p) for p in output_parts),
+        "%s✓ done: %d turns, %d tools, %d chars, %.1fs",
+        tag, turn_count, tool_use_count, sum(len(p) for p in output_parts), elapsed,
     )
 
     return "\n".join(output_parts)

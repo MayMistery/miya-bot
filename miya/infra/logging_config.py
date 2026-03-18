@@ -66,11 +66,17 @@ class _HumanFormatter(logging.Formatter):
     }
     _RESET = "\033[0m"
 
+    @staticmethod
+    def _short_name(name: str) -> str:
+        """Shorten logger name: 'miya.topology.ooda' → 'topology.ooda'."""
+        return name.removeprefix("miya.")
+
     def format(self, record: logging.LogRecord) -> str:
         color = self._COLORS.get(record.levelname, "")
         ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
         msg = record.getMessage()
-        base = f"{color}{ts} {record.levelname:<8s}{self._RESET} [{record.name}] {msg}"
+        name = self._short_name(record.name)
+        base = f"{color}{ts} {record.levelname:<8s}{self._RESET} [{name}] {msg}"
         if record.exc_info and record.exc_info[1]:
             base += "\n" + self.formatException(record.exc_info)
         return base
