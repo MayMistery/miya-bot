@@ -7,6 +7,7 @@ executes the mission, and produces a report.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -184,9 +185,16 @@ class MissionService:
         target_kind: str = "service",
         topology: str = "ooda",
         model: str = "opus",
+        on_event: Callable[[DomainEvent], None] | None = None,
         **options: Any,
     ) -> MissionReport:
-        """Execute a mission and return a report."""
+        """Execute a mission and return a report.
+
+        Args:
+            on_event: Optional callback invoked for each domain event as it
+                      is produced.  Used by the interactive REPL to render
+                      a live event feed.
+        """
 
         if isinstance(mission_type, str):
             mission_type = MissionType(mission_type)
@@ -232,8 +240,8 @@ class MissionService:
             ):
                 collected_events.append(event)
                 await self._event_store.append([event])
-                # Note: blackboard.apply() is handled by the topology itself
-                # to ensure state is up-to-date for prompt generation between phases.
+                if on_event is not None:
+                    on_event(event)
 
             mission.complete()
         except Exception as e:

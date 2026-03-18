@@ -11,8 +11,15 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 import sys
+from pathlib import Path
 from typing import Any
+
+from dotenv import load_dotenv
+
+# Load .env before anything reads env vars
+load_dotenv()
 
 DEFAULT_MODEL = os.environ.get("MIYA_MODEL", "opus")
 
@@ -356,50 +363,122 @@ async def _run_mission(
 
 
 async def _interactive_loop(db: str, model: str = "opus") -> None:
-    from miya.mission.service import MissionService
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.completion import WordCompleter
+    from prompt_toolkit.history import FileHistory
+    from prompt_toolkit.formatted_text import HTML
+
+    from miya.mission.service import MissionService, MissionReport
     from miya.shared.blackboard import Blackboard
+    from miya.shared.events import DomainEvent
 
     show_banner()
     console.print(make_mission_table())
     console.print()
 
-    # Runtime state
+    # ── Runtime state ──────────────────────────────────────────────
     cfg = {"model": model, "topology": "ooda"}
-    mission_history: list[Any] = []
+    mission_history: list[MissionReport] = []
 
-    def _prompt() -> str:
-        return f"[bold red]miya[/bold red] [dim]({cfg['model']})[/dim] [dim]>[/dim] "
+    # ── Prompt toolkit session with history + completion ──────────
+    history_path = Path.home() / ".miya_history"
+    completer = WordCompleter(
+        [
+            # missions
+            "oneday", "zeroday", "ctf",
+            # repl
+            "set", "status", "history", "events", "blackboard",
+            "report", "export", "replay", "info", "clear", "help",
+            "exit", "quit",
+            # options
+            "--topology", "--category", "--language", "--source", "--service",
+            # set targets
+            "model", "topology", "api_key", "base_url",
+            # values
+            "opus", "sonnet", "haiku", "ooda", "attack_graph",
+            # categories
+            "web", "pwn", "crypto", "reverse", "misc",
+        ],
+        ignore_case=True,
+    )
+    session: PromptSession[str] = PromptSession(
+        history=FileHistory(str(history_path)),
+        completer=completer,
+        complete_while_typing=False,
+    )
 
+    def _prompt_html() -> HTML:
+        return HTML(
+            f'<ansired><b>miya</b></ansired> '
+            f'<ansibrightblack>({cfg["model"]})</ansibrightblack> '
+            f'<ansibrightblack>&gt;</ansibrightblack> '
+        )
+
+    # ── Event severity coloring ───────────────────────────────────
+    _EVENT_STYLES: dict[str, str] = {
+        "ExploitSucceeded": "bold green",
+        "ExploitFailed": "red",
+        "VulnerabilityFound": "bold yellow",
+        "CVEMatched": "bold yellow",
+        "ExploitAttempted": "cyan",
+        "AssetDiscovered": "blue",
+        "ChallengeSolved": "bold green",
+        "PoCValidated": "bold green",
+        "SinkConfirmed": "bold yellow",
+        "PrivilegeEscalated": "bold magenta",
+        "MissionFailed": "bold red",
+        "PhaseTransition": "dim",
+    }
+
+    def _event_detail(ev: DomainEvent) -> str:
+        for attr in ("cve_id", "vulnerability", "host", "ip", "software",
+                      "title", "challenge_name", "technique", "phase"):
+            val = getattr(ev, attr, None)
+            if val:
+                return str(val)
+        return ""
+
+    # ── Help ──────────────────────────────────────────────────────
     def _print_help() -> None:
         console.print(make_mission_table())
         console.print(make_topology_table())
         console.print()
-        help_table = Table(title="REPL Commands", box=box.SIMPLE, title_style="bold cyan")
-        help_table.add_column("Command", style="bold green", width=40)
-        help_table.add_column("Description", style="white")
-        help_table.add_row("oneday <target> [opts]", "Exploit known CVEs")
-        help_table.add_row("zeroday <target> [opts]", "Discover 0-day vulnerabilities")
-        help_table.add_row("ctf <target> [opts]", "Solve CTF challenge")
-        help_table.add_row("", "")
-        help_table.add_row("[dim]Options:[/dim]", "")
-        help_table.add_row("  --topology/-T <topo>", "ooda or attack_graph")
-        help_table.add_row("  --category/-c <cat>", "CTF category (web/pwn/crypto/...)")
-        help_table.add_row("  --language/-l <lang>", "Language hint for 0-day")
-        help_table.add_row("  --source/-s <path>", "Source code path (oneday white-box)")
-        help_table.add_row("  --service <url>", "Live service URL (zeroday PoC)")
-        help_table.add_row("", "")
-        help_table.add_row("[dim]REPL:[/dim]", "")
-        help_table.add_row("set model <model>", "Switch model (opus/sonnet/haiku)")
-        help_table.add_row("set topology <topo>", "Set default topology")
-        help_table.add_row("status", "Show current config and session stats")
-        help_table.add_row("history", "Show mission history")
-        help_table.add_row("events", "Show recent domain events")
-        help_table.add_row("blackboard", "Show current blackboard state")
-        help_table.add_row("info", "Show MCP server info")
-        help_table.add_row("clear", "Clear screen")
-        help_table.add_row("exit/quit/q", "Exit interactive mode")
-        console.print(help_table)
+        t = Table(title="REPL Commands", box=box.SIMPLE, title_style="bold cyan")
+        t.add_column("Command", style="bold green", width=40)
+        t.add_column("Description", style="white")
+        t.add_row("oneday <target> [opts]", "Exploit known CVEs")
+        t.add_row("zeroday <target> [opts]", "Discover 0-day vulnerabilities")
+        t.add_row("ctf <target> [opts]", "Solve CTF challenge")
+        t.add_row("", "")
+        t.add_row("[dim]Mission options:[/dim]", "")
+        t.add_row("  --topology/-T <topo>", "ooda or attack_graph")
+        t.add_row("  --category/-c <cat>", "CTF: web/pwn/crypto/reverse/misc")
+        t.add_row("  --language/-l <lang>", "Language hint (zeroday)")
+        t.add_row("  --source/-s <path>", "Source code path (oneday white-box)")
+        t.add_row('  --service <url>', "Live service URL (zeroday PoC)")
+        t.add_row("", "")
+        t.add_row("[dim]Session:[/dim]", "")
+        t.add_row("set model <m>", "Switch model (opus/sonnet/haiku)")
+        t.add_row("set topology <t>", "Set default topology")
+        t.add_row("set api_key <key>", "Set Anthropic API key")
+        t.add_row("set base_url <url>", "Set Anthropic base URL")
+        t.add_row("status", "Current config & session stats")
+        t.add_row("", "")
+        t.add_row("[dim]Review:[/dim]", "")
+        t.add_row("history", "Mission history")
+        t.add_row("report [n]", "Re-view report #n (default: last)")
+        t.add_row("export [n] <file>", "Export report to file")
+        t.add_row("replay [n]", "Re-run mission #n with same params")
+        t.add_row("events [n]", "Last n domain events (default: 20)")
+        t.add_row("blackboard", "Current blackboard state")
+        t.add_row("", "")
+        t.add_row("[dim]Other:[/dim]", "")
+        t.add_row("info", "MCP server info")
+        t.add_row("clear", "Clear screen")
+        t.add_row("exit / quit / q / Ctrl+D", "Exit")
+        console.print(t)
 
+    # ── Status ────────────────────────────────────────────────────
     def _print_status(event_count: int) -> None:
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         key_status = f"[green]set ({api_key[:8]}...)[/green]" if api_key else "[red]not set[/red]"
@@ -417,6 +496,72 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
             border_style="cyan",
         ))
 
+    # ── Parse mission args (shlex for quoted paths) ───────────────
+    def _parse_mission_args(raw: str) -> tuple[str, str, str, dict[str, Any]] | None:
+        try:
+            parts = shlex.split(raw)
+        except ValueError as e:
+            console.print(f"[red]Parse error: {e}[/red]")
+            return None
+
+        if len(parts) < 2:
+            console.print("[yellow]Usage: <mission> <target> [options][/yellow]")
+            return None
+
+        mission_type = parts[0]
+        target = parts[1]
+        topology = cfg["topology"]
+        options: dict[str, Any] = {}
+
+        i = 2
+        while i < len(parts):
+            if parts[i] in ("--topology", "-T") and i + 1 < len(parts):
+                topology = parts[i + 1]
+                i += 2
+            elif parts[i] in ("--category", "-c") and i + 1 < len(parts):
+                options["category"] = parts[i + 1]
+                i += 2
+            elif parts[i] in ("--language", "-l") and i + 1 < len(parts):
+                options["language"] = parts[i + 1]
+                i += 2
+            elif parts[i] in ("--source", "-s") and i + 1 < len(parts):
+                options["source_path"] = parts[i + 1]
+                i += 2
+            elif parts[i] == "--service" and i + 1 < len(parts):
+                options["service_url"] = parts[i + 1]
+                i += 2
+            elif parts[i] in ("--model", "-m") and i + 1 < len(parts):
+                # per-mission model override
+                options["_model_override"] = parts[i + 1]
+                i += 2
+            else:
+                console.print(f"[yellow]Unknown option: {parts[i]}[/yellow]")
+                i += 1
+
+        if mission_type not in ("oneday", "zeroday", "ctf"):
+            console.print(f"[red]Unknown mission: {mission_type}[/red]")
+            console.print("[dim]Available: oneday, zeroday, ctf. Type 'help'.[/dim]")
+            return None
+
+        return mission_type, target, topology, options
+
+    # ── Get report by index ───────────────────────────────────────
+    def _get_report(arg: str = "") -> MissionReport | None:
+        if not mission_history:
+            console.print("[dim]No missions executed yet.[/dim]")
+            return None
+        idx = len(mission_history)  # default: last
+        if arg.strip():
+            try:
+                idx = int(arg.strip())
+            except ValueError:
+                console.print(f"[red]Invalid index: {arg}[/red]")
+                return None
+        if idx < 1 or idx > len(mission_history):
+            console.print(f"[red]Index out of range (1-{len(mission_history)})[/red]")
+            return None
+        return mission_history[idx - 1]
+
     _print_help()
     console.print()
 
@@ -425,7 +570,10 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
     try:
         while True:
             try:
-                raw = console.input(_prompt()).strip()
+                raw = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: session.prompt(_prompt_html())
+                )
+                raw = raw.strip()
             except (EOFError, KeyboardInterrupt):
                 console.print("\n[dim]Goodbye.[/dim]")
                 break
@@ -434,67 +582,80 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                 continue
 
             lower = raw.lower()
+            cmd = lower.split()[0] if lower.split() else ""
 
-            # Exit
-            if lower in ("exit", "quit", "q"):
+            # ── Exit ──────────────────────────────────────────────
+            if cmd in ("exit", "quit", "q"):
                 console.print("[dim]Goodbye.[/dim]")
                 break
 
-            # Clear
-            if lower == "clear":
+            # ── Clear ─────────────────────────────────────────────
+            if cmd == "clear":
                 console.clear()
                 show_banner()
                 continue
 
-            # Help
-            if lower == "help":
+            # ── Help ──────────────────────────────────────────────
+            if cmd == "help":
                 _print_help()
                 continue
 
-            # Info
-            if lower == "info":
+            # ── Info ──────────────────────────────────────────────
+            if cmd == "info":
                 console.print(make_mcp_table())
                 continue
 
-            # Status
-            if lower == "status":
+            # ── Status ────────────────────────────────────────────
+            if cmd == "status":
                 event_count = await service._event_store.count() if service._event_store else 0
                 _print_status(event_count)
                 continue
 
-            # Events
-            if lower == "events":
+            # ── Events ────────────────────────────────────────────
+            if cmd == "events":
                 if service._event_store:
-                    events = await service._event_store.load_all()
-                    if not events:
+                    # Parse optional count: events [n]
+                    ev_parts = raw.split()
+                    limit = 20
+                    if len(ev_parts) > 1:
+                        try:
+                            limit = int(ev_parts[1])
+                        except ValueError:
+                            pass
+                    all_ev = await service._event_store.load_all()
+                    if not all_ev:
                         console.print("[dim]No events recorded yet.[/dim]")
                     else:
-                        table = Table(title=f"Domain Events ({len(events)} total)", box=box.SIMPLE, title_style="bold")
+                        table = Table(
+                            title=f"Domain Events (showing last {min(limit, len(all_ev))} of {len(all_ev)})",
+                            box=box.SIMPLE, title_style="bold",
+                        )
+                        table.add_column("#", style="dim", width=4)
                         table.add_column("Type", style="bold cyan", width=25)
-                        table.add_column("Context", style="yellow", width=12)
+                        table.add_column("Context", style="yellow", width=10)
                         table.add_column("Time", style="dim", width=20)
                         table.add_column("Details", style="white", max_width=50)
-                        for ev in events[-20:]:  # last 20
-                            details = ""
-                            for attr in ("host", "ip", "cve_id", "software", "title", "vulnerability", "challenge_name"):
-                                if hasattr(ev, attr) and getattr(ev, attr):
-                                    details = str(getattr(ev, attr))
-                                    break
+                        for i, ev in enumerate(all_ev[-limit:], len(all_ev) - limit + 1):
+                            style = _EVENT_STYLES.get(type(ev).__name__, "")
+                            name = type(ev).__name__
+                            if style:
+                                name = f"[{style}]{name}[/{style}]"
                             table.add_row(
-                                type(ev).__name__,
+                                str(i),
+                                name,
                                 getattr(ev, "context", ""),
                                 str(getattr(ev, "timestamp", ""))[:19],
-                                details[:50],
+                                _event_detail(ev)[:50],
                             )
                         console.print(table)
                 continue
 
-            # Blackboard
-            if lower == "blackboard":
+            # ── Blackboard ────────────────────────────────────────
+            if cmd == "blackboard":
                 if service._event_store:
                     bb = Blackboard()
-                    all_events = await service._event_store.load_all()
-                    bb.apply_all(all_events)
+                    all_ev = await service._event_store.load_all()
+                    bb.apply_all(all_ev)
                     summary = bb.summary()
                     if not any(summary.values()):
                         console.print("[dim]Blackboard is empty.[/dim]")
@@ -506,14 +667,15 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                             f"[bold]Exploits:[/bold]        {summary.get('exploit_attempts', 0)}\n"
                             f"[bold]Access Level:[/bold]    {summary.get('access_level', 'none')}\n"
                             f"[bold]Credentials:[/bold]     {summary.get('credentials', 0)}\n"
-                            + (f"[bold]Attack Graph:[/bold]\n{summary.get('attack_graph', '')}" if summary.get('attack_graph') else ""),
+                            + (f"[bold]Attack Graph:[/bold]\n{summary.get('attack_graph', '')}"
+                               if summary.get('attack_graph') else ""),
                             title="[bold cyan]Blackboard State[/bold cyan]",
                             border_style="cyan",
                         ))
                 continue
 
-            # History
-            if lower == "history":
+            # ── History ───────────────────────────────────────────
+            if cmd == "history":
                 if not mission_history:
                     console.print("[dim]No missions executed yet.[/dim]")
                 else:
@@ -521,124 +683,150 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                     table.add_column("#", style="dim", width=3)
                     table.add_column("Type", style="bold green", width=10)
                     table.add_column("Target", style="white", width=30)
+                    table.add_column("Topo", style="yellow", width=12)
                     table.add_column("Status", width=10)
                     table.add_column("Findings", style="yellow", width=10)
                     table.add_column("Duration", style="dim", width=10)
                     for idx, r in enumerate(mission_history, 1):
-                        status_color = "green" if r.status == "completed" else "red"
+                        sc = "green" if r.status == "completed" else "red"
                         table.add_row(
                             str(idx),
                             r.mission_type,
                             r.target[:30],
-                            f"[{status_color}]{r.status}[/{status_color}]",
+                            r.topology,
+                            f"[{sc}]{r.status}[/{sc}]",
                             f"{r.critical_count}C/{len(r.findings)}T",
                             f"{r.duration_seconds:.1f}s",
                         )
                     console.print(table)
                 continue
 
-            # Set commands
-            if lower.startswith("set "):
+            # ── Report [n] ────────────────────────────────────────
+            if cmd == "report":
+                arg = raw[len("report"):].strip()
+                r = _get_report(arg)
+                if r:
+                    print_report(r)
+                continue
+
+            # ── Export [n] <file> ──────────────────────────────────
+            if cmd == "export":
+                ex_parts = raw.split(None, 2)
+                if len(ex_parts) < 2:
+                    console.print("[yellow]Usage: export [n] <file>[/yellow]")
+                    continue
+                # Determine if first arg is index or filename
+                report_idx = ""
+                filename = ""
+                if len(ex_parts) == 2:
+                    # export <file> → export last report
+                    filename = ex_parts[1]
+                elif len(ex_parts) == 3:
+                    report_idx = ex_parts[1]
+                    filename = ex_parts[2]
+                r = _get_report(report_idx)
+                if r:
+                    try:
+                        Path(filename).write_text(r.as_text(), encoding="utf-8")
+                        console.print(f"[green]Report exported to: {filename}[/green]")
+                    except OSError as e:
+                        console.print(f"[red]Export failed: {e}[/red]")
+                continue
+
+            # ── Replay [n] ───────────────────────────────────────
+            if cmd == "replay":
+                arg = raw[len("replay"):].strip()
+                r = _get_report(arg)
+                if r:
+                    console.print(f"[cyan]Replaying mission #{arg or len(mission_history)}: "
+                                  f"{r.mission_type} → {r.target}[/cyan]")
+                    # Re-construct the raw command
+                    replay_raw = f"{r.mission_type} {r.target}"
+                    # Fall through to mission execution below
+                    raw = replay_raw
+                    lower = raw.lower()
+                    cmd = lower.split()[0]
+                else:
+                    continue
+
+            # ── Set ───────────────────────────────────────────────
+            if cmd == "set":
                 set_parts = raw.split(None, 2)
                 if len(set_parts) == 3:
                     key, val = set_parts[1].lower(), set_parts[2]
                     if key == "model":
                         cfg["model"] = val
-                        console.print(f"[green]Model set to: {val}[/green]")
+                        console.print(f"[green]Model → {val}[/green]")
                     elif key == "topology":
                         if val in ("ooda", "attack_graph"):
                             cfg["topology"] = val
-                            console.print(f"[green]Default topology set to: {val}[/green]")
+                            console.print(f"[green]Topology → {val}[/green]")
                         else:
-                            console.print(f"[red]Unknown topology: {val}. Use 'ooda' or 'attack_graph'.[/red]")
+                            console.print("[red]Use 'ooda' or 'attack_graph'.[/red]")
                     elif key == "api_key":
                         os.environ["ANTHROPIC_API_KEY"] = val
-                        console.print(f"[green]API key updated ({val[:8]}...)[/green]")
+                        console.print(f"[green]API key → {val[:8]}...[/green]")
                     elif key == "base_url":
                         os.environ["ANTHROPIC_BASE_URL"] = val
-                        console.print(f"[green]Base URL set to: {val}[/green]")
+                        console.print(f"[green]Base URL → {val}[/green]")
                     else:
-                        console.print(f"[red]Unknown setting: {key}. Try: model, topology, api_key, base_url[/red]")
+                        console.print(f"[red]Unknown: {key}. Try: model, topology, api_key, base_url[/red]")
                 else:
                     console.print("[yellow]Usage: set <key> <value>[/yellow]")
                 continue
 
-            # Parse mission command
-            parts = raw.split()
-            if len(parts) < 2:
-                console.print("[yellow]Usage: <mission> <target> [options][/yellow]")
-                console.print("[dim]Type 'help' for full usage.[/dim]")
+            # ── Mission execution ─────────────────────────────────
+            parsed = _parse_mission_args(raw)
+            if parsed is None:
                 continue
 
-            mission_type = parts[0]
-            target = parts[1]
-            topology = cfg["topology"]
-            options: dict[str, Any] = {}
+            mission_type, target, topology, options = parsed
+            mission_model = options.pop("_model_override", cfg["model"])
 
-            i = 2
-            while i < len(parts):
-                if parts[i] in ("--topology", "-T") and i + 1 < len(parts):
-                    topology = parts[i + 1]
-                    i += 2
-                elif parts[i] in ("--category", "-c") and i + 1 < len(parts):
-                    options["category"] = parts[i + 1]
-                    i += 2
-                elif parts[i] in ("--language", "-l") and i + 1 < len(parts):
-                    options["language"] = parts[i + 1]
-                    i += 2
-                elif parts[i] in ("--source", "-s") and i + 1 < len(parts):
-                    options["source_path"] = parts[i + 1]
-                    i += 2
-                elif parts[i] == "--service" and i + 1 < len(parts):
-                    options["service_url"] = parts[i + 1]
-                    i += 2
-                else:
-                    i += 1
-
-            if mission_type not in ("oneday", "zeroday", "ctf"):
-                console.print(f"[red]Unknown command: {mission_type}[/red]")
-                console.print("[dim]Type 'help' for available commands.[/dim]")
-                continue
-
-            kind_map = {
-                "oneday": "service",
-                "zeroday": "source",
-                "ctf": "challenge",
-            }
+            kind_map = {"oneday": "service", "zeroday": "source", "ctf": "challenge"}
 
             console.print(Panel(
                 f"[bold]Mission:[/bold]  {mission_type.upper()}\n"
                 f"[bold]Target:[/bold]   {target}\n"
                 f"[bold]Topology:[/bold] {topology}\n"
-                f"[bold]Model:[/bold]    {cfg['model']}"
+                f"[bold]Model:[/bold]    {mission_model}"
                 + (f"\n[bold]Options:[/bold]  {options}" if options else ""),
                 title="[bold cyan]Launching Mission[/bold cyan]",
                 border_style="cyan",
             ))
 
-            try:
-                with Progress(
-                    SpinnerColumn(spinner_name="dots"),
-                    TextColumn("[bold blue]{task.description}[/bold blue]"),
-                    console=console,
-                ) as progress:
-                    task = progress.add_task(
-                        f"Running {mission_type} against {target}...", total=None
-                    )
-                    report = await service.execute(
-                        mission_type=mission_type,
-                        target_uri=target,
-                        target_kind=kind_map[mission_type],
-                        topology=topology,
-                        model=cfg["model"],
-                        **options,
-                    )
-                    progress.update(task, completed=True)
+            # Live event table during execution
+            live_events: list[DomainEvent] = []
 
+            def _on_event(ev: DomainEvent) -> None:
+                live_events.append(ev)
+                name = type(ev).__name__
+                style = _EVENT_STYLES.get(name, "dim")
+                detail = _event_detail(ev)
+                console.print(
+                    f"  [{style}]{name:.<30s}[/{style}] "
+                    f"[dim]{getattr(ev, 'context', ''):>10s}[/dim]  "
+                    f"{detail[:60]}",
+                )
+
+            try:
+                console.print("[dim]── Events ──[/dim]")
+                report = await service.execute(
+                    mission_type=mission_type,
+                    target_uri=target,
+                    target_kind=kind_map[mission_type],
+                    topology=topology,
+                    model=mission_model,
+                    on_event=_on_event,
+                    **options,
+                )
+                console.print(f"[dim]── {len(live_events)} events ──[/dim]")
                 console.print()
                 print_report(report)
                 mission_history.append(report)
 
+            except KeyboardInterrupt:
+                console.print("\n[yellow]Mission cancelled by user.[/yellow]")
             except Exception as e:
                 console.print(f"[bold red]Error:[/bold red] {e}")
 
