@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 # Load .env before anything reads env vars
 load_dotenv()
 
-from miya.infra.logging_config import setup_logging
+from miya.infra.logging_config import setup_logging, TRACE
 setup_logging()
 
 DEFAULT_MODEL = os.environ.get("MIYA_MODEL", "opus")
@@ -220,9 +220,14 @@ def print_report(report: Any) -> None:
 
 
 @click.group(invoke_without_command=True)
+@click.option("--verbose", "-v", count=True, help="Verbosity: -v = DEBUG, -vv = TRACE (tool use)")
 @click.pass_context
-def cli(ctx: click.Context) -> None:
+def cli(ctx: click.Context, verbose: int) -> None:
     """Miya — DDD Pentest Agent"""
+    if verbose:
+        import logging
+        level = TRACE if verbose >= 2 else logging.DEBUG
+        setup_logging(level_override=level)
     if ctx.invoked_subcommand is None:
         show_banner()
         console.print(make_mission_table())

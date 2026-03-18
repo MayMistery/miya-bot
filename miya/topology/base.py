@@ -287,6 +287,13 @@ def _get_topology_config() -> dict[str, int]:
     }
 
 
+def _truncate_for_log(text: str, max_len: int = 200) -> str:
+    """Truncate text for log display."""
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + f"... ({len(text)} chars)"
+
+
 async def run_sdk_coordinator(
     prompt: str,
     agent_defs: dict[str, Any],
@@ -296,9 +303,14 @@ async def run_sdk_coordinator(
 
     Centralises the SDK call so both OODA and AttackGraph topologies
     use the same code path, reducing duplication.
+
+    Logging behaviour (controlled via ``-v`` / ``-vv``):
+        TRACE  — every tool_use call (name + input), tool_result, and text block
+        DEBUG  — prompt summary and total output length
     """
     from claude_agent_sdk import query, ClaudeAgentOptions, AgentDefinition
     from miya.infra.mcp_registry import MCPRegistry
+    from miya.infra.logging_config import TRACE
 
     registry = MCPRegistry()
     sdk_agents = {
@@ -320,12 +332,73 @@ async def run_sdk_coordinator(
         env=_sdk_env(),
     )
 
+    logger.debug("SDK coordinator prompt (%d chars): %s", len(prompt), _truncate_for_log(prompt, 300))
+
     output_parts: list[str] = []
+    turn_count = 0
+    tool_use_count = 0
+
     async for message in query(prompt=prompt, options=options):
+        turn_count += 1
         if hasattr(message, "content"):
             for block in message.content:
+                # ── Text output ──
                 if hasattr(block, "text"):
                     output_parts.append(block.text)
+                    if logger.isEnabledFor(TRACE):
+                        logger.log(TRACE, "text_block: %s", _truncate_for_log(block.text, 500))
+
+                # ── Tool use (request) ──
+                elif hasattr(block, "type") and block.type == "tool_use":
+                    tool_use_count += 1
+                    tool_name = getattr(block, "name", "?")
+                    tool_input = getattr(block, "input", {})
+                    if logger.isEnabledFor(TRACE):
+                        # Show tool name + truncated input
+                        input_str = json.dumps(tool_input, default=str) if isinstance(tool_input, dict) else str(tool_input)
+                        logger.log(
+                            TRACE,
+                            "tool_use  #%d: %s(%s)",
+                            tool_use_count, tool_name, _truncate_for_log(input_str, 400),
+                        )
+
+                # ── Tool result ──
+                elif hasattr(block, "type") and block.type == "tool_result":
+                    if logger.isEnabledFor(TRACE):
+                        content = getattr(block, "content", "")
+                        if isinstance(content, list):
+                            # Extract text from content blocks
+                            content = " ".join(
+                                getattr(c, "text", str(c)) for c in content
+                            )
+                        logger.log(
+                            TRACE,
+                            "tool_result: %s",
+                            _truncate_for_log(str(content), 400),
+                        )
+
+        # Also handle top-level tool_use / tool_result messages
+        if hasattr(message, "type"):
+            if message.type == "tool_use" and logger.isEnabledFor(TRACE):
+                tool_use_count += 1
+                logger.log(
+                    TRACE,
+                    "tool_use  #%d: %s(%s)",
+                    tool_use_count,
+                    getattr(message, "name", "?"),
+                    _truncate_for_log(str(getattr(message, "input", "")), 400),
+                )
+            elif message.type == "tool_result" and logger.isEnabledFor(TRACE):
+                logger.log(
+                    TRACE,
+                    "tool_result: %s",
+                    _truncate_for_log(str(getattr(message, "content", "")), 400),
+                )
+
+    logger.debug(
+        "SDK coordinator done: %d turns, %d tool calls, %d chars output",
+        turn_count, tool_use_count, sum(len(p) for p in output_parts),
+    )
 
     return "\n".join(output_parts)
 

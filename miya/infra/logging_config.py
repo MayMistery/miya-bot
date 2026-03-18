@@ -7,6 +7,14 @@ Env vars:
     MIYA_LOG_LEVEL   — root log level (default: INFO)
     MIYA_LOG_FORMAT   — "json" for machine-parseable output, anything else for
                         coloured human format (default: human)
+
+Log levels (most → least verbose):
+    TRACE (5)   — tool_use calls, tool results, SDK message blocks
+    DEBUG (10)  — phase outputs, coordinator prompts, internal decisions
+    INFO  (20)  — OODA iterations, phase transitions, events (default)
+    WARNING (30)
+    ERROR (40)
+    CRITICAL (50)
 """
 
 from __future__ import annotations
@@ -16,6 +24,18 @@ import logging
 import os
 import sys
 from datetime import datetime, timezone
+
+# ── Custom TRACE level (below DEBUG) ─────────────────────────────
+TRACE = 5
+logging.addLevelName(TRACE, "TRACE")
+
+
+def _trace(self: logging.Logger, message: str, *args: object, **kwargs: object) -> None:
+    if self.isEnabledFor(TRACE):
+        self._log(TRACE, message, args, **kwargs)  # type: ignore[arg-type]
+
+
+logging.Logger.trace = _trace  # type: ignore[attr-defined]
 
 
 class _JsonFormatter(logging.Formatter):
@@ -37,6 +57,7 @@ class _HumanFormatter(logging.Formatter):
     """Coloured single-line format for interactive terminals."""
 
     _COLORS = {
+        "TRACE": "\033[2;35m",   # dim magenta
         "DEBUG": "\033[2m",       # dim
         "INFO": "\033[36m",       # cyan
         "WARNING": "\033[33m",    # yellow
@@ -55,10 +76,21 @@ class _HumanFormatter(logging.Formatter):
         return base
 
 
-def setup_logging() -> None:
-    """Configure root logger based on environment."""
-    level_name = os.environ.get("MIYA_LOG_LEVEL", "INFO").upper()
-    level = getattr(logging, level_name, logging.INFO)
+def setup_logging(level_override: int | None = None) -> None:
+    """Configure root logger based on environment or explicit override.
+
+    Args:
+        level_override: If provided, overrides MIYA_LOG_LEVEL env var.
+                        Use logging levels or ``TRACE`` (5) for tool-use detail.
+    """
+    if level_override is not None:
+        level = level_override
+    else:
+        level_name = os.environ.get("MIYA_LOG_LEVEL", "INFO").upper()
+        if level_name == "TRACE":
+            level = TRACE
+        else:
+            level = getattr(logging, level_name, logging.INFO)
 
     fmt = os.environ.get("MIYA_LOG_FORMAT", "human").lower()
     formatter: logging.Formatter
@@ -71,6 +103,8 @@ def setup_logging() -> None:
     handler.setFormatter(formatter)
 
     root = logging.getLogger("miya")
+    # Remove existing handlers to avoid duplicates on re-init
+    root.handlers.clear()
     root.setLevel(level)
     root.addHandler(handler)
     # Prevent duplicate output if root logger also has handlers

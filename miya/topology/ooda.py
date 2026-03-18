@@ -230,6 +230,7 @@ class OODATopology:
             observe_output = await self._run_coordinator(
                 observe_prompt, mission, agents, blackboard
             )
+            logger.debug("OBSERVE output (%d chars): %.500s", len(observe_output), observe_output)
 
             for extracted in extract_events_from_output(observe_output, mission):
                 yield extracted
@@ -251,6 +252,7 @@ class OODATopology:
             orient_output = await self._run_coordinator(
                 orient_prompt, mission, agents, blackboard
             )
+            logger.debug("ORIENT output (%d chars): %.500s", len(orient_output), orient_output)
 
             for extracted in extract_events_from_output(orient_output, mission):
                 yield extracted
@@ -272,6 +274,7 @@ class OODATopology:
             decide_output = await self._run_coordinator(
                 decide_prompt, mission, agents, blackboard
             )
+            logger.debug("DECIDE output (%d chars): %.500s", len(decide_output), decide_output)
 
             # ── ACT ───────────────────────────────────────────────
             yield PhaseTransition(
@@ -290,6 +293,7 @@ class OODATopology:
             act_output = await self._run_coordinator(
                 act_prompt, mission, agents, blackboard
             )
+            logger.debug("ACT output (%d chars): %.500s", len(act_output), act_output)
 
             for extracted in extract_events_from_output(act_output, mission):
                 yield extracted
@@ -312,6 +316,7 @@ class OODATopology:
             reflect_output = await self._run_coordinator(
                 reflect_prompt, mission, agents, blackboard
             )
+            logger.debug("REFLECT output (%d chars): %.500s", len(reflect_output), reflect_output)
 
             decision = self._parse_reflection(reflect_output)
             previous_insights = decision.get("next_focus", "") or decision.get("insights", "")
