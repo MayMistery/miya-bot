@@ -66,7 +66,7 @@ endpoints, and internal APIs are often less hardened.
 ## Structured Event Output
 Emit structured events for each entry point found:
 
-[EVENT:EntryPointDiscovered {"location": "src/api/users.py:42", "input_type": "http_parameter", "input_vectors": ["query_param:id", "header:X-Forwarded-For"], "risk_level": "high", "context": "entrypoint"}]
+[EVENT:EntryPointDiscovered {"endpoint": "GET /api/users", "input_vectors": ["query_param:id", "header:X-Forwarded-For"], "framework": "Flask", "context": "entrypoint"}]
 """
 
 

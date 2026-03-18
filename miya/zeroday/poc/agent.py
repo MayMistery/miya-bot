@@ -127,7 +127,7 @@ For each validated PoC:
 ## Structured Event Output
 Emit structured events for each PoC validation:
 
-[EVENT:PoCValidated {"vulnerability": "SQL Injection in user lookup", "poc_type": "exploit_script", "success": true, "impact": "Database dump of all user credentials", "steps": ["Send GET /api/users?id=1' UNION SELECT * FROM credentials--", "Response contains all credentials in JSON"], "context": "poc"}]
+[EVENT:PoCValidated {"vuln_type": "SQL Injection in user lookup", "poc_code": "curl '/api/users?id=1%27+UNION+SELECT+*+FROM+credentials--'", "result": "success — database dump of all user credentials", "context": "poc"}]
 """
 
 

@@ -71,7 +71,7 @@ may reduce real-world impact even if code is vulnerable.
 ## Structured Event Output
 Emit structured events for each confirmed dangerous sink:
 
-[EVENT:SinkConfirmed {"sink_type": "sql_injection", "location": "src/api/users.py:87", "confidence": "high", "impact": "Database read/write, potential RCE via INTO OUTFILE", "context": "sink"}]
+[EVENT:SinkConfirmed {"sink_type": "sql_injection", "cwe_id": "CWE-89", "exploitability": "high — unsanitized user input reaches cursor.execute()", "context": "sink"}]
 """
 
 

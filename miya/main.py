@@ -124,6 +124,10 @@ def make_topology_table() -> Table:
         "attack_graph",
         "Attack Graph — DAG-based path planning + tactical execution",
     )
+    table.add_row(
+        "fanout",
+        "Fan-Out — parallel solving for multi-challenge CTF competitions",
+    )
     return table
 
 
@@ -148,6 +152,11 @@ def make_mcp_table() -> Table:
         ("exploitdb", "Public exploit database", "1-day"),
         ("ghidra", "Binary reverse engineering", "CTF"),
         ("gdb", "Debugger (GDB/LLDB)", "CTF"),
+        ("sage", "SageMath — number theory & algebra", "CTF"),
+        ("factordb", "FactorDB — integer factorization lookup", "CTF"),
+        ("cyberchef", "CyberChef — encoding/decoding transforms", "CTF"),
+        ("binwalk", "Binwalk — firmware & file analysis", "CTF"),
+        ("exiftool", "ExifTool — metadata extraction", "CTF"),
     ]
     for name, desc, used_by in servers:
         table.add_row(name, desc, used_by)
