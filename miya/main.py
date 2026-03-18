@@ -231,6 +231,8 @@ def cli(ctx: click.Context) -> None:
         console.print()
         console.print("[dim]Usage: miya <mission> --target <target> [--topology ooda|attack_graph][/dim]")
         console.print("[dim]       miya interactive[/dim]")
+        console.print("[dim]       miya health[/dim]")
+        console.print("[dim]       miya update[/dim]")
         console.print("[dim]       miya info[/dim]")
 
 
@@ -306,6 +308,150 @@ def info() -> None:
     console.print(make_topology_table())
     console.print()
     console.print(make_mcp_table())
+
+
+@cli.command()
+def health() -> None:
+    """Check that miya and its dependencies are properly configured."""
+    import importlib
+    import miya as _miya_pkg
+
+    console.print(Panel(
+        "[bold]Miya Health Check[/bold]",
+        border_style="cyan",
+        box=box.DOUBLE,
+    ))
+
+    checks: list[tuple[str, bool, str]] = []
+
+    # 1. Python version
+    py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    py_ok = sys.version_info >= (3, 10)
+    checks.append(("Python", py_ok, f"{py_ver}" + ("" if py_ok else " (need >=3.10)")))
+
+    # 2. Miya version
+    checks.append(("Miya", True, _miya_pkg.__version__))
+
+    # 3. Core dependencies
+    _deps = [
+        ("claude_agent_sdk", "Claude Agent SDK"),
+        ("pydantic", "Pydantic"),
+        ("rich", "Rich"),
+        ("click", "Click"),
+        ("aiosqlite", "aiosqlite"),
+        ("prompt_toolkit", "prompt-toolkit"),
+    ]
+    for mod_name, display_name in _deps:
+        try:
+            mod = importlib.import_module(mod_name)
+            ver = getattr(mod, "__version__", "ok")
+            checks.append((display_name, True, str(ver)))
+        except ImportError:
+            checks.append((display_name, False, "not installed"))
+
+    # 4. API key
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if api_key:
+        masked = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else "***"
+        checks.append(("API Key", True, masked))
+    else:
+        checks.append(("API Key", False, "not set (ANTHROPIC_API_KEY)"))
+
+    # 5. Base URL (optional — not required for local Claude Code)
+    base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
+    checks.append(("Base URL", True, base_url if base_url else "default (api.anthropic.com)"))
+
+    # 6. SDK connectivity — lightweight ping via SDK import check
+    sdk_ok = False
+    sdk_msg = ""
+    try:
+        from claude_agent_sdk import query, ClaudeAgentOptions  # noqa: F811
+        sdk_ok = True
+        sdk_msg = "SDK loaded, ready"
+    except ImportError as exc:
+        sdk_msg = f"import error: {exc}"
+    except Exception as exc:
+        sdk_msg = f"error: {exc}"
+    checks.append(("SDK Ready", sdk_ok, sdk_msg))
+
+    # 7. Git info
+    try:
+        import subprocess
+        git_hash = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+        git_branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+        checks.append(("Git", True, f"{git_branch}@{git_hash}"))
+    except Exception:
+        checks.append(("Git", True, "not a git repo"))
+
+    # Render table
+    table = Table(box=box.ROUNDED, border_style="dim")
+    table.add_column("Component", style="bold", width=20)
+    table.add_column("Status", width=6)
+    table.add_column("Detail", style="dim")
+
+    all_ok = True
+    for name, ok, detail in checks:
+        status = "[green]OK[/green]" if ok else "[red]FAIL[/red]"
+        if not ok:
+            all_ok = False
+        table.add_row(name, status, detail)
+
+    console.print(table)
+    console.print()
+
+    if all_ok:
+        console.print("[bold green]All checks passed. Miya is ready.[/bold green]")
+    else:
+        console.print("[bold yellow]Some checks failed. Review the table above.[/bold yellow]")
+
+    raise SystemExit(0 if all_ok else 1)
+
+
+@cli.command()
+@click.option("--branch", "-b", default=None, help="Git branch to pull from. Env: MIYA_BRANCH")
+def update(branch: str | None) -> None:
+    """Pull latest code from git and re-sync dependencies."""
+    import subprocess
+
+    target_branch = branch or os.environ.get("MIYA_BRANCH", "main")
+
+    console.print(f"[cyan]Updating from origin/{target_branch}...[/cyan]")
+
+    steps = [
+        ("Fetching", ["git", "fetch", "origin", target_branch]),
+        ("Resetting", ["git", "reset", "--hard", f"origin/{target_branch}"]),
+        ("Syncing deps", ["uv", "sync", "--extra", "dev"]),
+    ]
+
+    for label, cmd in steps:
+        console.print(f"  [dim]{label}...[/dim]", end=" ")
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            console.print("[green]ok[/green]")
+        except FileNotFoundError:
+            console.print(f"[red]command not found: {cmd[0]}[/red]")
+            raise SystemExit(1)
+        except subprocess.CalledProcessError as exc:
+            console.print(f"[red]failed[/red]")
+            if exc.stderr:
+                console.print(f"  [dim]{exc.stderr.strip()}[/dim]")
+            raise SystemExit(1)
+
+    # Show new version
+    try:
+        git_hash = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            text=True,
+        ).strip()
+        console.print(f"\n[bold green]Updated to {git_hash}[/bold green]")
+    except Exception:
+        console.print("\n[bold green]Update complete.[/bold green]")
 
 
 @cli.command()

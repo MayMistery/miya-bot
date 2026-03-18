@@ -16,6 +16,7 @@ shift 2>/dev/null || true
 BRANCH="${MIYA_BRANCH:-main}"
 
 case "$CMD" in
+    install)   uv sync && echo "[miya] Installed successfully. Run: miya --help" ;;
     test)      uv run pytest -v "$@" ;;
     test-unit) uv run pytest tests/unit -v "$@" ;;
     test-int)  uv run pytest tests/integration -v "$@" ;;
@@ -35,6 +36,7 @@ case "$CMD" in
         echo "Usage: ./run.sh <command> [args...]"
         echo ""
         echo "Commands:"
+        echo "  install    Install miya (production deps)"
         echo "  test       Run all tests"
         echo "  test-unit  Run unit tests"
         echo "  test-int   Run integration tests"
