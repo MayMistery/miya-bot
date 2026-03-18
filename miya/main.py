@@ -228,17 +228,12 @@ def cli(ctx: click.Context, verbose: int) -> None:
         import logging
         level = TRACE if verbose >= 2 else logging.DEBUG
         setup_logging(level_override=level)
+    # Store verbose level in context so subcommands (interactive) can access it
+    ctx.ensure_object(dict)
+    ctx.obj["verbose"] = verbose
     if ctx.invoked_subcommand is None:
-        show_banner()
-        console.print(make_mission_table())
-        console.print()
-        console.print(make_topology_table())
-        console.print()
-        console.print("[dim]Usage: miya <mission> --target <target> [--topology ooda|attack_graph][/dim]")
-        console.print("[dim]       miya interactive[/dim]")
-        console.print("[dim]       miya health[/dim]")
-        console.print("[dim]       miya update[/dim]")
-        console.print("[dim]       miya info[/dim]")
+        # Default: launch interactive mode
+        ctx.invoke(interactive, db="miya_events.db", model=None, api_key=None, base_url=None)
 
 
 def _common_options(f: Any) -> Any:
@@ -496,7 +491,8 @@ def update(branch: str | None) -> None:
 @cli.command()
 @click.option("--db", default="miya_events.db", help="SQLite database path")
 @_common_options
-def interactive(db: str, model: str | None, api_key: str | None, base_url: str | None) -> None:
+@click.pass_context
+def interactive(ctx: click.Context, db: str, model: str | None, api_key: str | None, base_url: str | None) -> None:
     """Interactive REPL mode"""
     _apply_api_env(api_key, base_url)
     asyncio.run(_interactive_loop(db, model=model or DEFAULT_MODEL))
@@ -577,7 +573,13 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
     console.print()
 
     # ── Runtime state ──────────────────────────────────────────────
-    cfg = {"model": model, "topology": "ooda"}
+    import logging as _logging
+    _current_level = _logging.getLogger("miya").level
+    _level_names = {_logging.CRITICAL: "critical", _logging.ERROR: "error",
+                    _logging.WARNING: "warning", _logging.INFO: "info",
+                    _logging.DEBUG: "debug", TRACE: "trace"}
+    cfg: dict[str, Any] = {"model": model, "topology": "ooda",
+                           "verbose": _level_names.get(_current_level, "info")}
     mission_history: list[MissionReport] = []
 
     # ── Prompt toolkit session with history + completion ──────────
@@ -593,9 +595,10 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
             # options
             "--topology", "--category", "--language", "--source", "--service",
             # set targets
-            "model", "topology", "api_key", "base_url",
+            "model", "topology", "api_key", "base_url", "verbose",
             # values
             "opus", "sonnet", "haiku", "ooda", "attack_graph",
+            "info", "debug", "trace",
             # categories
             "web", "pwn", "crypto", "reverse", "misc",
         ],
@@ -664,6 +667,7 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
         t.add_row("[dim]Session:[/dim]", "")
         t.add_row("set model <m>", "Switch model (opus/sonnet/haiku)")
         t.add_row("set topology <t>", "Set default topology")
+        t.add_row("set verbose <level>", "Log level: info/debug/trace")
         t.add_row("set api_key <key>", "Set Anthropic API key")
         t.add_row("set base_url <url>", "Set Anthropic base URL")
         t.add_row("status", "Current config & session stats")
@@ -691,6 +695,7 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
         console.print(Panel(
             f"[bold]Model:[/bold]     {cfg['model']}\n"
             f"[bold]Topology:[/bold]  {cfg['topology']}\n"
+            f"[bold]Verbose:[/bold]   {cfg['verbose']}\n"
             f"[bold]API Key:[/bold]   {key_status}\n"
             f"[bold]Base URL:[/bold]  {url_display}\n"
             f"[bold]DB:[/bold]        {db}\n"
@@ -974,6 +979,16 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                             console.print(f"[green]Topology → {val}[/green]")
                         else:
                             console.print("[red]Use 'ooda' or 'attack_graph'.[/red]")
+                    elif key == "verbose":
+                        val_lower = val.lower()
+                        _valid_levels = {"info": _logging.INFO, "debug": _logging.DEBUG, "trace": TRACE,
+                                         "warning": _logging.WARNING, "error": _logging.ERROR}
+                        if val_lower in _valid_levels:
+                            setup_logging(level_override=_valid_levels[val_lower])
+                            cfg["verbose"] = val_lower
+                            console.print(f"[green]Verbose → {val_lower}[/green]")
+                        else:
+                            console.print(f"[red]Use: info, debug, trace (or warning, error)[/red]")
                     elif key == "api_key":
                         os.environ["ANTHROPIC_API_KEY"] = val
                         console.print(f"[green]API key → {val[:8]}...[/green]")
@@ -981,7 +996,7 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                         os.environ["ANTHROPIC_BASE_URL"] = val
                         console.print(f"[green]Base URL → {val}[/green]")
                     else:
-                        console.print(f"[red]Unknown: {key}. Try: model, topology, api_key, base_url[/red]")
+                        console.print(f"[red]Unknown: {key}. Try: model, topology, verbose, api_key, base_url[/red]")
                 else:
                     console.print("[yellow]Usage: set <key> <value>[/yellow]")
                 continue
