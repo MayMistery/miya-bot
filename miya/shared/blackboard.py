@@ -189,8 +189,18 @@ class Blackboard:
             "status": "attempted",
         })
 
+    # Access level ordering for monotonic escalation
+    _ACCESS_RANK: dict[str, int] = {
+        "": 0, "none": 0, "user": 1, "admin": 2,
+        "data_read": 1, "rce": 3, "root": 4, "system": 4,
+    }
+
     def _on_ExploitSucceeded(self, e: ExploitSucceeded) -> None:
-        self.current_access_level = e.access_gained
+        # Only upgrade access level, never downgrade
+        new_rank = self._ACCESS_RANK.get(e.access_gained.lower(), 1)
+        old_rank = self._ACCESS_RANK.get(self.current_access_level.lower(), 0)
+        if new_rank >= old_rank:
+            self.current_access_level = e.access_gained
         self.findings.append(Finding(
             title=f"Exploit succeeded: {e.cve_id}",
             severity=Severity.CRITICAL,
@@ -279,7 +289,10 @@ class Blackboard:
         })
 
     def _on_PrivilegeEscalated(self, e: PrivilegeEscalated) -> None:
-        self.current_access_level = e.to_level
+        new_rank = self._ACCESS_RANK.get(e.to_level.lower(), 1)
+        old_rank = self._ACCESS_RANK.get(self.current_access_level.lower(), 0)
+        if new_rank >= old_rank:
+            self.current_access_level = e.to_level
 
     def _on_LootCollected(self, e: LootCollected) -> None:
         if e.loot_type in ("credential", "credentials"):

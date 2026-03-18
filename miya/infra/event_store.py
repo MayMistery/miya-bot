@@ -75,46 +75,55 @@ class SQLiteEventStore(EventStorePort):
     ) -> None:
         db = self._ensure_connected()
 
-        for event in events:
-            payload = event.to_dict()
-            metadata = json.dumps({
-                "correlation_id": event.correlation_id,
-                "causation_id": event.causation_id,
-                "timestamp": event.timestamp.isoformat(),
-            })
+        # Use BEGIN IMMEDIATE to acquire a write lock BEFORE reading.
+        # This makes the version check + insert atomic, preventing the
+        # TOCTOU race where two concurrent appends both read the same
+        # MAX(version) and both succeed.
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            for event in events:
+                payload = event.to_dict()
+                metadata = json.dumps({
+                    "correlation_id": event.correlation_id,
+                    "causation_id": event.causation_id,
+                    "timestamp": event.timestamp.isoformat(),
+                })
 
-            # Optimistic concurrency check
-            if expected_version >= 0 and event.aggregate_id:
-                async with db.execute(
-                    "SELECT MAX(version) FROM events WHERE aggregate_id = ?",
-                    (event.aggregate_id,),
-                ) as cursor:
-                    row = await cursor.fetchone()
-                    current = row[0] if row and row[0] is not None else -1
-                    if current != expected_version:
-                        raise ConcurrencyError(
-                            f"Expected version {expected_version}, got {current} "
-                            f"for aggregate {event.aggregate_id}"
-                        )
+                # Optimistic concurrency check (now atomic under write lock)
+                if expected_version >= 0 and event.aggregate_id:
+                    async with db.execute(
+                        "SELECT MAX(version) FROM events WHERE aggregate_id = ?",
+                        (event.aggregate_id,),
+                    ) as cursor:
+                        row = await cursor.fetchone()
+                        current = row[0] if row and row[0] is not None else -1
+                        if current != expected_version:
+                            raise ConcurrencyError(
+                                f"Expected version {expected_version}, got {current} "
+                                f"for aggregate {event.aggregate_id}"
+                            )
 
-            await db.execute(
-                """INSERT INTO events
-                   (event_id, event_type, aggregate_id, aggregate_type,
-                    context, mission, payload, metadata, version)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    event.event_id,
-                    event.__class__.event_type,
-                    event.aggregate_id,
-                    event.aggregate_type,
-                    event.context,
-                    event.mission,
-                    json.dumps(payload),
-                    metadata,
-                    event.version,
-                ),
-            )
-        await db.commit()
+                await db.execute(
+                    """INSERT INTO events
+                       (event_id, event_type, aggregate_id, aggregate_type,
+                        context, mission, payload, metadata, version)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        event.event_id,
+                        event.__class__.event_type,
+                        event.aggregate_id,
+                        event.aggregate_type,
+                        event.context,
+                        event.mission,
+                        json.dumps(payload),
+                        metadata,
+                        event.version,
+                    ),
+                )
+            await db.execute("COMMIT")
+        except Exception:
+            await db.execute("ROLLBACK")
+            raise
 
     async def load(self, aggregate_id: str) -> list[DomainEvent]:
         db = self._ensure_connected()

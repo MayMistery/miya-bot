@@ -260,12 +260,17 @@ class MissionService:
                 collected_events.append(event)
                 await self._event_store.append([event])
                 # Record solved challenges in campaign
-                if hasattr(event, "flag") and hasattr(event, "challenge_name"):
+                # Only record ChallengeSolved events (not FlagSubmitted with accepted=False)
+                if (
+                    hasattr(event, "flag")
+                    and hasattr(event, "challenge_name")
+                    and hasattr(event, "approach")  # distinguishes ChallengeSolved from FlagSubmitted
+                ):
                     try:
                         self.campaign.record_solved(
                             event.challenge_name,  # type: ignore[attr-defined]
                             event.flag,  # type: ignore[attr-defined]
-                            getattr(event, "approach", ""),
+                            event.approach,  # type: ignore[attr-defined]
                             mission_id=mission.id,
                         )
                     except Exception:

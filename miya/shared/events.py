@@ -350,9 +350,18 @@ _register_events()
 
 def event_from_dict(data: dict[str, Any]) -> DomainEvent:
     """Reconstruct a DomainEvent from its serialized form."""
+    import logging as _logging
     data = dict(data)  # avoid mutating caller's dict
     event_type = data.pop("event_type", "DomainEvent")
-    cls = _EVENT_REGISTRY.get(event_type, DomainEvent)
+    cls = _EVENT_REGISTRY.get(event_type)
+    if cls is None:
+        _logging.getLogger(__name__).warning(
+            "Unknown event_type '%s' — falling back to base DomainEvent. "
+            "Typed fields will be lost. Register the event class or check "
+            "for version mismatch.",
+            event_type,
+        )
+        cls = DomainEvent
 
     # Parse timestamp
     ts = data.get("timestamp")
