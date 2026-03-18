@@ -249,6 +249,8 @@ class ChallengeIdentified(DomainEvent):
     challenge_name: str = ""
     category: str = ""
     points: int = 0
+    difficulty: str = ""  # easy, medium, hard
+    technology_stack: tuple[str, ...] = ()
     context: str = "ctf"
     mission: str = "ctf"
 
@@ -399,7 +401,15 @@ class EventBus:
     async def publish(self, event: DomainEvent) -> None:
         type_name = event.__class__.event_type
         handlers = self._handlers.get(type_name, []) + self._global_handlers
-        await asyncio.gather(*(h(event) for h in handlers))
+        results = await asyncio.gather(
+            *(h(event) for h in handlers), return_exceptions=True,
+        )
+        for r in results:
+            if isinstance(r, Exception):
+                import logging
+                logging.getLogger(__name__).warning(
+                    "EventBus handler error for %s: %s", type_name, r,
+                )
 
     async def publish_all(self, events: list[DomainEvent]) -> None:
         for event in events:

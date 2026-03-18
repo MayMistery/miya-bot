@@ -64,7 +64,7 @@ class Campaign:
         return c
 
     def save(self) -> None:
-        """Persist campaign to JSON file."""
+        """Persist campaign to JSON file (atomic write via temp+rename)."""
         if self._path is None:
             return
         data = {
@@ -80,10 +80,18 @@ class Campaign:
                 for e in self.entries
             ],
         }
-        self._path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        content = json.dumps(data, ensure_ascii=False, indent=2)
+        # Atomic write: write to temp file, then rename
+        tmp = self._path.with_suffix(".tmp")
+        try:
+            tmp.write_text(content, encoding="utf-8")
+            tmp.replace(self._path)
+        except Exception:
+            logger.warning("Failed to save campaign to %s", self._path, exc_info=True)
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     # ── Knowledge Operations ───────────────────────────────────────
 

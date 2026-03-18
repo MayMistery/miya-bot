@@ -245,7 +245,10 @@ class FanoutTopology:
 
         # Semaphore for concurrency control
         sem = asyncio.Semaphore(self._max_parallel)
-        event_queue: asyncio.Queue[DomainEvent] = asyncio.Queue()
+        event_queue: asyncio.Queue[DomainEvent | None] = asyncio.Queue()
+
+        # Event types from sub-OODA that should NOT pollute the main mission
+        _SUB_MISSION_FILTER = {"mission.started", "mission.completed", "mission.failed"}
 
         async def _solve_challenge(challenge: dict[str, Any]) -> None:
             """Solve a single challenge using a dedicated OODA loop."""
@@ -291,7 +294,10 @@ class FanoutTopology:
                         sub_mission, sub_bb, sub_agents, event_store,
                         campaign=campaign,
                     ):
-                        await event_queue.put(ev)
+                        # Filter out sub-mission lifecycle events to avoid
+                        # polluting the parent mission's event stream (BUG-2)
+                        if ev.__class__.event_type not in _SUB_MISSION_FILTER:
+                            await event_queue.put(ev)
                 except Exception:
                     logger.error("Challenge %s failed", ch_name, exc_info=True)
 
@@ -301,22 +307,22 @@ class FanoutTopology:
             for c in challenges
         ]
 
-        # Yield events as they arrive from sub-loops
-        done = asyncio.Event()
+        # Use a sentinel to signal completion instead of polling (BUG-1 fix)
+        _SENTINEL = None
 
         async def _wait_all() -> None:
             await asyncio.gather(*tasks, return_exceptions=True)
-            done.set()
+            await event_queue.put(_SENTINEL)
 
         waiter = asyncio.create_task(_wait_all())
 
-        while not done.is_set() or not event_queue.empty():
-            try:
-                ev = await asyncio.wait_for(event_queue.get(), timeout=1.0)
-                yield ev
-                blackboard.apply(ev)
-            except asyncio.TimeoutError:
-                continue
+        # Drain events until sentinel received — no race condition
+        while True:
+            ev = await event_queue.get()
+            if ev is None:
+                break
+            yield ev
+            blackboard.apply(ev)
 
         await waiter  # ensure cleanup
 

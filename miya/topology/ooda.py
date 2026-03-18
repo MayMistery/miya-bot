@@ -335,55 +335,62 @@ class OODATopology:
                 yield extracted
                 blackboard.apply(extracted)
 
-            # ── ORIENT ────────────────────────────────────────────
-            hitl_events, op_suffix = _drain_hitl()
-            for ev in hitl_events:
-                yield ev
-                blackboard.apply(ev)
+            # ── CTF fast-path: skip ORIENT+DECIDE, go straight to ACT ──
+            # For CTF, the model already knows what to do after OBSERVE.
+            # Splitting analysis/planning into separate SDK calls wastes tokens.
+            if mission_key == "ctf":
+                orient_output = ""
+                decide_output = observe_output  # feed observations directly to ACT
+            else:
+                # ── ORIENT ────────────────────────────────────────
+                hitl_events, op_suffix = _drain_hitl()
+                for ev in hitl_events:
+                    yield ev
+                    blackboard.apply(ev)
 
-            yield PhaseTransition(
-                from_phase=OODAPhase.OBSERVE.value,
-                to_phase=OODAPhase.ORIENT.value,
-                aggregate_id=mission.id,
-                mission=mission.mission_type.value,
-            )
+                yield PhaseTransition(
+                    from_phase=OODAPhase.OBSERVE.value,
+                    to_phase=OODAPhase.ORIENT.value,
+                    aggregate_id=mission.id,
+                    mission=mission.mission_type.value,
+                )
 
-            logger.info("▶ ORIENT — %s", self._PHASE_DESC["ORIENT"])
-            orient_prompt = _get_phase_prompt(mission_key, "ORIENT").format(
-                blackboard_context=blackboard.to_context_prompt(),
-                mission_description=mission_desc,
-                observe_output=observe_output[:4000],
-            ) + op_suffix + EVENT_INSTRUCTION
-            orient_output = await self._run_coordinator(
-                orient_prompt, mission, agents, blackboard, phase_label="ORIENT"
-            )
+                logger.info("▶ ORIENT — %s", self._PHASE_DESC["ORIENT"])
+                orient_prompt = _get_phase_prompt(mission_key, "ORIENT").format(
+                    blackboard_context=blackboard.to_context_prompt(),
+                    mission_description=mission_desc,
+                    observe_output=observe_output[:4000],
+                ) + op_suffix + EVENT_INSTRUCTION
+                orient_output = await self._run_coordinator(
+                    orient_prompt, mission, agents, blackboard, phase_label="ORIENT"
+                )
 
-            for extracted in extract_events_from_output(orient_output, mission):
-                yield extracted
-                blackboard.apply(extracted)
+                for extracted in extract_events_from_output(orient_output, mission):
+                    yield extracted
+                    blackboard.apply(extracted)
 
-            # ── DECIDE ────────────────────────────────────────────
-            hitl_events, op_suffix = _drain_hitl()
-            for ev in hitl_events:
-                yield ev
-                blackboard.apply(ev)
+                # ── DECIDE ────────────────────────────────────────
+                hitl_events, op_suffix = _drain_hitl()
+                for ev in hitl_events:
+                    yield ev
+                    blackboard.apply(ev)
 
-            yield PhaseTransition(
-                from_phase=OODAPhase.ORIENT.value,
-                to_phase=OODAPhase.DECIDE.value,
-                aggregate_id=mission.id,
-                mission=mission.mission_type.value,
-            )
+                yield PhaseTransition(
+                    from_phase=OODAPhase.ORIENT.value,
+                    to_phase=OODAPhase.DECIDE.value,
+                    aggregate_id=mission.id,
+                    mission=mission.mission_type.value,
+                )
 
-            logger.info("▶ DECIDE — %s", self._PHASE_DESC["DECIDE"])
-            decide_prompt = _get_phase_prompt(mission_key, "DECIDE").format(
-                blackboard_context=blackboard.to_context_prompt(),
-                mission_description=mission_desc,
-                orient_output=orient_output[:4000],
-            ) + op_suffix
-            decide_output = await self._run_coordinator(
-                decide_prompt, mission, agents, blackboard, phase_label="DECIDE"
-            )
+                logger.info("▶ DECIDE — %s", self._PHASE_DESC["DECIDE"])
+                decide_prompt = _get_phase_prompt(mission_key, "DECIDE").format(
+                    blackboard_context=blackboard.to_context_prompt(),
+                    mission_description=mission_desc,
+                    orient_output=orient_output[:4000],
+                ) + op_suffix
+                decide_output = await self._run_coordinator(
+                    decide_prompt, mission, agents, blackboard, phase_label="DECIDE"
+                )
 
             # ── ACT ───────────────────────────────────────────────
             hitl_events, op_suffix = _drain_hitl()
@@ -392,14 +399,14 @@ class OODATopology:
                 blackboard.apply(ev)
 
             yield PhaseTransition(
-                from_phase=OODAPhase.DECIDE.value,
+                from_phase=(OODAPhase.OBSERVE.value if mission_key == "ctf"
+                            else OODAPhase.DECIDE.value),
                 to_phase=OODAPhase.ACT.value,
                 aggregate_id=mission.id,
                 mission=mission.mission_type.value,
             )
 
             logger.info("▶ ACT — %s", self._PHASE_DESC["ACT"])
-            # For CTF with known category: invoke specialist directly (#5)
             flag_hint = _FLAG_SUBMIT_INSTRUCTION if mission_key == "ctf" else ""
             act_prompt = _get_phase_prompt(mission_key, "ACT").format(
                 blackboard_context=blackboard.to_context_prompt(),
@@ -409,7 +416,7 @@ class OODATopology:
             ) + op_suffix + EVENT_INSTRUCTION + flag_hint
 
             # Direct agent invocation: if classification is known, only pass the
-            # relevant specialist agent to reduce coordinator overhead (#5).
+            # relevant specialist agent to reduce coordinator overhead.
             act_agents = agents
             if classified_category and mission_key == "ctf":
                 direct = self._pick_direct_agent(classified_category, agents)
@@ -493,6 +500,7 @@ class OODATopology:
         agents: dict[str, AgentHandle],
         blackboard: Blackboard,
         phase_label: str = "",
+        max_turns: int | None = None,
     ) -> str:
         """Run the coordinator agent with a prompt and collect text output."""
         all_mcp_names: set[str] = set()
@@ -514,7 +522,8 @@ class OODATopology:
 
         # Fallback: use shared Claude Agent SDK coordinator
         return await run_sdk_coordinator(
-            prompt, agent_defs, list(all_mcp_names), phase_label=phase_label
+            prompt, agent_defs, list(all_mcp_names),
+            phase_label=phase_label, max_turns=max_turns,
         )
 
     @staticmethod
@@ -594,6 +603,7 @@ class OODATopology:
             output = await self._run_coordinator(
                 classify_prompt, mission, agents, blackboard,
                 phase_label="CLASSIFY",
+                max_turns=3,  # lightweight: just inspect files, don't solve
             )
         except Exception:
             logger.debug("Auto-classify failed, skipping", exc_info=True)

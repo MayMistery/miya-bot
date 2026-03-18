@@ -889,7 +889,7 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
             # missions
             "oneday", "zeroday", "ctf",
             # repl
-            "set", "status", "history", "events", "blackboard",
+            "set", "status", "history", "events", "blackboard", "campaign",
             "report", "export", "replay", "info", "clear", "help",
             "exit", "quit",
             # options
@@ -980,6 +980,7 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
         t.add_row("replay [n]", "Re-run mission #n with same params")
         t.add_row("events [n]", "Last n domain events (default: 20)")
         t.add_row("blackboard", "Current blackboard state")
+        t.add_row("campaign", "Cross-mission knowledge (solved, infra, techniques)")
         t.add_row("", "")
         t.add_row("[dim]Natural Language:[/dim]", "")
         t.add_row("<free text description>", "AI parses intent, confirms before run")
@@ -1212,6 +1213,35 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                             title="[bold cyan]Blackboard State[/bold cyan]",
                             border_style="cyan",
                         ))
+                continue
+
+            # ── Campaign (cross-mission knowledge) ────────────────
+            if cmd == "campaign":
+                camp = service.campaign
+                if not camp.entries:
+                    console.print("[dim]Campaign is empty. Solve some challenges first.[/dim]")
+                else:
+                    solved = camp.get_solved()
+                    infra = camp.get_by_category("infra")
+                    techniques = camp.get_by_category("technique")
+                    parts = []
+                    if solved:
+                        parts.append(f"[bold]Solved ({len(solved)}):[/bold]")
+                        for s in solved:
+                            parts.append(f"  {s['name']}: {s.get('technique', '?')}")
+                    if infra:
+                        parts.append(f"\n[bold]Infrastructure ({len(infra)}):[/bold]")
+                        for e in infra[-10:]:
+                            parts.append(f"  {e.key.removeprefix('infra:')}: {e.value[:60]}")
+                    if techniques:
+                        parts.append(f"\n[bold]Techniques ({len(techniques)}):[/bold]")
+                        for e in techniques[-10:]:
+                            parts.append(f"  {e.key.removeprefix('technique:')}: {e.value[:60]}")
+                    console.print(Panel(
+                        "\n".join(parts),
+                        title="[bold cyan]Campaign Knowledge[/bold cyan]",
+                        border_style="cyan",
+                    ))
                 continue
 
             # ── History ───────────────────────────────────────────

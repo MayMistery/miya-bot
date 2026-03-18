@@ -351,6 +351,7 @@ async def run_sdk_coordinator(
     mcp_names: list[str],
     *,
     phase_label: str = "",
+    max_turns: int | None = None,
 ) -> str:
     """Shared coordinator execution via Claude Agent SDK.
 
@@ -365,7 +366,10 @@ async def run_sdk_coordinator(
     from miya.infra.mcp_registry import MCPRegistry
     from miya.infra.logging_config import TRACE
 
-    registry = MCPRegistry()
+    # Cache the registry singleton to avoid rebuilding configs every call
+    if not hasattr(run_sdk_coordinator, "_registry"):
+        run_sdk_coordinator._registry = MCPRegistry()  # type: ignore[attr-defined]
+    registry: MCPRegistry = run_sdk_coordinator._registry  # type: ignore[attr-defined]
     sdk_agents = {
         name: AgentDefinition(**defn)
         for name, defn in agent_defs.items()
@@ -381,7 +385,7 @@ async def run_sdk_coordinator(
             "WebSearch", "WebFetch", "Agent",
         ] + [f"mcp__{name}__*" for name in mcp_names],
         permission_mode="acceptEdits",
-        max_turns=cfg["max_turns"],
+        max_turns=max_turns if max_turns is not None else cfg["max_turns"],
         cwd=os.getcwd(),
         env=_sdk_env(),
     )
