@@ -123,6 +123,11 @@ For each validated PoC:
 - All PoCs must be safe for the target — read-only proof of concept.
 - If a payload fails, iterate with bypass techniques before giving up.
 - Document why a PoC failed if all attempts are exhausted.
+
+## Structured Event Output
+Emit structured events for each PoC validation:
+
+[EVENT:PoCValidated {"vulnerability": "SQL Injection in user lookup", "poc_type": "exploit_script", "success": true, "impact": "Database dump of all user credentials", "steps": ["Send GET /api/users?id=1' UNION SELECT * FROM credentials--", "Response contains all credentials in JSON"], "context": "poc"}]
 """
 
 

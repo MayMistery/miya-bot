@@ -67,6 +67,11 @@ adequate sanitization. Do not report sanitized paths as vulnerabilities.
 behind MFA is lower severity than one on a public registration form.
 - Check for defense-in-depth: WAF rules, CSP headers, database permissions \
 may reduce real-world impact even if code is vulnerable.
+
+## Structured Event Output
+Emit structured events for each confirmed dangerous sink:
+
+[EVENT:SinkConfirmed {"sink_type": "sql_injection", "location": "src/api/users.py:87", "confidence": "high", "impact": "Database read/write, potential RCE via INTO OUTFILE", "context": "sink"}]
 """
 
 

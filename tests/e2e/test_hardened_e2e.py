@@ -316,7 +316,7 @@ class TestOODARetry:
                           context="exploit")
                 ),
                 "REFLECT": (
-                    "DECISION: retry\n"
+                    "DECISION: continue\n"
                     "ASSESSMENT: Exploit failed due to network timeout, not defense\n"
                     "INSIGHTS: CVE-2017-5638 should work, retry with longer timeout\n"
                     "NEXT_FOCUS: Same exploit, increased timeout"
@@ -376,10 +376,10 @@ class TestOODARetry:
         successes = [e for e in all_events if isinstance(e, ExploitSucceeded)]
         assert len(successes) == 1
 
-        # Retry decision recorded
+        # Continue (retry) decision recorded
         reflections = [e for e in all_events if isinstance(e, ReflectionCompleted)]
         decisions = [r.decision for r in reflections]
-        assert "retry" in decisions
+        assert "continue" in decisions
 
         summary = report.blackboard_summary
         assert summary["access_level"] == "user"

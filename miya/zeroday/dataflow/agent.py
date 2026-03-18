@@ -70,6 +70,11 @@ For each taint path, emit structured data with:
 - Watch for indirect flows: data stored in DB then retrieved unsanitized.
 - Track taint through string formatting: f-strings, .format(), % operator.
 - Consider second-order injection: tainted data stored then used elsewhere.
+
+## Structured Event Output
+Emit structured events for each taint path traced:
+
+[EVENT:TaintPathTraced {"source": "request.args['id']", "sink": "cursor.execute(query)", "path": ["request.args['id']", "user_id = args['id']", "query = f'SELECT * FROM users WHERE id={user_id}'", "cursor.execute(query)"], "sanitized": false, "context": "dataflow"}]
 """
 
 

@@ -25,7 +25,10 @@ from miya.shared.events import (
 )
 from miya.shared.ports import CoordinatorPort, EventStorePort
 from miya.shared.types import Mission
-from miya.topology.base import Topology, TopologyRegistry, AgentHandle, extract_events_from_output, _sdk_env
+from miya.topology.base import (
+    Topology, TopologyRegistry, AgentHandle,
+    extract_events_from_output, _sdk_env, EVENT_INSTRUCTION,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -83,11 +86,11 @@ You are executing a specific attack step.
 {preparation}
 
 **Your task:** Execute this attack step using the designated agent.
-Report the result with:
-1. SUCCESS or FAILURE
-2. What was gained (access, information, credentials)
-3. New attack surface discovered
-4. Evidence of success/failure
+
+At the END of your response, report the overall result on a single line:
+RESULT: SUCCESS <what was gained>
+or
+RESULT: FAILURE <why it failed>
 """
 
 _REBUILD_PROMPT = """## Graph Update — Post-Execution Analysis
@@ -191,16 +194,15 @@ class AttackGraphTopology:
         recon_agents = {k: v for k, v in agents.items()
                        if v.context_name in ("recon", "entrypoint", "web", "pwn", "crypto", "reverse", "misc")}
         if recon_agents:
-            first_agent = next(iter(recon_agents))
             recon_prompt = (
                 f"Reconnaissance phase. Target: {mission.target}\n"
                 f"Discover the attack surface. Report all assets, services, "
                 f"entry points, and potential vulnerabilities found.\n"
-                f"Blackboard:\n{blackboard.to_context_prompt()}"
+                f"Blackboard:\n{blackboard.to_context_prompt()}\n"
+                + EVENT_INSTRUCTION
             )
             recon_output = await self._run_agent(recon_prompt, mission, agents, blackboard)
 
-            # Extract and yield events from recon output
             for extracted in extract_events_from_output(recon_output, mission):
                 yield extracted
                 blackboard.apply(extracted)
@@ -261,19 +263,21 @@ class AttackGraphTopology:
 
             plan_output = await self._run_agent(plan_prompt, mission, agents, blackboard)
 
+            # Parse plan output: try to find SELECTED_EDGE
+            selected_edge = self._parse_plan_edge(plan_output, unexplored)
+            if not selected_edge:
+                selected_edge = unexplored[0] if unexplored else None
+            if not selected_edge:
+                break
+
             # ── EXECUTE ───────────────────────────────────────────
             yield PhaseTransition(
                 from_phase="plan",
                 to_phase="execute",
-                reason=f"Step {step}: executing selected technique",
+                reason=f"Step {step}: {selected_edge.label}",
                 aggregate_id=mission.id,
                 mission=mission.mission_type.value,
             )
-
-            # Select edge (use first unexplored if parsing fails)
-            selected_edge = unexplored[0] if unexplored else None
-            if not selected_edge:
-                break
 
             source_node = graph.nodes.get(selected_edge.source_id)
             target_node = graph.nodes.get(selected_edge.target_id)
@@ -284,25 +288,49 @@ class AttackGraphTopology:
                 target_node=f"{target_node.label}" if target_node else "unknown",
                 agent_name=next(iter(agents), ""),
                 blackboard_context=blackboard.to_context_prompt(),
-                preparation=plan_output,
-            )
+                preparation=plan_output[:3000],
+            ) + EVENT_INSTRUCTION
 
             exec_output = await self._run_agent(exec_prompt, mission, agents, blackboard)
 
-            # Extract and yield events from execution output
             for extracted in extract_events_from_output(exec_output, mission):
                 yield extracted
                 blackboard.apply(extracted)
 
-            # Update edge status
-            if "success" in exec_output.lower():
+            # Determine success via RESULT: line, with fallback heuristics
+            succeeded = self._detect_success(exec_output)
+
+            if succeeded:
                 graph.update_edge_status(selected_edge.id, "succeeded")
                 if target_node:
                     graph.update_node_status(target_node.id, "exploited")
             else:
                 graph.update_edge_status(selected_edge.id, "failed")
 
-            # Check objective
+            # ── REBUILD — analyze result and update graph ─────────
+            rebuild_prompt = _REBUILD_PROMPT.format(
+                technique=selected_edge.label,
+                result=exec_output[:3000],
+                graph_summary=graph.summary(),
+                blackboard_context=blackboard.to_context_prompt(),
+            )
+            rebuild_output = await self._run_agent(rebuild_prompt, mission, agents, blackboard)
+
+            # Extract events from rebuild analysis
+            for extracted in extract_events_from_output(rebuild_output, mission):
+                yield extracted
+                blackboard.apply(extracted)
+
+            # Check if objective reached (via OBJECTIVE_REACHED or graph state)
+            obj_reached = "objective_reached: yes" in rebuild_output.lower()
+            if obj_reached:
+                yield MissionCompleted(
+                    aggregate_id=mission.id,
+                    findings_count=len(blackboard.findings),
+                    mission=mission.mission_type.value,
+                )
+                return
+
             for obj_id in graph.objective_ids:
                 obj_node = graph.nodes.get(obj_id)
                 if obj_node and obj_node.status == "exploited":
@@ -319,6 +347,61 @@ class AttackGraphTopology:
             findings_count=len(blackboard.findings),
             mission=mission.mission_type.value,
         )
+
+    @staticmethod
+    def _parse_plan_edge(
+        plan_output: str,
+        available_edges: list[GraphEdge],
+    ) -> GraphEdge | None:
+        """Extract SELECTED_EDGE from planner output and match to a real edge."""
+        import re
+
+        match = re.search(r"SELECTED_EDGE\s*:\s*(\S+)", plan_output, re.IGNORECASE)
+        if not match:
+            return None
+
+        edge_id_prefix = match.group(1).strip().lower()
+        for edge in available_edges:
+            if edge.id.lower().startswith(edge_id_prefix):
+                return edge
+        # Fallback: try matching by label
+        for edge in available_edges:
+            if edge.label.lower() in plan_output.lower():
+                return edge
+        return None
+
+    @staticmethod
+    def _detect_success(exec_output: str) -> bool:
+        """Detect whether an execution step succeeded.
+
+        Uses RESULT: line if present, falls back to heuristics.
+        """
+        import re
+
+        # Primary: look for RESULT: SUCCESS / RESULT: FAILURE
+        match = re.search(r"RESULT\s*:\s*(SUCCESS|FAILURE)", exec_output, re.IGNORECASE)
+        if match:
+            return match.group(1).upper() == "SUCCESS"
+
+        # Check for ExploitSucceeded events (most reliable signal)
+        if "[EVENT:ExploitSucceeded" in exec_output or "[EVENT:ChallengeSolved" in exec_output:
+            return True
+        if "[EVENT:ExploitFailed" in exec_output:
+            return False
+
+        # Heuristic fallback: explicit success/failure phrases
+        lower = exec_output.lower()
+        success_phrases = (
+            "successfully exploited", "access gained", "shell obtained",
+            "flag found", "flag{", "root access", "session opened",
+        )
+        failure_phrases = (
+            "exploit failed", "not vulnerable", "connection refused",
+            "access denied", "timed out", "no session",
+        )
+        success_score = sum(1 for p in success_phrases if p in lower)
+        failure_score = sum(1 for p in failure_phrases if p in lower)
+        return success_score > failure_score
 
     async def _run_agent(
         self,
@@ -368,15 +451,11 @@ class AttackGraphTopology:
         )
 
         output_parts: list[str] = []
-        try:
-            async for message in query(prompt=prompt, options=options):
-                if hasattr(message, "content"):
-                    for block in message.content:
-                        if hasattr(block, "text"):
-                            output_parts.append(block.text)
-        except Exception as e:
-            logger.error(f"Agent execution error: {e}")
-            output_parts.append(f"[ERROR] {e}")
+        async for message in query(prompt=prompt, options=options):
+            if hasattr(message, "content"):
+                for block in message.content:
+                    if hasattr(block, "text"):
+                        output_parts.append(block.text)
 
         return "\n".join(output_parts)
 

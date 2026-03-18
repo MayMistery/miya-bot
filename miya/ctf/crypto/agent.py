@@ -79,6 +79,14 @@ Detect by checking if server validates point-on-curve. Attack steps: \
 - All via Bash — no MCP servers needed
 
 Always show your mathematical reasoning and explain the vulnerability.
+
+## Structured Event Output
+Emit structured events as you progress:
+
+[EVENT:ChallengeIdentified {"challenge_name": "ropchain", "category": "crypto", "difficulty": "medium", "technology_stack": ["ELF x86_64", "NX enabled", "No PIE"], "context": "ctf"}]
+
+When you find the flag:
+[EVENT:ChallengeSolved {"challenge_name": "ropchain", "flag": "flag{...}", "technique": "ROP chain via puts leak + ret2libc", "context": "ctf"}]
 """
 
 

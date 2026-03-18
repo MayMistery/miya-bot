@@ -29,7 +29,10 @@ from miya.shared.events import (
 )
 from miya.shared.ports import CoordinatorPort, EventStorePort
 from miya.shared.types import Mission, OODAPhase, MissionType
-from miya.topology.base import Topology, TopologyRegistry, AgentHandle, extract_events_from_output, _sdk_env
+from miya.topology.base import (
+    Topology, TopologyRegistry, AgentHandle,
+    extract_events_from_output, _sdk_env, EVENT_INSTRUCTION,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +57,6 @@ Delegate to the right agent(s) based on the mission type:
 {agent_descriptions}
 
 Focus on breadth — discover as much about the target as possible.
-Output a structured summary of what was discovered.
 """
 
 _ORIENT_PROMPT = """## Phase: ORIENT (Analysis & Pattern Recognition)
@@ -65,6 +67,9 @@ You are in the ORIENT phase of the OODA loop.
 {blackboard_context}
 
 **Mission:** {mission_description}
+
+**Observations from previous phase:**
+{observe_output}
 
 **Your task:** Analyze the gathered information. Identify:
 1. Attack vectors and vulnerabilities
@@ -128,15 +133,17 @@ You are at the REFLECTION GATE of the OODA loop.
 **Actions taken and results:**
 {act_output}
 
+**Previous reflection insights (if any):**
+{previous_insights}
+
 **Your task:** Evaluate the results and make ONE of these decisions:
 
 1. **CONTINUE** — Progress was made, continue the OODA loop to deepen the attack
 2. **PIVOT** — Current approach isn't working, try a different strategy in the next loop
-3. **RETRY** — Execution failed due to transient issue, retry with adjustments
-4. **COMPLETE** — Mission objective achieved, generate final report
+3. **COMPLETE** — Mission objective achieved, generate final report
 
-Respond with your decision and detailed rationale. Format:
-DECISION: <continue|pivot|retry|complete>
+Respond EXACTLY in this format (each field on its own line):
+DECISION: <continue|pivot|complete>
 ASSESSMENT: <what happened and why>
 INSIGHTS: <what we learned>
 NEXT_FOCUS: <what to focus on in the next loop iteration, if continuing>
@@ -191,9 +198,11 @@ class OODATopology:
             f"- **{name}**: {a.description}" for name, a in agents.items()
         )
 
+        observe_output = ""
         orient_output = ""
         decide_output = ""
         act_output = ""
+        previous_insights = ""
 
         for iteration in range(1, self._max_iterations + 1):
             logger.info(f"OODA iteration {iteration}/{self._max_iterations}")
@@ -202,7 +211,8 @@ class OODATopology:
             phase_event = PhaseTransition(
                 from_phase=OODAPhase.REFLECT.value if iteration > 1 else "",
                 to_phase=OODAPhase.OBSERVE.value,
-                reason=f"Iteration {iteration}",
+                reason=(f"Iteration {iteration}"
+                        + (f" — Focus: {previous_insights}" if previous_insights else "")),
                 aggregate_id=mission.id,
                 mission=mission.mission_type.value,
             )
@@ -213,13 +223,12 @@ class OODATopology:
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
                 agent_descriptions=agent_desc,
-            )
+            ) + EVENT_INSTRUCTION
 
             observe_output = await self._run_coordinator(
                 observe_prompt, mission, agents, blackboard
             )
 
-            # Extract and yield any structured events from OBSERVE output
             for extracted in extract_events_from_output(observe_output, mission):
                 yield extracted
                 blackboard.apply(extracted)
@@ -235,12 +244,12 @@ class OODATopology:
             orient_prompt = _ORIENT_PROMPT.format(
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
-            )
+                observe_output=observe_output[:4000],
+            ) + EVENT_INSTRUCTION
             orient_output = await self._run_coordinator(
                 orient_prompt, mission, agents, blackboard
             )
 
-            # Extract and yield any structured events from ORIENT output
             for extracted in extract_events_from_output(orient_output, mission):
                 yield extracted
                 blackboard.apply(extracted)
@@ -256,16 +265,11 @@ class OODATopology:
             decide_prompt = _DECIDE_PROMPT.format(
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
-                orient_output=orient_output,
+                orient_output=orient_output[:4000],
             )
             decide_output = await self._run_coordinator(
                 decide_prompt, mission, agents, blackboard
             )
-
-            # Extract and yield any structured events from DECIDE output
-            for extracted in extract_events_from_output(decide_output, mission):
-                yield extracted
-                blackboard.apply(extracted)
 
             # ── ACT ───────────────────────────────────────────────
             yield PhaseTransition(
@@ -278,14 +282,13 @@ class OODATopology:
             act_prompt = _ACT_PROMPT.format(
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
-                decide_output=decide_output,
+                decide_output=decide_output[:4000],
                 agent_descriptions=agent_desc,
-            )
+            ) + EVENT_INSTRUCTION
             act_output = await self._run_coordinator(
                 act_prompt, mission, agents, blackboard
             )
 
-            # Extract and yield any structured events from ACT output
             for extracted in extract_events_from_output(act_output, mission):
                 yield extracted
                 blackboard.apply(extracted)
@@ -301,14 +304,15 @@ class OODATopology:
             reflect_prompt = _REFLECT_PROMPT.format(
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
-                act_output=act_output,
+                act_output=act_output[:4000],
+                previous_insights=previous_insights or "(first iteration)",
             )
             reflect_output = await self._run_coordinator(
                 reflect_prompt, mission, agents, blackboard
             )
 
-            # Parse reflection decision
             decision = self._parse_reflection(reflect_output)
+            previous_insights = decision.get("next_focus", "") or decision.get("insights", "")
 
             reflection_event = ReflectionCompleted(
                 aggregate_id=mission.id,
@@ -392,40 +396,62 @@ class OODATopology:
         )
 
         output_parts: list[str] = []
-        try:
-            async for message in query(prompt=prompt, options=options):
-                if hasattr(message, "content"):
-                    for block in message.content:
-                        if hasattr(block, "text"):
-                            output_parts.append(block.text)
-        except Exception as e:
-            logger.error(f"Coordinator execution error: {e}")
-            output_parts.append(f"[ERROR] {e}")
+        async for message in query(prompt=prompt, options=options):
+            if hasattr(message, "content"):
+                for block in message.content:
+                    if hasattr(block, "text"):
+                        output_parts.append(block.text)
 
         return "\n".join(output_parts)
 
-    def _parse_reflection(self, output: str) -> dict[str, str]:
-        """Parse the reflection gate output into a structured decision."""
-        result = {
+    @staticmethod
+    def _parse_reflection(output: str) -> dict[str, str]:
+        """Parse the reflection gate output into a structured decision.
+
+        Supports multi-line field values and case-insensitive field matching.
+        Falls back to heuristics if structured parsing fails.
+        """
+        import re
+
+        result: dict[str, str] = {
             "decision": "continue",
             "assessment": "",
             "insights": "",
             "next_focus": "",
         }
 
-        for line in output.split("\n"):
-            line = line.strip()
-            upper = line.upper()
-            if upper.startswith("DECISION:"):
-                val = line.split(":", 1)[1].strip().lower()
-                if val in ("continue", "pivot", "retry", "complete"):
-                    result["decision"] = val
-            elif upper.startswith("ASSESSMENT:"):
-                result["assessment"] = line.split(":", 1)[1].strip()
-            elif upper.startswith("INSIGHTS:"):
-                result["insights"] = line.split(":", 1)[1].strip()
-            elif upper.startswith("NEXT_FOCUS:"):
-                result["next_focus"] = line.split(":", 1)[1].strip()
+        fields = ("DECISION", "ASSESSMENT", "INSIGHTS", "NEXT_FOCUS")
+        # Build regex that captures FIELD: <value until next FIELD: or end>
+        pattern = re.compile(
+            r"(?:^|\n)\s*(" + "|".join(fields) + r")\s*:\s*(.*?)(?=\n\s*(?:"
+            + "|".join(fields) + r")\s*:|$)",
+            re.IGNORECASE | re.DOTALL,
+        )
+
+        for match in pattern.finditer(output):
+            key = match.group(1).upper().strip()
+            val = match.group(2).strip()
+            if key == "DECISION":
+                # Extract first valid decision word
+                val_lower = val.lower()
+                for d in ("complete", "pivot", "continue"):
+                    if d in val_lower:
+                        result["decision"] = d
+                        break
+            else:
+                result[key.lower()] = val
+
+        # Heuristic fallback: if output mentions "objective achieved" / "flag found"
+        # but no DECISION field was parsed, treat as complete
+        if result["decision"] == "continue":
+            lower = output.lower()
+            if any(phrase in lower for phrase in (
+                "objective achieved", "mission complete", "flag found",
+                "flag{", "ctf{", "successfully exploited", "root access obtained",
+            )):
+                result["decision"] = "complete"
+                if not result["assessment"]:
+                    result["assessment"] = "Objective achieved (auto-detected)"
 
         return result
 

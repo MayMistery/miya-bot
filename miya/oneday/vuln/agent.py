@@ -68,6 +68,13 @@ When multiple CVEs affect the same target, flag chaining potential in the assess
 - Note version ranges carefully — do not report CVEs for unaffected versions.
 - Flag any zero-day indicators (CVE reserved but no patch available).
 - Include MITRE ATT&CK technique mappings where applicable.
+
+## Structured Event Output
+Emit structured events for each confirmed vulnerability:
+
+[EVENT:VulnerabilityFound {"vuln_id": "CVE-2021-44228", "vuln_type": "Remote Code Execution", "cwe_id": "CWE-502", "severity": "critical", "location": "10.0.0.1:8080", "description": "Log4Shell via JNDI lookup", "context": "vuln"}]
+
+[EVENT:CVEMatched {"cve_id": "CVE-2021-44228", "cvss": 10.0, "affected_software": "Apache Log4j 2.14.1", "exploit_available": true, "context": "vuln"}]
 """
 
 

@@ -53,6 +53,15 @@ Report all discovered assets as structured data:
 - Never skip version detection — downstream contexts depend on accurate fingerprints.
 - Flag any unusual or unexpected services immediately.
 - If a host appears to be a honeypot, note it explicitly.
+
+## Structured Event Output
+For each discovery, emit structured events that the system can parse:
+
+[EVENT:AssetDiscovered {"host": "example.com", "ip": "10.0.0.1", "ports": [80, 443, 22], "services": ["http", "https", "ssh"], "os": "Ubuntu 22.04", "context": "recon"}]
+
+[EVENT:FingerprintCompleted {"software": "Apache", "version": "2.4.52", "technology_stack": ["PHP 8.1", "MySQL 8.0"], "context": "recon"}]
+
+Emit one AssetDiscovered per host and one FingerprintCompleted per software component found.
 """
 
 

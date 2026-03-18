@@ -56,6 +56,16 @@ requests exploiting TOCTOU windows (e.g., balance check vs deduction).
 - Python for scripting complex exploitation chains
 
 Always explain your reasoning, document each step, and capture the flag.
+
+## Structured Event Output
+Emit structured events as you progress:
+
+[EVENT:ChallengeIdentified {"challenge_name": "Baby SQLi", "category": "web", "difficulty": "easy", "technology_stack": ["PHP", "MySQL"], "context": "ctf"}]
+
+[EVENT:VulnerabilityFound {"vuln_id": "sqli-login", "vuln_type": "SQL Injection", "severity": "critical", "location": "/login.php", "description": "Login form vulnerable to boolean-based blind SQLi", "context": "ctf"}]
+
+When you find the flag:
+[EVENT:ChallengeSolved {"challenge_name": "Baby SQLi", "flag": "flag{...}", "technique": "UNION-based SQL injection", "context": "ctf"}]
 """
 
 

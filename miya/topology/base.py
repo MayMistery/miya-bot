@@ -197,6 +197,51 @@ def extract_events_from_output(output: str, mission: Mission) -> list[DomainEven
     return events
 
 
+# ═══════════════════════════════════════════════════════════════════
+#  Shared EVENT instruction — appended to topology phase prompts
+# ═══════════════════════════════════════════════════════════════════
+
+EVENT_INSTRUCTION = """
+## Structured Event Output (IMPORTANT)
+Throughout your response, emit structured events so findings are captured
+in the system's blackboard.  Format:
+
+    [EVENT:EventTypeName {"field": "value", ...}]
+
+Available event types:
+
+**Recon:**
+  [EVENT:AssetDiscovered {{"host": "h", "ip": "1.2.3.4", "ports": [80], "services": ["http"], "os": "Linux", "context": "recon"}}]
+  [EVENT:FingerprintCompleted {{"software": "Apache", "version": "2.4.52", "technology_stack": ["PHP 8.1"], "context": "recon"}}]
+
+**Vulnerability:**
+  [EVENT:ScanCompleted {{"target_host": "1.2.3.4", "target_ports": [80], "findings_count": 2, "scanner": "nuclei", "context": "scan"}}]
+  [EVENT:VulnerabilityFound {{"vuln_id": "CVE-...", "vuln_type": "RCE", "cwe_id": "CWE-502", "severity": "critical", "location": "...", "description": "...", "context": "vuln"}}]
+  [EVENT:CVEMatched {{"cve_id": "CVE-...", "cvss": 9.8, "affected_software": "...", "exploit_available": true, "context": "vuln"}}]
+
+**Exploit:**
+  [EVENT:ExploitAttempted {{"cve_id": "CVE-...", "technique": "...", "payload_summary": "...", "context": "exploit"}}]
+  [EVENT:ExploitSucceeded {{"cve_id": "CVE-...", "access_gained": "root", "evidence": "uid=0(root)", "context": "exploit"}}]
+  [EVENT:ExploitFailed {{"cve_id": "CVE-...", "reason": "...", "context": "exploit"}}]
+
+**Post-exploit:**
+  [EVENT:PrivilegeEscalated {{"from_level": "user", "to_level": "root", "technique": "...", "context": "post"}}]
+  [EVENT:LootCollected {{"loot_type": "credentials", "description": "...", "value": "...", "context": "post"}}]
+
+**0-day:**
+  [EVENT:EntryPointDiscovered {{"location": "file:line", "input_type": "http_parameter", "input_vectors": ["param:id"], "risk_level": "high", "context": "entrypoint"}}]
+  [EVENT:TaintPathTraced {{"source": "...", "sink": "...", "path": ["..."], "sanitized": false, "context": "dataflow"}}]
+  [EVENT:SinkConfirmed {{"sink_type": "sql_injection", "location": "...", "confidence": "high", "impact": "...", "context": "sink"}}]
+  [EVENT:PoCValidated {{"vulnerability": "...", "poc_type": "exploit_script", "success": true, "impact": "...", "context": "poc"}}]
+
+**CTF:**
+  [EVENT:ChallengeIdentified {{"challenge_name": "...", "category": "web", "difficulty": "medium", "technology_stack": ["PHP"], "context": "ctf"}}]
+  [EVENT:ChallengeSolved {{"challenge_name": "...", "flag": "flag{{...}}", "technique": "...", "context": "ctf"}}]
+
+Emit events inline in your response as you discover things. Every finding MUST have an EVENT marker.
+"""
+
+
 def _sdk_env() -> dict[str, str]:
     """Build env overrides for ClaudeAgentOptions from Miya config env vars.
 

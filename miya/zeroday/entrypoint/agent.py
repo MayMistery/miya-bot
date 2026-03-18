@@ -62,6 +62,11 @@ For each discovered entry point, emit structured data with:
 endpoints, and internal APIs are often less hardened.
 - Check for route parameter injection (e.g., /api/{table}/query).
 - Identify any middleware that applies sanitization or validation globally.
+
+## Structured Event Output
+Emit structured events for each entry point found:
+
+[EVENT:EntryPointDiscovered {"location": "src/api/users.py:42", "input_type": "http_parameter", "input_vectors": ["query_param:id", "header:X-Forwarded-For"], "risk_level": "high", "context": "entrypoint"}]
 """
 
 

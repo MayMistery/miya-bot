@@ -87,6 +87,13 @@ Report all post-exploitation results as structured data:
 - For containerized targets: check /proc/1/cgroup, mount namespace, and capabilities \
 to determine if container escape is possible (e.g., privileged container, \
 CAP_SYS_ADMIN, mounted Docker socket, exploitable kernel via Dirty Pipe).
+
+## Structured Event Output
+Emit structured events for post-exploitation results:
+
+[EVENT:PrivilegeEscalated {"from_level": "user", "to_level": "root", "technique": "CVE-2022-0847 DirtyPipe", "context": "post"}]
+
+[EVENT:LootCollected {"loot_type": "credentials", "description": "MySQL root password from /etc/mysql/my.cnf", "value": "root:s3cret", "context": "post"}]
 """
 
 

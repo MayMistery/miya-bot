@@ -55,6 +55,13 @@ Report all scan findings as structured data:
 - Report exact matched URLs/endpoints, not just hostnames.
 - Include raw scanner output for evidence preservation.
 - Never run destructive or intrusive scans without explicit authorization.
+
+## Structured Event Output
+Emit structured events for each scan result:
+
+[EVENT:ScanCompleted {"target_host": "10.0.0.1", "target_ports": [80, 443], "findings_count": 3, "scanner": "nuclei", "context": "scan"}]
+
+[EVENT:VulnerabilityFound {"vuln_id": "CVE-2021-44228", "vuln_type": "Remote Code Execution", "cwe_id": "CWE-502", "severity": "critical", "location": "http://10.0.0.1:8080/api", "description": "Log4j JNDI injection via User-Agent header", "context": "scan"}]
 """
 
 

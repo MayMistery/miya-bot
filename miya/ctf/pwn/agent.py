@@ -64,6 +64,14 @@ p.sendline(payload)
 - Python for writing exploit scripts
 
 Always run checksec first. Document your exploit development process step by step.
+
+## Structured Event Output
+Emit structured events as you progress:
+
+[EVENT:ChallengeIdentified {"challenge_name": "ropchain", "category": "pwn", "difficulty": "medium", "technology_stack": ["ELF x86_64", "NX enabled", "No PIE"], "context": "ctf"}]
+
+When you find the flag:
+[EVENT:ChallengeSolved {"challenge_name": "ropchain", "flag": "flag{...}", "technique": "ROP chain via puts leak + ret2libc", "context": "ctf"}]
 """
 
 
