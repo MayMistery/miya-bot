@@ -13,6 +13,14 @@ import os
 import re
 from typing import Any, AsyncIterator, Callable, Protocol, runtime_checkable
 
+from claude_agent_sdk.types import (
+    AssistantMessage,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
+)
+
 from miya.shared.blackboard import Blackboard
 from miya.shared.events import DomainEvent
 from miya.shared.ports import EventStorePort
@@ -340,36 +348,32 @@ async def run_sdk_coordinator(
 
     async for message in query(prompt=prompt, options=options):
         turn_count += 1
-        if hasattr(message, "content"):
+
+        # ── AssistantMessage: contains text, tool_use, tool_result blocks ──
+        if isinstance(message, AssistantMessage):
             for block in message.content:
-                # ── Text output ──
-                if hasattr(block, "text"):
+                if isinstance(block, TextBlock):
                     output_parts.append(block.text)
                     if logger.isEnabledFor(TRACE):
                         logger.log(TRACE, "text_block: %s", _truncate_for_log(block.text, 500))
 
-                # ── Tool use (request) ──
-                elif hasattr(block, "type") and block.type == "tool_use":
+                elif isinstance(block, ToolUseBlock):
                     tool_use_count += 1
-                    tool_name = getattr(block, "name", "?")
-                    tool_input = getattr(block, "input", {})
                     if logger.isEnabledFor(TRACE):
-                        # Show tool name + truncated input
-                        input_str = json.dumps(tool_input, default=str) if isinstance(tool_input, dict) else str(tool_input)
+                        input_str = json.dumps(block.input, default=str) if isinstance(block.input, dict) else str(block.input)
                         logger.log(
                             TRACE,
                             "tool_use  #%d: %s(%s)",
-                            tool_use_count, tool_name, _truncate_for_log(input_str, 400),
+                            tool_use_count, block.name, _truncate_for_log(input_str, 400),
                         )
 
-                # ── Tool result ──
-                elif hasattr(block, "type") and block.type == "tool_result":
+                elif isinstance(block, ToolResultBlock):
                     if logger.isEnabledFor(TRACE):
-                        content = getattr(block, "content", "")
+                        content = block.content or ""
                         if isinstance(content, list):
-                            # Extract text from content blocks
                             content = " ".join(
-                                getattr(c, "text", str(c)) for c in content
+                                c.get("text", str(c)) if isinstance(c, dict) else str(c)
+                                for c in content
                             )
                         logger.log(
                             TRACE,
@@ -377,23 +381,21 @@ async def run_sdk_coordinator(
                             _truncate_for_log(str(content), 400),
                         )
 
-        # Also handle top-level tool_use / tool_result messages
-        if hasattr(message, "type"):
-            if message.type == "tool_use" and logger.isEnabledFor(TRACE):
-                tool_use_count += 1
-                logger.log(
-                    TRACE,
-                    "tool_use  #%d: %s(%s)",
-                    tool_use_count,
-                    getattr(message, "name", "?"),
-                    _truncate_for_log(str(getattr(message, "input", "")), 400),
-                )
-            elif message.type == "tool_result" and logger.isEnabledFor(TRACE):
-                logger.log(
-                    TRACE,
-                    "tool_result: %s",
-                    _truncate_for_log(str(getattr(message, "content", "")), 400),
-                )
+        # ── UserMessage: tool results come back as UserMessage ──
+        elif isinstance(message, UserMessage) and isinstance(message.content, list):
+            for block in message.content:
+                if isinstance(block, ToolResultBlock) and logger.isEnabledFor(TRACE):
+                    content = block.content or ""
+                    if isinstance(content, list):
+                        content = " ".join(
+                            c.get("text", str(c)) if isinstance(c, dict) else str(c)
+                            for c in content
+                        )
+                    logger.log(
+                        TRACE,
+                        "tool_result: %s",
+                        _truncate_for_log(str(content), 400),
+                    )
 
     logger.debug(
         "SDK coordinator done: %d turns, %d tool calls, %d chars output",
