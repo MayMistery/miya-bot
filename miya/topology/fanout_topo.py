@@ -71,7 +71,7 @@ Target: {target}
 {operator_hint}
 
 For each challenge, report:
-[EVENT:ChallengeIdentified {{"challenge_name": "...", "category": "web|pwn|crypto|reverse|misc", "points": 0, "context": "ctf"}}]
+[EVENT:ChallengeIdentified {"challenge_name": "...", "category": "web|pwn|crypto|reverse|misc", "points": 0, "context": "ctf"}]
 
 List every challenge you can find. Use the platform's API, web interface, or challenge list page.
 """
@@ -82,7 +82,7 @@ Challenges:
 {challenge_list}
 
 For each, respond with:
-[EVENT:ChallengeClassified {{"challenge_name": "...", "category": "web|pwn|crypto|reverse|misc", "confidence": 0.8, "reasoning": "...", "context": "ctf"}}]
+[EVENT:ChallengeClassified {"challenge_name": "...", "category": "web|pwn|crypto|reverse|misc", "confidence": 0.8, "reasoning": "...", "context": "ctf"}]
 """
 
 
@@ -103,10 +103,12 @@ class FanoutTopology:
         self,
         max_parallel: int = 3,
         max_iterations_per_challenge: int = 5,
+        per_challenge_timeout: float = 1800.0,  # 30 minutes default
         coordinator: Any | None = None,
     ) -> None:
         self._max_parallel = max_parallel
         self._max_iter = max_iterations_per_challenge
+        self._per_challenge_timeout = per_challenge_timeout
         self._coordinator = coordinator
 
     @property
@@ -202,7 +204,7 @@ class FanoutTopology:
             )
             classify_prompt = _CLASSIFY_BATCH_PROMPT.format(
                 challenge_list=challenge_list,
-            )
+            ) + EVENT_INSTRUCTION
             classify_output = await self._run(classify_prompt, agents, blackboard)
 
             for ev in extract_events_from_output(classify_output, mission):
@@ -290,14 +292,25 @@ class FanoutTopology:
                 )
 
                 try:
-                    async for ev in ooda.execute(
-                        sub_mission, sub_bb, sub_agents, event_store,
-                        campaign=campaign,
-                    ):
-                        # Filter out sub-mission lifecycle events to avoid
-                        # polluting the parent mission's event stream (BUG-2)
-                        if ev.__class__.event_type not in _SUB_MISSION_FILTER:
-                            await event_queue.put(ev)
+                    async def _run_ooda() -> None:
+                        async for ev in ooda.execute(
+                            sub_mission, sub_bb, sub_agents, event_store,
+                            campaign=campaign,
+                        ):
+                            # Filter out sub-mission lifecycle events to avoid
+                            # polluting the parent mission's event stream (BUG-2)
+                            if ev.__class__.event_type not in _SUB_MISSION_FILTER:
+                                await event_queue.put(ev)
+
+                    await asyncio.wait_for(
+                        _run_ooda(),
+                        timeout=self._per_challenge_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Challenge %s timed out after %.0fs",
+                        ch_name, self._per_challenge_timeout,
+                    )
                 except Exception:
                     logger.error("Challenge %s failed", ch_name, exc_info=True)
 

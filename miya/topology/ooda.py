@@ -195,7 +195,7 @@ agent who will solve the challenge.>
 _FLAG_SUBMIT_INSTRUCTION = """
 When you find a flag, also try to submit it. Use curl or the platform's API.
 Report the result:
-[EVENT:FlagSubmitted {{"challenge_name": "...", "flag": "flag{{...}}", "accepted": true, "response": "...", "context": "ctf"}}]
+[EVENT:FlagSubmitted {"challenge_name": "...", "flag": "flag{...}", "accepted": true, "response": "...", "context": "ctf"}]
 If submission fails or no API is available, just report the flag via ChallengeSolved.
 """
 
@@ -587,12 +587,14 @@ class OODATopology:
                 result[key.lower()] = val
 
         # Heuristic fallback: if output mentions "objective achieved" / "flag found"
-        # but no DECISION field was parsed, treat as complete
+        # but no DECISION field was parsed, treat as complete.
+        # NOTE: "flag{" removed — it triggers false positives when the model
+        # discusses CTF flags without having actually captured one.
         if result["decision"] == "continue":
             lower = output.lower()
             if any(phrase in lower for phrase in (
                 "objective achieved", "mission complete", "flag found",
-                "flag{", "ctf{", "successfully exploited", "root access obtained",
+                "successfully exploited", "root access obtained",
             )):
                 result["decision"] = "complete"
                 if not result["assessment"]:
@@ -637,6 +639,10 @@ class OODATopology:
         except Exception:
             logger.debug("Auto-classify failed, skipping", exc_info=True)
             return "", ""
+
+        # Extract any events emitted during classification exploration
+        for extracted in extract_events_from_output(output, mission):
+            blackboard.apply(extracted)
 
         # Parse CATEGORY: from output
         m = re.search(r"CATEGORY\s*:\s*(web|pwn|crypto|reverse|misc)", output, re.IGNORECASE)

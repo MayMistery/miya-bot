@@ -37,6 +37,19 @@ from miya.topology.base import (
 logger = logging.getLogger(__name__)
 
 
+def _find_node_by_label(graph: AttackGraph, label: str) -> GraphNode | None:
+    """Find a node by label (case-insensitive prefix match)."""
+    label_lower = label.lower()
+    for node in graph.nodes.values():
+        if node.label.lower() == label_lower:
+            return node
+    # Fallback: prefix match
+    for node in graph.nodes.values():
+        if node.label.lower().startswith(label_lower):
+            return node
+    return None
+
+
 _PLAN_PROMPT = """## Strategic Planner — Attack Path Selection
 
 You are the strategic planner for a penetration test.
@@ -248,11 +261,15 @@ class AttackGraphTopology:
                     aggregate_id=mission.id,
                     mission=mission.mission_type.value,
                 )
-                await self._run_agent(
+                extra_recon_output = await self._run_agent(
                     f"Additional recon needed. Current graph: {graph.summary()}\n"
-                    f"Blackboard:\n{blackboard.to_context_prompt()}",
+                    f"Blackboard:\n{blackboard.to_context_prompt()}"
+                    + EVENT_INSTRUCTION,
                     mission, agents, blackboard,
                 )
+                for extracted in extract_events_from_output(extra_recon_output, mission):
+                    yield extracted
+                    blackboard.apply(extracted)
                 unexplored = graph.get_unexplored_edges()
                 if not unexplored:
                     break  # No more paths to try
@@ -354,6 +371,9 @@ class AttackGraphTopology:
                 yield extracted
                 blackboard.apply(extracted)
 
+            # Parse and apply graph mutations from REBUILD output
+            self._apply_rebuild(rebuild_output, graph)
+
             # Check if objective reached (via OBJECTIVE_REACHED or graph state)
             obj_reached = bool(re.search(
                 r"OBJECTIVE_REACHED\s*:\s*yes", rebuild_output, re.IGNORECASE
@@ -454,6 +474,104 @@ class AttackGraphTopology:
         failure_score = sum(1 for p in failure_phrases if p in lower)
         return success_score > failure_score
 
+    @staticmethod
+    def _apply_rebuild(rebuild_output: str, graph: AttackGraph) -> None:
+        """Parse NEW_NODES/NEW_EDGES/STATUS_UPDATES from REBUILD output and mutate graph.
+
+        The LLM output format is free-form text with structured markers.
+        We parse conservatively — unknown formats are ignored with a warning.
+        """
+        # ── NEW_NODES ──────────────────────────────────────────────
+        nodes_match = re.search(
+            r"NEW_NODES\s*:\s*(.*?)(?=\n(?:NEW_EDGES|STATUS_UPDATES|OBJECTIVE_REACHED)\s*:|$)",
+            rebuild_output, re.DOTALL | re.IGNORECASE,
+        )
+        if nodes_match:
+            nodes_text = nodes_match.group(1).strip()
+            if nodes_text.lower() not in ("none", "n/a", "-", ""):
+                # Parse each line as a node: "- NodeLabel (type: asset, status: discovered)"
+                for line in nodes_text.splitlines():
+                    line = line.strip().lstrip("- •*")
+                    if not line:
+                        continue
+                    # Extract label and optional properties
+                    label = re.split(r"\s*[\(\[]", line)[0].strip()
+                    if not label:
+                        continue
+                    node_type = ""
+                    type_m = re.search(r"type\s*[:=]\s*(\w+)", line, re.IGNORECASE)
+                    if type_m:
+                        node_type = type_m.group(1)
+                    status = "discovered"
+                    status_m = re.search(r"status\s*[:=]\s*(\w+)", line, re.IGNORECASE)
+                    if status_m:
+                        status = status_m.group(1)
+                    node = graph.add_node(GraphNode(
+                        label=label, node_type=node_type, status=status,
+                    ))
+                    logger.debug("REBUILD: added node %s (%s)", label, node.id[:8])
+
+        # ── NEW_EDGES ──────────────────────────────────────────────
+        edges_match = re.search(
+            r"NEW_EDGES\s*:\s*(.*?)(?=\n(?:STATUS_UPDATES|OBJECTIVE_REACHED)\s*:|$)",
+            rebuild_output, re.DOTALL | re.IGNORECASE,
+        )
+        if edges_match:
+            edges_text = edges_match.group(1).strip()
+            if edges_text.lower() not in ("none", "n/a", "-", ""):
+                for line in edges_text.splitlines():
+                    line = line.strip().lstrip("- •*")
+                    if not line:
+                        continue
+                    # Parse "Source → Target (technique)" or "Source -> Target: technique"
+                    arrow_m = re.match(
+                        r"(.+?)\s*(?:→|->|=>)\s*(.+?)(?:\s*[\(\[:]\s*(.+?)[\)\]]?\s*)?$",
+                        line,
+                    )
+                    if not arrow_m:
+                        continue
+                    src_label = arrow_m.group(1).strip()
+                    tgt_label = arrow_m.group(2).strip()
+                    technique = (arrow_m.group(3) or "").strip() or f"{src_label} to {tgt_label}"
+
+                    # Resolve labels to node IDs (or create nodes)
+                    src_node = _find_node_by_label(graph, src_label)
+                    tgt_node = _find_node_by_label(graph, tgt_label)
+                    if not src_node:
+                        src_node = graph.add_node(GraphNode(label=src_label, node_type="asset"))
+                    if not tgt_node:
+                        tgt_node = graph.add_node(GraphNode(label=tgt_label, node_type="asset"))
+
+                    edge = graph.add_edge(GraphEdge(
+                        source_id=src_node.id,
+                        target_id=tgt_node.id,
+                        label=technique,
+                    ))
+                    logger.debug("REBUILD: added edge %s → %s (%s)", src_label, tgt_label, edge.id[:8])
+
+        # ── STATUS_UPDATES ─────────────────────────────────────────
+        status_match = re.search(
+            r"STATUS_UPDATES\s*:\s*(.*?)(?=\n(?:OBJECTIVE_REACHED)\s*:|$)",
+            rebuild_output, re.DOTALL | re.IGNORECASE,
+        )
+        if status_match:
+            status_text = status_match.group(1).strip()
+            if status_text.lower() not in ("none", "n/a", "-", ""):
+                for line in status_text.splitlines():
+                    line = line.strip().lstrip("- •*")
+                    if not line:
+                        continue
+                    # Parse "NodeLabel → status" or "NodeLabel: exploited"
+                    sm = re.match(r"(.+?)\s*(?:→|->|:|=)\s*(\w+)", line)
+                    if not sm:
+                        continue
+                    label = sm.group(1).strip()
+                    new_status = sm.group(2).strip().lower()
+                    node = _find_node_by_label(graph, label)
+                    if node:
+                        graph.update_node_status(node.id, new_status)
+                        logger.debug("REBUILD: updated %s → %s", label, new_status)
+
     async def _run_agent(
         self,
         prompt: str,
@@ -471,15 +589,19 @@ class AttackGraphTopology:
             for name, handle in agents.items()
         }
 
-        if self._coordinator is not None:
-            return await self._coordinator.run(
-                prompt=prompt,
-                agents=agent_defs,
-                mcp_servers=list(all_mcp_names),
-            )
+        try:
+            if self._coordinator is not None:
+                return await self._coordinator.run(
+                    prompt=prompt,
+                    agents=agent_defs,
+                    mcp_servers=list(all_mcp_names),
+                )
 
-        # Fallback: shared Claude Agent SDK coordinator
-        return await run_sdk_coordinator(prompt, agent_defs, list(all_mcp_names))
+            # Fallback: shared Claude Agent SDK coordinator
+            return await run_sdk_coordinator(prompt, agent_defs, list(all_mcp_names))
+        except Exception as exc:
+            logger.error("SDK coordinator call failed: %s", exc, exc_info=True)
+            return f"[ERROR: coordinator call failed — {exc}]"
 
 
 # ── Register ──────────────────────────────────────────────────────
