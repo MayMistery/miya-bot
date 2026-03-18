@@ -536,12 +536,15 @@ _NL_PARSE_PROMPT = (
     "- If you cannot determine topology, use ooda\n"
     "\n"
     'Rules for "meta" (runtime directives — set ONLY if user explicitly requests):\n'
-    '- "verbose": "trace" | "debug" | "info" — log verbosity level\n'
-    "  Detect from phrases like: 详细日志/verbose/debug日志/trace/show details → trace\n"
-    "                             调试模式/debug mode → debug\n"
-    "                             安静/quiet → info\n"
-    '- "model": "opus" | "sonnet" | "haiku" — model override\n'
-    "  Detect from phrases like: 用sonnet/use haiku/模型用opus → the named model\n"
+    '- "verbose": "trace" | "debug" | "info" — log verbosity level.\n'
+    "  Use your judgment to infer the user's intent:\n"
+    "    trace = most detailed (tool calls, SDK internals, full output)\n"
+    "    debug = moderate detail (phase summaries, timing)\n"
+    "    info  = normal / quiet\n"
+    "  Examples: 详细日志→trace, verbose→trace, debug模式→debug, 安静→info,\n"
+    "  看看工具调用→trace, 我想看每一步→trace, show me everything→trace\n"
+    '- "model": "opus" | "sonnet" | "haiku" — model override.\n'
+    "  Infer from context: 用sonnet→sonnet, fast/快→sonnet, cheap→haiku, etc.\n"
     "- Only include keys in meta that the user explicitly requested. Empty {} if none.\n"
     "\n"
     "Do NOT wrap JSON in markdown code blocks.\n"
@@ -630,92 +633,147 @@ async def _nl_parse_mission(
             console_obj.print("[dim]Please specify: <mission_type> <target> [options][/dim]")
             return None
 
-        # Show proposed mission and ask for confirmation
-        model_display = meta.get("model") or cfg.get("model", "opus")
-        panel_lines = [
-            f"[bold]Mission:[/bold]  {mission_type.upper()}",
-            f"[bold]Target:[/bold]   {target}",
-            f"[bold]Topology:[/bold] {topology}",
-            f"[bold]Model:[/bold]    {model_display}",
-        ]
-        if meta.get("verbose"):
-            panel_lines.append(f"[bold]Verbose:[/bold]  {meta['verbose']}")
-        if prompt:
-            display_prompt = prompt[:150] + ("..." if len(prompt) > 150 else "")
-            panel_lines.append(f"[bold]Prompt:[/bold]  {display_prompt}")
-        if extra_options:
-            display_opts = {k: v for k, v in extra_options.items() if not k.startswith("_")}
-            if display_opts:
-                panel_lines.append(f"[bold]Options:[/bold]  {display_opts}")
+        # ── Build editable fields ────────────────────────────────
+        # Mutable dict so interactive edit can modify in place
+        fields: dict[str, str] = {
+            "mission":  mission_type,
+            "target":   target,
+            "topology": topology,
+            "model":    meta.get("model") or cfg.get("model", "opus"),
+            "verbose":  meta.get("verbose", ""),
+            "prompt":   prompt,
+        }
+        # Merge non-internal extra_options as editable fields
+        for k, v in extra_options.items():
+            if not k.startswith("_"):
+                fields[k] = str(v)
 
-        console_obj.print(Panel(
-            "\n".join(panel_lines),
-            title="[bold yellow]Proposed Mission[/bold yellow]",
-            border_style="yellow",
-        ))
-
-        # Double-check with user
         from prompt_toolkit.formatted_text import HTML
-        confirm = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: session.prompt(
-                HTML(
-                    '<ansiyellow><b>Execute this mission?</b></ansiyellow> '
-                    '<ansibrightblack>(y/n/edit)</ansibrightblack> '
-                ),
-            ),
-        )
-        confirm = confirm.strip().lower()
 
-        if confirm in ("n", "no"):
-            console_obj.print("[dim]Cancelled.[/dim]")
-            return None
+        def _show_fields() -> None:
+            """Print numbered field table."""
+            console_obj.print()
+            idx = 1
+            for key, val in fields.items():
+                display = val
+                if key == "prompt" and len(val) > 80:
+                    display = val[:77] + "..."
+                style = "bold cyan" if key in ("mission", "target") else "white"
+                console_obj.print(
+                    f"  [dim]{idx:>2}.[/dim] [bold]{key:.<12s}[/bold] [{style}]{display}[/{style}]"
+                )
+                idx += 1
 
-        if confirm in ("e", "edit"):
-            import shlex as _shlex
-            prefill = f"{mission_type} {_shlex.quote(target)}"
-            if topology != "ooda":
-                prefill += f" --topology {topology}"
-            if prompt:
-                prefill += f" --prompt {_shlex.quote(prompt)}"
-            for k, v in extra_options.items():
-                if not k.startswith("_"):
-                    prefill += f" --{k} {_shlex.quote(str(v))}"
-            console_obj.print(f"[dim]Edit and press Enter:[/dim]")
-            edited = await asyncio.get_event_loop().run_in_executor(
+        _show_fields()
+
+        # ── Confirmation loop ─────────────────────────────────────
+        while True:
+            action = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: session.prompt(
                     HTML(
-                        '<ansired><b>miya</b></ansired> '
-                        '<ansibrightblack>&gt;</ansibrightblack> '
+                        '<ansiyellow><b>y</b></ansiyellow>'
+                        '<ansibrightblack>=run, </ansibrightblack>'
+                        '<ansiyellow><b>n</b></ansiyellow>'
+                        '<ansibrightblack>=cancel, </ansibrightblack>'
+                        '<ansiyellow><b>#</b></ansiyellow>'
+                        '<ansibrightblack>=edit field </ansibrightblack>'
+                        '<ansibrightblack>&gt; </ansibrightblack>'
                     ),
-                    default=prefill,
                 ),
             )
-            if edited.strip():
-                try:
-                    eparts = shlex.split(edited.strip())
-                except ValueError:
-                    console_obj.print("[red]Parse error in edited command.[/red]")
-                    return None
-                if len(eparts) < 2:
-                    console_obj.print("[red]Need at least: <mission> <target>[/red]")
-                    return None
-                return _reparse_edited(eparts, cfg, console_obj)
-            return None
+            action = action.strip().lower()
 
-        # User confirmed — NOW apply meta side-effects
-        if meta.get("verbose"):
-            _apply_verbose(meta["verbose"], cfg, console_obj)
-        if meta.get("model"):
-            extra_options["_model_override"] = meta["model"]
+            if action in ("n", "no", "q"):
+                console_obj.print("[dim]Cancelled.[/dim]")
+                return None
 
-        opts: dict[str, Any] = dict(extra_options)
+            if action in ("y", "yes", ""):
+                break
+
+            # Try to parse as field number
+            try:
+                field_idx = int(action)
+            except ValueError:
+                # Maybe they typed a field name directly
+                if action in fields:
+                    field_idx = list(fields.keys()).index(action) + 1
+                else:
+                    console_obj.print(f"[dim]Enter y, n, or a field number (1-{len(fields)})[/dim]")
+                    continue
+
+            field_keys = list(fields.keys())
+            if field_idx < 1 or field_idx > len(field_keys):
+                console_obj.print(f"[dim]Field number must be 1-{len(field_keys)}[/dim]")
+                continue
+
+            field_name = field_keys[field_idx - 1]
+            current_val = fields[field_name]
+
+            # Special handling for fields with constrained values
+            if field_name == "mission":
+                hint = " [dim](oneday/zeroday/ctf)[/dim]"
+            elif field_name == "topology":
+                hint = " [dim](ooda/attack_graph)[/dim]"
+            elif field_name == "model":
+                hint = " [dim](opus/sonnet/haiku)[/dim]"
+            elif field_name == "verbose":
+                hint = " [dim](trace/debug/info or empty)[/dim]"
+            else:
+                hint = ""
+
+            console_obj.print(f"  [bold]{field_name}[/bold]{hint}")
+            new_val = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: session.prompt(
+                    HTML(f'<ansibrightblack>  new value &gt; </ansibrightblack>'),
+                    default=current_val,
+                ),
+            )
+            new_val = new_val.strip()
+
+            # Validate constrained fields
+            if field_name == "mission" and new_val not in ("oneday", "zeroday", "ctf"):
+                console_obj.print("[red]Must be oneday, zeroday, or ctf[/red]")
+                continue
+            if field_name == "topology" and new_val not in ("ooda", "attack_graph"):
+                console_obj.print("[red]Must be ooda or attack_graph[/red]")
+                continue
+            if field_name == "model" and new_val not in ("opus", "sonnet", "haiku"):
+                console_obj.print("[red]Must be opus, sonnet, or haiku[/red]")
+                continue
+            if field_name == "verbose" and new_val and new_val not in ("trace", "debug", "info"):
+                console_obj.print("[red]Must be trace, debug, info, or empty[/red]")
+                continue
+            if field_name == "target" and not new_val:
+                console_obj.print("[red]Target cannot be empty[/red]")
+                continue
+
+            fields[field_name] = new_val
+            _show_fields()
+
+        # ── User confirmed — apply meta & build result ────────────
+        mission_type = fields["mission"]
+        target = fields["target"]
+        topology = fields["topology"]
+        prompt = fields["prompt"]
+
+        if fields.get("verbose"):
+            _apply_verbose(fields["verbose"], cfg, console_obj)
+
+        opts: dict[str, Any] = {}
+        if fields.get("model"):
+            opts["_model_override"] = fields["model"]
         if prompt:
             opts["_prompt"] = prompt
-        # Signal caller to skip the second "Launching Mission" panel
-        opts["_nl_confirmed"] = True
 
+        # Carry over extra option fields (category, language, etc.)
+        _core_fields = {"mission", "target", "topology", "model", "verbose", "prompt"}
+        for k, v in fields.items():
+            if k not in _core_fields and v:
+                opts[k] = v
+
+        opts["_nl_confirmed"] = True
         return mission_type, target, topology, opts
 
     except ImportError:
@@ -729,33 +787,6 @@ async def _nl_parse_mission(
         console_obj.print(f"[red]NL parse error: {e}[/red]")
         console_obj.print("[dim]Please use structured format: <mission_type> <target> [options][/dim]")
         return None
-
-
-def _reparse_edited(
-    parts: list[str], cfg: dict[str, Any], console_obj: Any,
-) -> tuple[str, str, str, dict[str, Any]] | None:
-    """Minimal parser for edited command line parts."""
-    mission_type = parts[0]
-    target = parts[1]
-    topology = cfg.get("topology", "ooda")
-    options: dict[str, Any] = {}
-
-    i = 2
-    while i < len(parts):
-        if parts[i] in ("--topology", "-T") and i + 1 < len(parts):
-            topology = parts[i + 1]; i += 2
-        elif parts[i] in ("--prompt", "-p") and i + 1 < len(parts):
-            options["_prompt"] = parts[i + 1]; i += 2
-        elif parts[i] in ("--category", "-c") and i + 1 < len(parts):
-            options["category"] = parts[i + 1]; i += 2
-        else:
-            i += 1
-
-    if mission_type not in ("oneday", "zeroday", "ctf"):
-        console_obj.print(f"[red]Unknown mission: {mission_type}[/red]")
-        return None
-
-    return mission_type, target, topology, options
 
 
 # ═══════════════════════════════════════════════════════════════════
