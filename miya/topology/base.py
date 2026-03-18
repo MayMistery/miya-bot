@@ -454,6 +454,48 @@ async def run_sdk_coordinator(
     return "\n".join(output_parts)
 
 
+def drain_hitl_queue(
+    operator_queue: asyncio.Queue[str] | None,
+    mission_id: str,
+    mission_type_value: str,
+    operator_prompt: str,
+) -> tuple[list[Any], str]:
+    """Drain HITL operator queue (non-blocking).
+
+    Shared by OODA and AttackGraph topologies to avoid duplication.
+
+    Returns:
+        (events_to_yield, operator_text_suffix)
+        Caller must yield the events and apply them to the blackboard.
+    """
+    from miya.shared.events import OperatorMessage
+
+    msgs: list[str] = []
+    if operator_queue is not None:
+        while not operator_queue.empty():
+            try:
+                msgs.append(operator_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+    if not msgs:
+        return [], operator_prompt
+
+    events = []
+    for m in msgs:
+        logger.info("Operator HITL: %s", m[:120])
+        events.append(OperatorMessage(
+            aggregate_id=mission_id,
+            content=m,
+            mission=mission_type_value,
+        ))
+    suffix = operator_prompt + (
+        "\n\n## Operator Live Directives\n"
+        + "\n".join(f"- {m}" for m in msgs)
+        + "\n"
+    )
+    return events, suffix
+
+
 TopologyFactory = Callable[..., Topology]
 
 

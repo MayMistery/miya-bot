@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from miya.shared.blackboard import Blackboard
-from miya.shared.events import DomainEvent
+from miya.shared.events import DomainEvent, MissionFailed
 from miya.shared.ports import CoordinatorPort, EventStorePort
 from miya.shared.types import Finding, Mission, MissionType, Target
 from miya.infra.event_store import SQLiteEventStore
@@ -261,6 +261,17 @@ class MissionService:
         except Exception as e:
             logger.error(f"Mission failed: {e}")
             mission.fail()
+            # Persist a MissionFailed terminal event
+            fail_event = MissionFailed(
+                aggregate_id=mission.id,
+                reason=str(e),
+                mission=mission_type.value,
+            )
+            collected_events.append(fail_event)
+            try:
+                await self._event_store.append([fail_event])
+            except Exception:
+                logger.debug("Could not persist MissionFailed event", exc_info=True)
             duration = (datetime.now(timezone.utc) - start_time).total_seconds()
             # Return partial report with findings collected so far
             return MissionReport(

@@ -324,6 +324,7 @@ _register_events()
 
 def event_from_dict(data: dict[str, Any]) -> DomainEvent:
     """Reconstruct a DomainEvent from its serialized form."""
+    data = dict(data)  # avoid mutating caller's dict
     event_type = data.pop("event_type", "DomainEvent")
     cls = _EVENT_REGISTRY.get(event_type, DomainEvent)
 

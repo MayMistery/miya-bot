@@ -502,6 +502,219 @@ def interactive(ctx: click.Context, db: str, model: str | None, api_key: str | N
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  Natural Language Mission Parsing
+# ═══════════════════════════════════════════════════════════════════
+
+
+_NL_PARSE_PROMPT = """\
+You are Miya's task parser. The user typed a natural language description of a
+penetration testing or CTF task.  Your job is to extract structured mission
+parameters from their input.
+
+Available mission types:
+- ctf      — Solve a CTF challenge (categories: web, pwn, crypto, reverse, misc)
+- oneday   — Exploit known CVEs in a target service/software
+- zeroday  — Discover 0-day vulnerabilities in source code or binaries
+
+Available topologies:
+- ooda          — Observe→Orient→Decide→Act loop with reflection gate (default)
+- attack_graph  — DAG-based attack path planning
+
+Respond EXACTLY in this format (JSON on a single line):
+{"mission_type": "ctf|oneday|zeroday", "target": "<url_or_path>", "topology": "ooda|attack_graph", "prompt": "<task description for the agent>", "options": {}}
+
+Rules:
+- "target" should be a URL, IP, file path, or network range extracted from the user's input
+- "prompt" should include the full task context the user described (challenge description, hints, etc.)
+- If a URL is present, extract it as "target"
+- If a file path (.zip, .py, .c, etc.) is present, extract it as "target"
+- For CTF, add "category" to options if you can determine it (web/pwn/crypto/reverse/misc)
+- If you cannot determine mission_type, default to "ctf"
+- If you cannot determine topology, use "ooda"
+- Do NOT wrap JSON in markdown code blocks
+
+User input:
+{user_input}
+"""
+
+
+async def _nl_parse_mission(
+    raw: str,
+    cfg: dict[str, Any],
+    console_obj: Any,
+    session: Any,
+) -> tuple[str, str, str, dict[str, Any]] | None:
+    """Use Claude Agent SDK to parse natural language into mission parameters.
+
+    Returns the same tuple as _parse_mission_args, or None if user declines.
+    """
+    import json as _json
+
+    console_obj.print("[dim]Understanding your request...[/dim]")
+
+    try:
+        from claude_agent_sdk import query, ClaudeAgentOptions
+        from claude_agent_sdk.types import AssistantMessage, TextBlock
+
+        options = ClaudeAgentOptions(
+            max_turns=1,
+            permission_mode="default",
+        )
+
+        parts: list[str] = []
+        async for message in query(
+            prompt=_NL_PARSE_PROMPT.format(user_input=raw),
+            options=options,
+        ):
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock):
+                        parts.append(block.text)
+
+        reply = "".join(parts).strip()
+
+        # Extract JSON from reply (handle possible markdown wrapping)
+        json_str = reply
+        if "```" in reply:
+            # Strip markdown code blocks
+            import re
+            m = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', reply, re.DOTALL)
+            if m:
+                json_str = m.group(1).strip()
+
+        data = _json.loads(json_str)
+
+        mission_type = data.get("mission_type", "ctf")
+        target = data.get("target", "")
+        topology = data.get("topology", cfg.get("topology", "ooda"))
+        prompt = data.get("prompt", raw)
+        extra_options = data.get("options", {})
+
+        if not target:
+            console_obj.print("[red]Could not extract a target from your input.[/red]")
+            console_obj.print("[dim]Please specify: <mission_type> <target> [options][/dim]")
+            return None
+
+        # Show proposed mission and ask for confirmation
+        panel_lines = [
+            f"[bold]Mission:[/bold]  {mission_type.upper()}",
+            f"[bold]Target:[/bold]   {target}",
+            f"[bold]Topology:[/bold] {topology}",
+        ]
+        if prompt:
+            # Show first 150 chars of prompt
+            display_prompt = prompt[:150] + ("..." if len(prompt) > 150 else "")
+            panel_lines.append(f"[bold]Prompt:[/bold]  {display_prompt}")
+        if extra_options:
+            panel_lines.append(f"[bold]Options:[/bold]  {extra_options}")
+
+        console_obj.print(Panel(
+            "\n".join(panel_lines),
+            title="[bold yellow]Proposed Mission[/bold yellow]",
+            border_style="yellow",
+        ))
+
+        # Double-check with user
+        from prompt_toolkit.formatted_text import HTML
+        confirm = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: session.prompt(
+                HTML(
+                    '<ansiyellow><b>Execute this mission?</b></ansiyellow> '
+                    '<ansibrightblack>(y/n/edit)</ansibrightblack> '
+                ),
+            ),
+        )
+        confirm = confirm.strip().lower()
+
+        if confirm in ("n", "no"):
+            console_obj.print("[dim]Cancelled.[/dim]")
+            return None
+
+        if confirm in ("e", "edit"):
+            # Let user edit as structured command
+            prefill = f"{mission_type} {target}"
+            if topology != "ooda":
+                prefill += f" --topology {topology}"
+            if prompt:
+                prefill += f' --prompt "{prompt}"'
+            for k, v in extra_options.items():
+                prefill += f" --{k} {v}"
+            console_obj.print(f"[dim]Edit and press Enter:[/dim]")
+            edited = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: session.prompt(
+                    HTML(
+                        '<ansired><b>miya</b></ansired> '
+                        '<ansibrightblack>&gt;</ansibrightblack> '
+                    ),
+                    default=prefill,
+                ),
+            )
+            if edited.strip():
+                # Re-parse the edited input
+                from miya.main import _detect_target_kind  # avoid forward ref
+                import shlex
+                try:
+                    eparts = shlex.split(edited.strip())
+                except ValueError:
+                    console_obj.print("[red]Parse error in edited command.[/red]")
+                    return None
+                if len(eparts) < 2:
+                    console_obj.print("[red]Need at least: <mission> <target>[/red]")
+                    return None
+                # Minimal re-parse
+                return _reparse_edited(eparts, cfg, console_obj)
+            return None
+
+        # User confirmed — build the result tuple
+        opts: dict[str, Any] = dict(extra_options)
+        if prompt:
+            opts["_prompt"] = prompt
+
+        return mission_type, target, topology, opts
+
+    except ImportError:
+        console_obj.print("[red]Claude Agent SDK not available for NL parsing.[/red]")
+        return None
+    except _json.JSONDecodeError:
+        console_obj.print("[red]Could not parse AI response. Please use structured format:[/red]")
+        console_obj.print("[dim]  <mission_type> <target> [--prompt <text>] [--topology <t>][/dim]")
+        return None
+    except Exception as e:
+        console_obj.print(f"[red]NL parse error: {e}[/red]")
+        console_obj.print("[dim]Please use structured format: <mission_type> <target> [options][/dim]")
+        return None
+
+
+def _reparse_edited(
+    parts: list[str], cfg: dict[str, Any], console_obj: Any,
+) -> tuple[str, str, str, dict[str, Any]] | None:
+    """Minimal parser for edited command line parts."""
+    mission_type = parts[0]
+    target = parts[1]
+    topology = cfg.get("topology", "ooda")
+    options: dict[str, Any] = {}
+
+    i = 2
+    while i < len(parts):
+        if parts[i] in ("--topology", "-T") and i + 1 < len(parts):
+            topology = parts[i + 1]; i += 2
+        elif parts[i] in ("--prompt", "-p") and i + 1 < len(parts):
+            options["_prompt"] = parts[i + 1]; i += 2
+        elif parts[i] in ("--category", "-c") and i + 1 < len(parts):
+            options["category"] = parts[i + 1]; i += 2
+        else:
+            i += 1
+
+    if mission_type not in ("oneday", "zeroday", "ctf"):
+        console_obj.print(f"[red]Unknown mission: {mission_type}[/red]")
+        return None
+
+    return mission_type, target, topology, options
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  Core Execution
 # ═══════════════════════════════════════════════════════════════════
 
@@ -692,6 +905,9 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
         t.add_row("events [n]", "Last n domain events (default: 20)")
         t.add_row("blackboard", "Current blackboard state")
         t.add_row("", "")
+        t.add_row("[dim]Natural Language:[/dim]", "")
+        t.add_row("<free text description>", "AI parses intent, confirms before run")
+        t.add_row("", "")
         t.add_row("[dim]Other:[/dim]", "")
         t.add_row("info", "MCP server info")
         t.add_row("clear", "Clear screen")
@@ -719,17 +935,21 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
 
     # ── Parse mission args (shlex for quoted paths) ───────────────
     def _parse_mission_args(raw: str) -> tuple[str, str, str, dict[str, Any]] | None:
+        """Parse structured mission command. Returns None silently for NL fallback."""
         try:
             parts = shlex.split(raw)
-        except ValueError as e:
-            console.print(f"[red]Parse error: {e}[/red]")
-            return None
+        except ValueError:
+            return None  # let NL parser handle malformed input
 
         if len(parts) < 2:
-            console.print("[yellow]Usage: <mission> <target> [options][/yellow]")
-            return None
+            return None  # too short for structured format
 
         mission_type = parts[0]
+
+        # Only parse if first word is a known mission type
+        if mission_type not in ("oneday", "zeroday", "ctf"):
+            return None  # fall through to NL parser
+
         target = parts[1]
         topology = cfg["topology"]
         options: dict[str, Any] = {}
@@ -755,17 +975,11 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                 options["_prompt"] = parts[i + 1]
                 i += 2
             elif parts[i] in ("--model", "-m") and i + 1 < len(parts):
-                # per-mission model override
                 options["_model_override"] = parts[i + 1]
                 i += 2
             else:
                 console.print(f"[yellow]Unknown option: {parts[i]}[/yellow]")
                 i += 1
-
-        if mission_type not in ("oneday", "zeroday", "ctf"):
-            console.print(f"[red]Unknown mission: {mission_type}[/red]")
-            console.print("[dim]Available: oneday, zeroday, ctf. Type 'help'.[/dim]")
-            return None
 
         if topology not in TopologyRegistry.available():
             available = ", ".join(TopologyRegistry.available())
@@ -1019,7 +1233,11 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
             # ── Mission execution ─────────────────────────────────
             parsed = _parse_mission_args(raw)
             if parsed is None:
-                continue
+                # Not a structured command — try natural language understanding
+                nl_result = await _nl_parse_mission(raw, cfg, console, session)
+                if nl_result is None:
+                    continue
+                parsed = nl_result
 
             mission_type, target, topology, options = parsed
             mission_model = options.pop("_model_override", cfg["model"])
@@ -1079,15 +1297,21 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
 
             # Thread-safe HITL input: one dedicated thread reads stdin,
             # posts to an asyncio.Queue, and exits when stop_event is set.
+            # IMPORTANT: Use a SEPARATE PromptSession — prompt_toolkit's
+            # PromptSession is not thread-safe for concurrent .prompt() calls.
             hitl_queue: _aio.Queue[str] = _aio.Queue()
             stop_input = threading.Event()
 
             def _hitl_reader() -> None:
                 """Blocking input reader running in a dedicated thread."""
+                # Separate session avoids concurrent .prompt() on main session
+                from prompt_toolkit import PromptSession as _PS
+                from prompt_toolkit.formatted_text import HTML as _HTML
+                hitl_session: _PS[str] = _PS()
                 while not stop_input.is_set():
                     try:
-                        text = session.prompt(
-                            HTML(
+                        text = hitl_session.prompt(
+                            _HTML(
                                 '<ansiyellow><b>hitl</b></ansiyellow> '
                                 '<ansibrightblack>&gt;</ansibrightblack> '
                             ),

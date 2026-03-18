@@ -31,7 +31,7 @@ from miya.shared.types import Mission
 from miya.topology.base import (
     Topology, TopologyRegistry, AgentHandle,
     extract_events_from_output, _sdk_env, EVENT_INSTRUCTION,
-    run_sdk_coordinator, _get_topology_config,
+    run_sdk_coordinator, _get_topology_config, drain_hitl_queue,
 )
 
 logger = logging.getLogger(__name__)
@@ -221,29 +221,10 @@ class AttackGraphTopology:
                 yield extracted
                 blackboard.apply(extracted)
 
-        # Helper: drain HITL queue, emit events, return operator suffix
         def _drain_hitl() -> tuple[list[OperatorMessage], str]:
-            msgs: list[str] = []
-            if operator_queue is not None:
-                while not operator_queue.empty():
-                    try:
-                        msgs.append(operator_queue.get_nowait())
-                    except asyncio.QueueEmpty:
-                        break
-            if not msgs:
-                return [], operator_prompt
-            events = []
-            for m in msgs:
-                logger.info("📨 Operator HITL: %s", m[:120])
-                events.append(OperatorMessage(
-                    aggregate_id=mission.id, content=m,
-                    mission=mission.mission_type.value,
-                ))
-            suffix = operator_prompt + (
-                "\n\n## Operator Live Directives\n"
-                + "\n".join(f"- {m}" for m in msgs) + "\n"
+            return drain_hitl_queue(
+                operator_queue, mission.id, mission.mission_type.value, operator_prompt,
             )
-            return events, suffix
 
         # ── Phase 2: Plan-Execute Loop ────────────────────────────
         for step in range(1, self._max_steps + 1):

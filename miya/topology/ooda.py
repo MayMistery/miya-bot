@@ -34,7 +34,7 @@ from miya.shared.types import Mission, OODAPhase, MissionType
 from miya.topology.base import (
     Topology, TopologyRegistry, AgentHandle,
     extract_events_from_output, _sdk_env, EVENT_INSTRUCTION,
-    run_sdk_coordinator, _get_topology_config,
+    run_sdk_coordinator, _get_topology_config, drain_hitl_queue,
 )
 
 logger = logging.getLogger(__name__)
@@ -156,6 +156,14 @@ NEXT_FOCUS: <what to focus on in the next loop iteration, if continuing>
 class OODATopology:
     """OODA loop orchestration with reflection gate."""
 
+    _PHASE_DESC = {
+        "OBSERVE": "gathering intelligence",
+        "ORIENT":  "analyzing findings",
+        "DECIDE":  "planning next action",
+        "ACT":     "executing plan",
+        "REFLECT": "evaluating results",
+    }
+
     def __init__(
         self,
         max_iterations: int | None = None,
@@ -217,45 +225,10 @@ class OODATopology:
         act_output = ""
         previous_insights = ""
 
-        _PHASE_DESC = {
-            "OBSERVE": "gathering intelligence",
-            "ORIENT":  "analyzing findings",
-            "DECIDE":  "planning next action",
-            "ACT":     "executing plan",
-            "REFLECT": "evaluating results",
-        }
-
-        # Helper: drain HITL queue, emit events, return operator suffix
         def _drain_hitl() -> tuple[list[OperatorMessage], str]:
-            """Non-blocking drain of operator_queue.
-
-            Returns (events_to_yield, operator_text_suffix).
-            Caller must yield the events and apply them to blackboard.
-            """
-            msgs: list[str] = []
-            if operator_queue is not None:
-                while not operator_queue.empty():
-                    try:
-                        msgs.append(operator_queue.get_nowait())
-                    except asyncio.QueueEmpty:
-                        break
-            if not msgs:
-                return [], operator_prompt
-
-            events = []
-            for m in msgs:
-                logger.info("📨 Operator HITL: %s", m[:120])
-                events.append(OperatorMessage(
-                    aggregate_id=mission.id,
-                    content=m,
-                    mission=mission.mission_type.value,
-                ))
-            suffix = operator_prompt + (
-                "\n\n## Operator Live Directives\n"
-                + "\n".join(f"- {m}" for m in msgs)
-                + "\n"
+            return drain_hitl_queue(
+                operator_queue, mission.id, mission.mission_type.value, operator_prompt,
             )
-            return events, suffix
 
         for iteration in range(1, self._max_iterations + 1):
             logger.info(
@@ -282,7 +255,7 @@ class OODATopology:
             yield phase_event
             blackboard.apply(phase_event)
 
-            logger.info("▶ OBSERVE — %s", _PHASE_DESC["OBSERVE"])
+            logger.info("▶ OBSERVE — %s", self._PHASE_DESC["OBSERVE"])
             observe_prompt = _OBSERVE_PROMPT.format(
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
@@ -310,7 +283,7 @@ class OODATopology:
                 mission=mission.mission_type.value,
             )
 
-            logger.info("▶ ORIENT — %s", _PHASE_DESC["ORIENT"])
+            logger.info("▶ ORIENT — %s", self._PHASE_DESC["ORIENT"])
             orient_prompt = _ORIENT_PROMPT.format(
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
@@ -337,7 +310,7 @@ class OODATopology:
                 mission=mission.mission_type.value,
             )
 
-            logger.info("▶ DECIDE — %s", _PHASE_DESC["DECIDE"])
+            logger.info("▶ DECIDE — %s", self._PHASE_DESC["DECIDE"])
             decide_prompt = _DECIDE_PROMPT.format(
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
@@ -360,7 +333,7 @@ class OODATopology:
                 mission=mission.mission_type.value,
             )
 
-            logger.info("▶ ACT — %s", _PHASE_DESC["ACT"])
+            logger.info("▶ ACT — %s", self._PHASE_DESC["ACT"])
             act_prompt = _ACT_PROMPT.format(
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
@@ -388,7 +361,7 @@ class OODATopology:
                 mission=mission.mission_type.value,
             )
 
-            logger.info("▶ REFLECT — %s", _PHASE_DESC["REFLECT"])
+            logger.info("▶ REFLECT — %s", self._PHASE_DESC["REFLECT"])
             reflect_prompt = _REFLECT_PROMPT.format(
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
