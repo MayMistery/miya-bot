@@ -83,10 +83,10 @@ Always show your mathematical reasoning and explain the vulnerability.
 ## Structured Event Output
 Emit structured events as you progress:
 
-[EVENT:ChallengeIdentified {"challenge_name": "ropchain", "category": "crypto", "difficulty": "medium", "technology_stack": ["ELF x86_64", "NX enabled", "No PIE"], "context": "ctf"}]
+[EVENT:ChallengeIdentified {"challenge_name": "rsa_baby", "category": "crypto", "difficulty": "medium", "technology_stack": ["RSA", "Python"], "context": "ctf"}]
 
 When you find the flag:
-[EVENT:ChallengeSolved {"challenge_name": "ropchain", "flag": "flag{...}", "technique": "ROP chain via puts leak + ret2libc", "context": "ctf"}]
+[EVENT:ChallengeSolved {"challenge_name": "rsa_baby", "flag": "flag{...}", "technique": "Wiener's attack on small private exponent", "context": "ctf"}]
 """
 
 

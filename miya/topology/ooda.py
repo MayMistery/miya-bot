@@ -32,6 +32,7 @@ from miya.shared.types import Mission, OODAPhase, MissionType
 from miya.topology.base import (
     Topology, TopologyRegistry, AgentHandle,
     extract_events_from_output, _sdk_env, EVENT_INSTRUCTION,
+    run_sdk_coordinator, _get_topology_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -155,10 +156,11 @@ class OODATopology:
 
     def __init__(
         self,
-        max_iterations: int = 10,
+        max_iterations: int | None = None,
         coordinator: CoordinatorPort | None = None,
     ) -> None:
-        self._max_iterations = max_iterations
+        cfg = _get_topology_config()
+        self._max_iterations = max_iterations if max_iterations is not None else cfg["ooda_max_iterations"]
         self._coordinator = coordinator
 
     @property
@@ -367,48 +369,8 @@ class OODATopology:
                 mcp_servers=list(all_mcp_names),
             )
 
-        # Fallback: use Claude Agent SDK directly
-        return await self._run_sdk_coordinator(
-            prompt, agent_defs, list(all_mcp_names)
-        )
-
-    async def _run_sdk_coordinator(
-        self,
-        prompt: str,
-        agent_defs: dict[str, Any],
-        mcp_names: list[str],
-    ) -> str:
-        """Run coordinator via Claude Agent SDK (production path)."""
-        from claude_agent_sdk import query, ClaudeAgentOptions, AgentDefinition
-        from miya.infra.mcp_registry import MCPRegistry
-
-        registry = MCPRegistry()
-        sdk_agents = {
-            name: AgentDefinition(**defn)
-            for name, defn in agent_defs.items()
-        }
-        mcp_configs = registry.get_configs_for_agent(mcp_names)
-
-        options = ClaudeAgentOptions(
-            agents=sdk_agents,
-            mcp_servers=mcp_configs,
-            allowed_tools=[
-                "Read", "Write", "Edit", "Bash", "Grep", "Glob",
-                "WebSearch", "WebFetch", "Agent",
-            ] + [f"mcp__{name}__*" for name in mcp_names],
-            permission_mode="acceptEdits",
-            max_turns=30,
-            env=_sdk_env(),
-        )
-
-        output_parts: list[str] = []
-        async for message in query(prompt=prompt, options=options):
-            if hasattr(message, "content"):
-                for block in message.content:
-                    if hasattr(block, "text"):
-                        output_parts.append(block.text)
-
-        return "\n".join(output_parts)
+        # Fallback: use shared Claude Agent SDK coordinator
+        return await run_sdk_coordinator(prompt, agent_defs, list(all_mcp_names))
 
     @staticmethod
     def _parse_reflection(output: str) -> dict[str, str]:

@@ -6,10 +6,13 @@ harvesting, data collection, and lateral movement planning.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from miya.shared.events import DomainEvent
 from miya.shared.ports import EventStorePort, ExploitFrameworkPort
+
+logger = logging.getLogger(__name__)
 from miya.oneday.post.domain import (
     PostSession,
     AccessLevel,
@@ -112,7 +115,8 @@ class PostService:
                             correlation_id=correlation_id,
                         )
                         collected.append(item)
-                except Exception:
+                except Exception as exc:
+                    logger.debug("Credential module %s skipped: %s", module, exc)
                     continue  # module may not be applicable to this OS
 
         events = session.collect_events()

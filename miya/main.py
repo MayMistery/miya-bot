@@ -21,6 +21,9 @@ from dotenv import load_dotenv
 # Load .env before anything reads env vars
 load_dotenv()
 
+from miya.infra.logging_config import setup_logging
+setup_logging()
+
 DEFAULT_MODEL = os.environ.get("MIYA_MODEL", "opus")
 
 _MODEL_HELP = "Claude model (opus/sonnet/haiku). Env: MIYA_MODEL"
@@ -270,6 +273,17 @@ def zeroday(target: str, service: str | None, language: str, topology: str, db: 
     asyncio.run(_run_mission("zeroday", target, "source", topology, db, model=model or DEFAULT_MODEL, **opts))
 
 
+def _detect_target_kind(target: str) -> str:
+    """Infer the target kind from the URI string."""
+    if target.startswith(("http://", "https://")):
+        return "url"
+    if target.startswith("/") or target.startswith("./") or target.startswith("../"):
+        return "binary" if Path(target).suffix in (".elf", ".bin", ".so", "") else "source"
+    if Path(target).exists():
+        return "binary" if Path(target).suffix in (".elf", ".bin", ".so", "") else "source"
+    return "challenge"
+
+
 @cli.command()
 @click.option("--target", "-t", required=True, help="Challenge URL or file path")
 @click.option("--category", "-c", default="", help="Challenge category (web/pwn/crypto/reverse/misc)")
@@ -279,7 +293,7 @@ def zeroday(target: str, service: str | None, language: str, topology: str, db: 
 def ctf(target: str, category: str, topology: str, db: str, model: str | None, api_key: str | None, base_url: str | None) -> None:
     """Solve CTF challenges"""
     _apply_api_env(api_key, base_url)
-    kind = "challenge" if not target.startswith(("http", "/")) else "url"
+    kind = _detect_target_kind(target)
     asyncio.run(_run_mission("ctf", target, kind, topology, db, model=model or DEFAULT_MODEL, category=category))
 
 

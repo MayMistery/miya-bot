@@ -117,6 +117,7 @@ def extract_events_from_output(output: str, mission: Mission) -> list[DomainEven
 
     The coordinator can embed events in the format:
         [EVENT:EventTypeName {"field": "value", ...}]
+        [EVENT:EventTypeName{"field": "value", ...}]   (no space also accepted)
 
     This allows topologies to yield real domain events from LLM output,
     populating the blackboard with findings, assets, CVEs, etc.
@@ -124,14 +125,23 @@ def extract_events_from_output(output: str, mission: Mission) -> list[DomainEven
     import dataclasses
     from miya.shared.events import _EVENT_REGISTRY
 
+    # Build a name→class lookup once (cached across calls via closure)
+    if not hasattr(extract_events_from_output, "_name_map"):
+        extract_events_from_output._name_map = {  # type: ignore[attr-defined]
+            cls.__name__: cls for cls in _EVENT_REGISTRY.values()
+        }
+    name_map: dict[str, type[DomainEvent]] = extract_events_from_output._name_map  # type: ignore[attr-defined]
+
     events: list[DomainEvent] = []
-    pattern = r'\[EVENT:(\w+)\s+'
+    # Accept optional whitespace between EventTypeName and the JSON brace
+    pattern = r'\[EVENT:(\w+)\s*\{'
 
     for match in re.finditer(pattern, output):
         event_type_name = match.group(1)
 
         # Extract JSON with balanced braces, respecting string quoting
-        json_start = match.end()
+        # Start from the opening brace (match.end() - 1 because '{' is in the pattern)
+        json_start = match.end() - 1
         depth = 0
         json_end = json_start
         in_string = False
@@ -156,24 +166,22 @@ def extract_events_from_output(output: str, mission: Mission) -> list[DomainEven
                         json_end = i + 1
                         break
         if depth != 0:
+            logger.warning(
+                "Unbalanced braces in event %s at offset %d", event_type_name, json_start
+            )
             continue
         raw_json = output[json_start:json_end]
 
         try:
             data = json.loads(raw_json)
-        except json.JSONDecodeError:
-            logger.warning(f"Failed to parse event data: {raw_json[:100]}")
+        except json.JSONDecodeError as exc:
+            logger.warning("Failed to parse event %s JSON: %s — %s", event_type_name, exc, raw_json[:120])
             continue
 
-        # Map class name to event class
-        event_cls = None
-        for etype, cls in _EVENT_REGISTRY.items():
-            if cls.__name__ == event_type_name:
-                event_cls = cls
-                break
-
+        # Map class name to event class (O(1) lookup instead of linear scan)
+        event_cls = name_map.get(event_type_name)
         if event_cls is None:
-            logger.warning(f"Unknown event type: {event_type_name}")
+            logger.warning("Unknown event type: %s", event_type_name)
             continue
 
         # Add mission context if not present
@@ -192,7 +200,7 @@ def extract_events_from_output(output: str, mission: Mission) -> list[DomainEven
         try:
             events.append(event_cls(**filtered))
         except Exception as e:
-            logger.warning(f"Failed to create {event_type_name}: {e}")
+            logger.warning("Failed to create %s: %s (data=%s)", event_type_name, e, filtered)
 
     return events
 
@@ -255,6 +263,71 @@ def _sdk_env() -> dict[str, str]:
         if val:
             env[key] = val
     return env
+
+
+def _get_topology_config() -> dict[str, int]:
+    """Read topology tunables from environment.
+
+    Supported env vars:
+        MIYA_OODA_MAX_ITERATIONS  — max OODA loop iterations (default 10)
+        MIYA_AG_MAX_STEPS         — max attack-graph steps  (default 20)
+        MIYA_MAX_TURNS            — max SDK turns per coordinator call (default 30)
+    """
+    def _int(key: str, default: int) -> int:
+        raw = os.environ.get(key, "")
+        try:
+            return int(raw) if raw else default
+        except ValueError:
+            return default
+
+    return {
+        "ooda_max_iterations": _int("MIYA_OODA_MAX_ITERATIONS", 10),
+        "ag_max_steps": _int("MIYA_AG_MAX_STEPS", 20),
+        "max_turns": _int("MIYA_MAX_TURNS", 30),
+    }
+
+
+async def run_sdk_coordinator(
+    prompt: str,
+    agent_defs: dict[str, Any],
+    mcp_names: list[str],
+) -> str:
+    """Shared coordinator execution via Claude Agent SDK.
+
+    Centralises the SDK call so both OODA and AttackGraph topologies
+    use the same code path, reducing duplication.
+    """
+    from claude_agent_sdk import query, ClaudeAgentOptions, AgentDefinition
+    from miya.infra.mcp_registry import MCPRegistry
+
+    registry = MCPRegistry()
+    sdk_agents = {
+        name: AgentDefinition(**defn)
+        for name, defn in agent_defs.items()
+    }
+    mcp_configs = registry.get_configs_for_agent(mcp_names)
+    cfg = _get_topology_config()
+
+    options = ClaudeAgentOptions(
+        agents=sdk_agents,
+        mcp_servers=mcp_configs,
+        allowed_tools=[
+            "Read", "Write", "Edit", "Bash", "Grep", "Glob",
+            "WebSearch", "WebFetch", "Agent",
+        ] + [f"mcp__{name}__*" for name in mcp_names],
+        permission_mode="acceptEdits",
+        max_turns=cfg["max_turns"],
+        env=_sdk_env(),
+    )
+
+    output_parts: list[str] = []
+    async for message in query(prompt=prompt, options=options):
+        if hasattr(message, "content"):
+            for block in message.content:
+                if hasattr(block, "text"):
+                    output_parts.append(block.text)
+
+    return "\n".join(output_parts)
 
 
 TopologyFactory = Callable[..., Topology]
