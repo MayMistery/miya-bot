@@ -46,6 +46,7 @@ class MissionReport:
     duration_seconds: float = 0.0
     blackboard_summary: dict[str, Any] = field(default_factory=dict)
     status: str = "completed"
+    error: str = ""
 
     @property
     def critical_count(self) -> int:
@@ -241,13 +242,29 @@ class MissionService:
                 collected_events.append(event)
                 await self._event_store.append([event])
                 if on_event is not None:
-                    on_event(event)
+                    try:
+                        on_event(event)
+                    except Exception:
+                        logger.debug("on_event callback error", exc_info=True)
 
             mission.complete()
         except Exception as e:
             logger.error(f"Mission failed: {e}")
             mission.fail()
-            raise
+            duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+            # Return partial report with findings collected so far
+            return MissionReport(
+                mission_id=mission.id,
+                mission_type=mission_type.value,
+                target=target_uri,
+                topology=topology,
+                findings=list(blackboard.findings),
+                events_count=len(collected_events),
+                duration_seconds=duration,
+                blackboard_summary=blackboard.summary(),
+                status="failed",
+                error=str(e),
+            )
 
         duration = (datetime.now(timezone.utc) - start_time).total_seconds()
 

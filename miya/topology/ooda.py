@@ -326,6 +326,12 @@ class OODATopology:
 
             if decision.get("decision") == "complete":
                 break
+        else:
+            # Loop exhausted without explicit completion
+            logger.warning(
+                f"OODA loop exhausted after {self._max_iterations} iterations "
+                f"without explicit completion"
+            )
 
         # ── Mission Complete ──────────────────────────────────────
         complete_event = MissionCompleted(

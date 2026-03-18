@@ -16,6 +16,7 @@ from miya.shared.events import (
     DomainEvent,
     AssetDiscovered,
     FingerprintCompleted,
+    ScanCompleted,
     VulnerabilityFound,
     CVEMatched,
     ExploitSucceeded,
@@ -139,6 +140,14 @@ class Blackboard:
         self.attack_graph.add_node(vuln_node)
 
     def _on_CVEMatched(self, e: CVEMatched) -> None:
+        # Deduplicate by CVE ID — update if higher CVSS or new exploit info
+        for existing in self.cve_matches:
+            if existing["cve_id"] == e.cve_id:
+                if e.cvss > existing.get("cvss", 0):
+                    existing["cvss"] = e.cvss
+                if e.exploit_available:
+                    existing["exploit_available"] = True
+                return
         self.cve_matches.append({
             "cve_id": e.cve_id,
             "cvss": e.cvss,
@@ -146,11 +155,22 @@ class Blackboard:
             "exploit_available": e.exploit_available,
         })
 
+    def _on_ScanCompleted(self, e: ScanCompleted) -> None:
+        self.findings.append(Finding(
+            title=f"Scan completed: {e.target_host}",
+            severity=Severity.INFO,
+            detail=f"Scanner {e.scanner} found {e.findings_count} issue(s) on ports {list(e.target_ports)}",
+            evidence=f"{e.scanner}:{e.target_host}",
+            context=e.context,
+            mission=e.mission,
+        ))
+
     def _on_ExploitAttempted(self, e: ExploitAttempted) -> None:
         self.exploit_attempts.append({
             "cve_id": e.cve_id,
             "technique": e.technique,
             "payload": e.payload_summary,
+            "status": "attempted",
         })
 
     def _on_ExploitSucceeded(self, e: ExploitSucceeded) -> None:
@@ -163,9 +183,26 @@ class Blackboard:
             context=e.context,
             mission=e.mission,
         ))
+        # Update matching attempt status
+        for attempt in reversed(self.exploit_attempts):
+            if attempt.get("cve_id") == e.cve_id and attempt.get("status") == "attempted":
+                attempt["status"] = "succeeded"
+                break
 
     def _on_ExploitFailed(self, e: ExploitFailed) -> None:
-        pass  # tracked in exploit_attempts
+        self.findings.append(Finding(
+            title=f"Exploit failed: {e.cve_id}",
+            severity=Severity.INFO,
+            detail=e.reason,
+            evidence="",
+            context=e.context,
+            mission=e.mission,
+        ))
+        # Update matching attempt status
+        for attempt in reversed(self.exploit_attempts):
+            if attempt.get("cve_id") == e.cve_id and attempt.get("status") == "attempted":
+                attempt["status"] = "failed"
+                break
 
     def _on_EntryPointDiscovered(self, e: EntryPointDiscovered) -> None:
         self.entry_points.append({
@@ -214,12 +251,21 @@ class Blackboard:
         self.current_access_level = e.to_level
 
     def _on_LootCollected(self, e: LootCollected) -> None:
-        if e.loot_type == "credential":
+        if e.loot_type in ("credential", "credentials"):
             self.credentials.append(Credential(
                 username="",
-                secret=e.description,
+                secret=e.value or e.description,
                 secret_type="password",
             ))
+        # Always record as finding for visibility
+        self.findings.append(Finding(
+            title=f"Loot: {e.loot_type}",
+            severity=Severity.HIGH,
+            detail=e.description,
+            evidence=e.value or "",
+            context=e.context,
+            mission=e.mission,
+        ))
 
     def _on_PhaseTransition(self, e: PhaseTransition) -> None:
         self.phase_history.append({

@@ -135,8 +135,10 @@ class TestOnedayE2E:
             await store.append([event])
             bb.apply(event)
 
-        assert len(bb.findings) == 1
-        assert bb.findings[0].severity == Severity.CRITICAL
+        # ScanCompleted creates INFO finding, VulnerabilityFound creates CRITICAL
+        assert len(bb.findings) == 2
+        critical = [f for f in bb.findings if f.severity == Severity.CRITICAL]
+        assert len(critical) == 1
         assert len(bb.cve_matches) == 1
         assert bb.cve_matches[0]["exploit_available"] is True
 

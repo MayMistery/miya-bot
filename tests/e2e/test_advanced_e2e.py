@@ -581,7 +581,8 @@ class TestMOVEitChain:
 
         summary = report.blackboard_summary
         assert summary["access_level"] == "system"
-        assert summary["cve_matches"] >= 2
+        # Both stages use same CVE-2023-34362, so dedup yields 1
+        assert summary["cve_matches"] >= 1
 
         # Both SQL injection and deserialization findings
         all_events = await store.load_all()
@@ -1112,9 +1113,10 @@ class TestAllAdvancedCVEScenarios:
             f"{scenario.name}: expected {scenario.final_access}, got {summary['access_level']}"
         )
 
-        # Every stage generates CVE matches
-        assert summary["cve_matches"] >= len(scenario.stages), (
-            f"{scenario.name}: expected ≥{len(scenario.stages)} CVEs, "
+        # CVE matches: unique CVE IDs (stages with same CVE are deduplicated)
+        unique_cves = len({s.cve_id for s in scenario.stages})
+        assert summary["cve_matches"] >= unique_cves, (
+            f"{scenario.name}: expected ≥{unique_cves} unique CVEs, "
             f"got {summary['cve_matches']}"
         )
 

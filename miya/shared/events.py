@@ -282,6 +282,7 @@ class LootCollected(DomainEvent):
     event_type: ClassVar[str] = "post.loot_collected"
     loot_type: str = ""  # "credential", "config", "data", "key"
     description: str = ""
+    value: str = ""  # the actual secret/data/flag
     context: str = "post"
 
 

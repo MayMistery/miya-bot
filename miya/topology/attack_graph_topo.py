@@ -263,8 +263,10 @@ class AttackGraphTopology:
 
             plan_output = await self._run_agent(plan_prompt, mission, agents, blackboard)
 
-            # Parse plan output: try to find SELECTED_EDGE
-            selected_edge = self._parse_plan_edge(plan_output, unexplored)
+            # Parse plan output: extract SELECTED_EDGE and AGENT
+            selected_edge, selected_agent = self._parse_plan(
+                plan_output, unexplored, agents,
+            )
             if not selected_edge:
                 selected_edge = unexplored[0] if unexplored else None
             if not selected_edge:
@@ -286,7 +288,7 @@ class AttackGraphTopology:
                 technique=selected_edge.label,
                 source_node=f"{source_node.label}" if source_node else "unknown",
                 target_node=f"{target_node.label}" if target_node else "unknown",
-                agent_name=next(iter(agents), ""),
+                agent_name=selected_agent or next(iter(agents), ""),
                 blackboard_context=blackboard.to_context_prompt(),
                 preparation=plan_output[:3000],
             ) + EVENT_INSTRUCTION
@@ -322,7 +324,10 @@ class AttackGraphTopology:
                 blackboard.apply(extracted)
 
             # Check if objective reached (via OBJECTIVE_REACHED or graph state)
-            obj_reached = "objective_reached: yes" in rebuild_output.lower()
+            import re as _re
+            obj_reached = bool(_re.search(
+                r"OBJECTIVE_REACHED\s*:\s*yes", rebuild_output, _re.IGNORECASE
+            ))
             if obj_reached:
                 yield MissionCompleted(
                     aggregate_id=mission.id,
@@ -349,26 +354,46 @@ class AttackGraphTopology:
         )
 
     @staticmethod
-    def _parse_plan_edge(
+    def _parse_plan(
         plan_output: str,
         available_edges: list[GraphEdge],
-    ) -> GraphEdge | None:
-        """Extract SELECTED_EDGE from planner output and match to a real edge."""
+        available_agents: dict[str, Any],
+    ) -> tuple[GraphEdge | None, str]:
+        """Extract SELECTED_EDGE and AGENT from planner output.
+
+        Returns (edge, agent_name). agent_name may be empty if not parsed.
+        """
         import re
 
-        match = re.search(r"SELECTED_EDGE\s*:\s*(\S+)", plan_output, re.IGNORECASE)
-        if not match:
-            return None
+        # Parse agent name
+        agent_name = ""
+        agent_match = re.search(r"AGENT\s*:\s*(\S+)", plan_output, re.IGNORECASE)
+        if agent_match:
+            candidate = agent_match.group(1).strip().lower()
+            # Match against available agents (case-insensitive)
+            for name in available_agents:
+                if name.lower() == candidate:
+                    agent_name = name
+                    break
 
-        edge_id_prefix = match.group(1).strip().lower()
+        # Parse edge
+        edge_match = re.search(r"SELECTED_EDGE\s*:\s*(\S+)", plan_output, re.IGNORECASE)
+        if not edge_match:
+            # Fallback: try matching by label
+            for edge in available_edges:
+                if edge.label.lower() in plan_output.lower():
+                    return edge, agent_name
+            return None, agent_name
+
+        edge_id_prefix = edge_match.group(1).strip().lower()
         for edge in available_edges:
             if edge.id.lower().startswith(edge_id_prefix):
-                return edge
+                return edge, agent_name
         # Fallback: try matching by label
         for edge in available_edges:
             if edge.label.lower() in plan_output.lower():
-                return edge
-        return None
+                return edge, agent_name
+        return None, agent_name
 
     @staticmethod
     def _detect_success(exec_output: str) -> bool:
