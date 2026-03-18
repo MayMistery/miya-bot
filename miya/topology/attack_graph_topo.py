@@ -285,7 +285,7 @@ class AttackGraphTopology:
                     for i, p in enumerate(all_paths[:5])
                 ) or "No paths available",
                 mission_description=mission_desc,
-            ) + op_suffix
+            ) + op_suffix + EVENT_INSTRUCTION
 
             plan_output = await self._run_agent(plan_prompt, mission, agents, blackboard)
 
@@ -346,7 +346,7 @@ class AttackGraphTopology:
                 result=exec_output[:3000],
                 graph_summary=graph.summary(),
                 blackboard_context=blackboard.to_context_prompt(),
-            ) + op_suffix
+            ) + op_suffix + EVENT_INSTRUCTION
             rebuild_output = await self._run_agent(rebuild_prompt, mission, agents, blackboard)
 
             # Extract events from rebuild analysis

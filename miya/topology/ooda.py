@@ -410,7 +410,7 @@ class OODATopology:
                     blackboard_context=blackboard.to_context_prompt(),
                     mission_description=mission_desc,
                     orient_output=orient_output[:4000],
-                ) + op_suffix
+                ) + op_suffix + EVENT_INSTRUCTION
                 decide_output = await self._run_coordinator(
                     decide_prompt, mission, agents, blackboard, phase_label="DECIDE"
                 )
