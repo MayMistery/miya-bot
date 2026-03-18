@@ -509,7 +509,7 @@ def interactive(ctx: click.Context, db: str, model: str | None, api_key: str | N
 _NL_PARSE_PROMPT = """\
 You are Miya's task parser. The user typed a natural language description of a
 penetration testing or CTF task.  Your job is to extract structured mission
-parameters from their input.
+parameters AND runtime directives from their input.
 
 Available mission types:
 - ctf      — Solve a CTF challenge (categories: web, pwn, crypto, reverse, misc)
@@ -521,21 +521,44 @@ Available topologies:
 - attack_graph  — DAG-based attack path planning
 
 Respond EXACTLY in this format (JSON on a single line):
-{"mission_type": "ctf|oneday|zeroday", "target": "<url_or_path>", "topology": "ooda|attack_graph", "prompt": "<task description for the agent>", "options": {}}
+{{"mission_type": "ctf|oneday|zeroday", "target": "<url_or_path>", "topology": "ooda|attack_graph", "prompt": "<task description for the agent>", "options": {{}}, "meta": {{}}}}
 
-Rules:
-- "target" should be a URL, IP, file path, or network range extracted from the user's input
-- "prompt" should include the full task context the user described (challenge description, hints, etc.)
+Rules for mission parameters:
+- "target" should be a URL, IP, file path, or network range extracted from the input
+- "prompt" should include the full task context (challenge description, hints, etc.)
+  but NOT runtime directives (verbose, model, etc.) — those go in "meta"
 - If a URL is present, extract it as "target"
 - If a file path (.zip, .py, .c, etc.) is present, extract it as "target"
 - For CTF, add "category" to options if you can determine it (web/pwn/crypto/reverse/misc)
 - If you cannot determine mission_type, default to "ctf"
 - If you cannot determine topology, use "ooda"
-- Do NOT wrap JSON in markdown code blocks
+
+Rules for "meta" (runtime directives — set ONLY if user explicitly requests):
+- "verbose": "trace" | "debug" | "info" — log verbosity level
+  Detect from phrases like: 详细日志/verbose/debug日志/trace/show details → "trace"
+                             调试模式/debug mode → "debug"
+                             安静/quiet → "info"
+- "model": "opus" | "sonnet" | "haiku" — model override
+  Detect from phrases like: 用sonnet/use haiku/模型用opus → the named model
+- Only include keys in "meta" that the user explicitly requested. Empty {{}} if none.
+
+Do NOT wrap JSON in markdown code blocks.
 
 User input:
 {user_input}
 """
+
+
+def _apply_verbose(level_name: str, cfg: dict[str, Any], console_obj: Any) -> None:
+    """Apply a verbose level from NL meta directive."""
+    import logging as _logging
+    _valid = {"trace": TRACE, "debug": _logging.DEBUG, "info": _logging.INFO,
+              "warning": _logging.WARNING, "error": _logging.ERROR}
+    level_name = level_name.lower().strip()
+    if level_name in _valid:
+        setup_logging(level_override=_valid[level_name])
+        cfg["verbose"] = level_name
+        console_obj.print(f"  [green]Verbose → {level_name}[/green]")
 
 
 async def _nl_parse_mission(
@@ -589,6 +612,13 @@ async def _nl_parse_mission(
         topology = data.get("topology", cfg.get("topology", "ooda"))
         prompt = data.get("prompt", raw)
         extra_options = data.get("options", {})
+        meta = data.get("meta", {})
+
+        # Apply runtime meta directives (verbose, model, etc.)
+        if meta.get("verbose"):
+            _apply_verbose(meta["verbose"], cfg, console_obj)
+        if meta.get("model"):
+            extra_options["_model_override"] = meta["model"]
 
         if not target:
             console_obj.print("[red]Could not extract a target from your input.[/red]")
@@ -601,12 +631,18 @@ async def _nl_parse_mission(
             f"[bold]Target:[/bold]   {target}",
             f"[bold]Topology:[/bold] {topology}",
         ]
+        if meta.get("model"):
+            panel_lines.append(f"[bold]Model:[/bold]    {meta['model']}")
+        if meta.get("verbose"):
+            panel_lines.append(f"[bold]Verbose:[/bold]  {meta['verbose']}")
         if prompt:
-            # Show first 150 chars of prompt
             display_prompt = prompt[:150] + ("..." if len(prompt) > 150 else "")
             panel_lines.append(f"[bold]Prompt:[/bold]  {display_prompt}")
         if extra_options:
-            panel_lines.append(f"[bold]Options:[/bold]  {extra_options}")
+            # Filter out internal keys for display
+            display_opts = {k: v for k, v in extra_options.items() if not k.startswith("_")}
+            if display_opts:
+                panel_lines.append(f"[bold]Options:[/bold]  {display_opts}")
 
         console_obj.print(Panel(
             "\n".join(panel_lines),
@@ -935,7 +971,12 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
 
     # ── Parse mission args (shlex for quoted paths) ───────────────
     def _parse_mission_args(raw: str) -> tuple[str, str, str, dict[str, Any]] | None:
-        """Parse structured mission command. Returns None silently for NL fallback."""
+        """Parse structured mission command. Returns None silently for NL fallback.
+
+        Only succeeds when ALL tokens are recognized structured options.
+        If any free-text (non-option) tokens are found after <target>,
+        returns None so the NL parser handles the full input.
+        """
         try:
             parts = shlex.split(raw)
         except ValueError:
@@ -954,6 +995,21 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
         topology = cfg["topology"]
         options: dict[str, Any] = {}
 
+        # Pre-scan: if any token after target is NOT a recognized flag,
+        # this is free-text input — route to NL parser.
+        _KNOWN_FLAGS = {
+            "--topology", "-T", "--category", "-c", "--language", "-l",
+            "--source", "-s", "--service", "--prompt", "-p", "--model", "-m",
+        }
+        i = 2
+        while i < len(parts):
+            tok = parts[i]
+            if tok in _KNOWN_FLAGS:
+                i += 2  # skip flag + value
+            else:
+                # Found free-text after target — fall through to NL parser
+                return None
+        # All tokens are structured flags — parse normally
         i = 2
         while i < len(parts):
             if parts[i] in ("--topology", "-T") and i + 1 < len(parts):
@@ -978,7 +1034,6 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                 options["_model_override"] = parts[i + 1]
                 i += 2
             else:
-                console.print(f"[yellow]Unknown option: {parts[i]}[/yellow]")
                 i += 1
 
         if topology not in TopologyRegistry.available():
