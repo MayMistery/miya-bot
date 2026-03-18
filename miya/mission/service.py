@@ -224,10 +224,11 @@ class MissionService:
             await store.initialize()
             self._event_store = store
 
-        # Build blackboard from existing events
+        # Fresh blackboard per mission — each mission starts from zero.
+        # Historical findings live in the event store and can be queried
+        # via REPL commands (events, blackboard), but don't pollute the
+        # new mission's context with stale state from prior runs.
         blackboard = Blackboard()
-        existing_events = await self._event_store.load_all()
-        blackboard.apply_all(existing_events)
 
         # Build agents for this mission type
         builder = AGENT_BUILDERS.get(mission_type)

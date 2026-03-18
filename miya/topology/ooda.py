@@ -53,13 +53,18 @@ You are in the OBSERVE phase of the OODA loop.
 
 **Mission:** {mission_description}
 
-**Your task:** Gather information about the target. Use the appropriate reconnaissance
-agents to discover assets, entry points, or challenge details.
+**Your task:** Gather information about the target.
+
+**Efficiency rules (CRITICAL):**
+- Check the blackboard FIRST. If it already has relevant findings, assets, or
+  solved flags for this target, do NOT redo that work. Build on what exists.
+- Start with 1-2 quick probes (e.g. a single curl, nmap, or file read) to
+  orient yourself before launching broad scans.
+- Target max ~10 tool calls in OBSERVE. If you need more, move to ORIENT
+  with what you have — you'll get another OODA cycle.
 
 Delegate to the right agent(s) based on the mission type:
 {agent_descriptions}
-
-Focus on breadth — discover as much about the target as possible.
 """
 
 _ORIENT_PROMPT = """## Phase: ORIENT (Analysis & Pattern Recognition)
@@ -120,6 +125,12 @@ You are in the ACT phase of the OODA loop.
 
 **Your task:** Execute the plan. Delegate to the appropriate specialized agent(s):
 {agent_descriptions}
+
+**Efficiency rules:**
+- Execute the DECIDE plan precisely. Do not improvise additional attacks beyond the plan.
+- If an approach fails after 2-3 attempts, STOP and report failure — the next
+  REFLECT→OBSERVE cycle will adapt the strategy.
+- Do not brute-force or enumerate exhaustively. Targeted, evidence-based actions only.
 
 Execute the planned actions and report results with evidence.
 """
@@ -256,11 +267,18 @@ class OODATopology:
             blackboard.apply(phase_event)
 
             logger.info("▶ OBSERVE — %s", self._PHASE_DESC["OBSERVE"])
+            # On iteration >1, inject the focus from REFLECT so OBSERVE is targeted
+            focus_hint = ""
+            if previous_insights:
+                focus_hint = (
+                    f"\n**Focus from last REFLECT:** {previous_insights}\n"
+                    f"This is iteration {iteration}. Gather ONLY what's needed for the above focus.\n"
+                )
             observe_prompt = _OBSERVE_PROMPT.format(
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
                 agent_descriptions=agent_desc,
-            ) + op_suffix + EVENT_INSTRUCTION
+            ) + focus_hint + op_suffix + EVENT_INSTRUCTION
 
             observe_output = await self._run_coordinator(
                 observe_prompt, mission, agents, blackboard, phase_label="OBSERVE"
