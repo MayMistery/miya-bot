@@ -27,6 +27,28 @@ class PoCService:
         self._sandbox = sandbox
         self._executor = executor
 
+    @staticmethod
+    def _parse_execution_result(
+        raw: dict[str, object],
+        *,
+        require_clean_stderr: bool = False,
+    ) -> PoCResult:
+        """Build a PoCResult from raw sandbox/executor output."""
+        exit_code = raw.get("exit_code", -1)
+        stderr = raw.get("stderr", "")
+        success = exit_code == 0
+        if require_clean_stderr and stderr:
+            success = False
+        return PoCResult(
+            stdout=str(raw.get("stdout", "")),
+            stderr=str(stderr),
+            exit_code=int(exit_code),  # type: ignore[arg-type]
+            success=bool(success),
+            evidence=str(raw.get("stdout", "")),
+            duration_ms=int(raw.get("duration_ms", 0)),  # type: ignore[arg-type]
+            error_message=str(raw.get("error", "")),
+        )
+
     async def execute_poc(
         self,
         project: PoCProject,
@@ -45,16 +67,7 @@ class PoCService:
             timeout=timeout,
         )
 
-        result = PoCResult(
-            stdout=raw.get("stdout", ""),
-            stderr=raw.get("stderr", ""),
-            exit_code=raw.get("exit_code", -1),
-            success=raw.get("exit_code", -1) == 0 and not raw.get("stderr", ""),
-            evidence=raw.get("stdout", ""),
-            duration_ms=raw.get("duration_ms", 0),
-            error_message=raw.get("error", ""),
-        )
-
+        result = self._parse_execution_result(raw, require_clean_stderr=True)
         project.validate(poc_code, result)
         return project.collect_events()
 
@@ -83,16 +96,7 @@ class PoCService:
                 timeout=30,
             )
 
-        result = PoCResult(
-            stdout=raw.get("stdout", ""),
-            stderr=raw.get("stderr", ""),
-            exit_code=raw.get("exit_code", -1),
-            success=raw.get("exit_code", -1) == 0,
-            evidence=raw.get("stdout", ""),
-            duration_ms=raw.get("duration_ms", 0),
-            error_message=raw.get("error", ""),
-        )
-
+        result = self._parse_execution_result(raw)
         project.record_result(payload.id, result)
         return result
 

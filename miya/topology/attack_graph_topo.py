@@ -328,7 +328,7 @@ class AttackGraphTopology:
             # Check if objective reached (via OBJECTIVE_REACHED or graph state)
             import re
             obj_reached = bool(re.search(
-                r"OBJECTIVE_REACHED\s*:\s*yes", rebuild_output, _re.IGNORECASE
+                r"OBJECTIVE_REACHED\s*:\s*yes", rebuild_output, re.IGNORECASE
             ))
             if obj_reached:
                 yield MissionCompleted(

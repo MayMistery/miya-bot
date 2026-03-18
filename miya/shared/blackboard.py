@@ -307,8 +307,13 @@ class Blackboard:
             "attack_graph": self.attack_graph.summary(),
         }
 
-    def to_context_prompt(self) -> str:
-        """Serialize blackboard state into a context string for LLM prompts."""
+    def to_context_prompt(self, *, max_findings: int = 30) -> str:
+        """Serialize blackboard state into a context string for LLM prompts.
+
+        Args:
+            max_findings: Cap on findings shown (most severe first).
+                          Keeps the prompt from ballooning on large engagements.
+        """
         lines = ["## Current Knowledge Base (Blackboard)"]
 
         if self.assets:
@@ -320,9 +325,14 @@ class Blackboard:
                     lines.append(f"  fingerprint: {a.fingerprint}")
 
         if self.findings:
+            sorted_findings = sorted(self.findings, key=lambda x: -x.severity.score)
+            shown = sorted_findings[:max_findings]
+            omitted = len(sorted_findings) - len(shown)
             lines.append(f"\n### Findings ({len(self.findings)})")
-            for f in sorted(self.findings, key=lambda x: -x.severity.score):
+            for f in shown:
                 lines.append(f"- {f.oneliner()}: {f.detail[:100]}")
+            if omitted:
+                lines.append(f"  ... and {omitted} more (lower severity)")
 
         if self.cve_matches:
             lines.append(f"\n### CVE Matches ({len(self.cve_matches)})")
@@ -341,9 +351,19 @@ class Blackboard:
             for t in unsanitized[:10]:
                 lines.append(f"- {t['source']} → {t['sink']} (UNSANITIZED)")
 
+        if self.confirmed_sinks:
+            lines.append(f"\n### Confirmed Sinks ({len(self.confirmed_sinks)})")
+            for s in self.confirmed_sinks:
+                lines.append(f"- {s['sink_type']} ({s.get('cwe_id', '')}): {s.get('exploitability', '')}")
+
+        if self.validated_pocs:
+            lines.append(f"\n### Validated PoCs ({len(self.validated_pocs)})")
+            for p in self.validated_pocs:
+                lines.append(f"- {p['vuln_type']}: {p['result'][:80]}")
+
         if self.challenges:
             solved_names = {s["challenge"] for s in self.solved_flags}
-            lines.append(f"\n### Challenges ({len(self.challenges)})")
+            lines.append(f"\n### Challenges ({len(self.challenges)}, {len(solved_names)} solved)")
             for c in self.challenges:
                 status = "SOLVED" if c["name"] in solved_names else "unsolved"
                 lines.append(f"- [{status}] {c['name']} ({c['category']}, {c['points']}pts)")
@@ -351,7 +371,7 @@ class Blackboard:
         if self.exploit_attempts:
             lines.append(f"\n### Exploit Attempts ({len(self.exploit_attempts)})")
             for ea in self.exploit_attempts[-5:]:
-                lines.append(f"- {ea['cve_id']}: {ea['technique']}")
+                lines.append(f"- {ea['cve_id']}: {ea['technique']} [{ea.get('status', '?')}]")
 
         lines.append(f"\n### Current Access: {self.current_access_level}")
         lines.append(f"### Attack Graph: {self.attack_graph.summary()}")

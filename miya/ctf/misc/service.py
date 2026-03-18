@@ -9,6 +9,7 @@ from miya.ctf.misc.domain import (
     MiscChallenge,
 )
 from miya.ctf.shared.domain import Flag, WriteUp
+from miya.ctf.shared.service import submit_challenge_flag
 from miya.shared.events import ChallengeSolved, DomainEvent
 from miya.shared.ports import RepositoryPort
 
@@ -121,19 +122,6 @@ class MiscCTFService:
         approach: str = "",
         writeup: WriteUp | None = None,
     ) -> tuple[bool, list[DomainEvent]]:
-        challenge = await self._repo.get(challenge_id)
-        if challenge is None:
-            raise ValueError(f"Challenge {challenge_id} not found")
-
-        flag = Flag(value=flag_value)
-        challenge.solve(flag, writeup)
-        await self._repo.save(challenge)
-
-        event = ChallengeSolved(
-            challenge_name=challenge.name,
-            flag=flag_value,
-            approach=approach,
-            aggregate_id=challenge_id,
-            aggregate_type="MiscChallenge",
+        return await submit_challenge_flag(
+            self._repo, challenge_id, flag_value, approach, writeup,
         )
-        return True, [event]

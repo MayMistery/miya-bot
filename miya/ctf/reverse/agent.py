@@ -64,10 +64,10 @@ Always document the algorithm you identify and your constraint extraction proces
 ## Structured Event Output
 Emit structured events as you progress:
 
-[EVENT:ChallengeIdentified {"challenge_name": "ropchain", "category": "reverse", "difficulty": "medium", "technology_stack": ["ELF x86_64", "NX enabled", "No PIE"], "context": "ctf"}]
+[EVENT:ChallengeIdentified {"challenge_name": "keygen_me", "category": "reverse", "difficulty": "medium", "technology_stack": ["ELF x86_64", "custom XOR cipher"], "context": "ctf"}]
 
 When you find the flag:
-[EVENT:ChallengeSolved {"challenge_name": "ropchain", "flag": "flag{...}", "technique": "ROP chain via puts leak + ret2libc", "context": "ctf"}]
+[EVENT:ChallengeSolved {"challenge_name": "keygen_me", "flag": "flag{...}", "technique": "z3 constraint solver on XOR key schedule", "context": "ctf"}]
 """
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from miya.ctf.shared.domain import (
     Challenge,
     ChallengeCategory,
@@ -14,6 +16,36 @@ from miya.ctf.shared.domain import (
 )
 from miya.shared.events import ChallengeIdentified, ChallengeSolved, DomainEvent
 from miya.shared.ports import RepositoryPort
+
+
+async def submit_challenge_flag(
+    repo: RepositoryPort[Any],
+    challenge_id: str,
+    flag_value: str,
+    approach: str = "",
+    writeup: WriteUp | None = None,
+) -> tuple[bool, list[DomainEvent]]:
+    """Shared flag submission logic for all CTF category services.
+
+    Looks up the challenge, solves it, and emits a ChallengeSolved event.
+    The aggregate_type is inferred from the challenge class name.
+    """
+    challenge = await repo.get(challenge_id)
+    if challenge is None:
+        raise ValueError(f"Challenge {challenge_id} not found")
+
+    flag = Flag(value=flag_value)
+    challenge.solve(flag, writeup)
+    await repo.save(challenge)
+
+    event = ChallengeSolved(
+        challenge_name=challenge.name,
+        flag=flag_value,
+        approach=approach,
+        aggregate_id=challenge_id,
+        aggregate_type=challenge.__class__.__name__,
+    )
+    return True, [event]
 
 
 class CTFService:

@@ -11,14 +11,14 @@ from typing import Any
 
 from miya.shared.events import DomainEvent
 from miya.shared.ports import EventStorePort, ExploitFrameworkPort
-
-logger = logging.getLogger(__name__)
 from miya.oneday.post.domain import (
     PostSession,
     AccessLevel,
     LootItem,
     PivotTarget,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class PostService:

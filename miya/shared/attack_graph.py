@@ -159,10 +159,12 @@ class AttackGraph:
         # Reconstruct path
         path: list[GraphEdge] = []
         current = end
-        while current in prev and prev[current] is not None:
+        while current in prev:
             edge = prev[current]
-            path.append(edge)  # type: ignore[arg-type]
-            current = edge.source_id  # type: ignore[union-attr]
+            if edge is None:
+                break
+            path.append(edge)
+            current = edge.source_id
         path.reverse()
         return path
 
