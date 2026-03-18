@@ -264,9 +264,11 @@ def oneday(target: str, prompt: str, source: str | None, topology: str, db: str,
     """Exploit known CVEs (1-day vulnerabilities)"""
     _apply_api_env(api_key, base_url)
     opts: dict[str, Any] = {}
+    target_kind = "service"
     if source:
         opts["source_path"] = source
-    asyncio.run(_run_mission("oneday", target, "service", topology, db, model=model or DEFAULT_MODEL, prompt=prompt, **opts))
+        target_kind = "source"  # white-box: source code provided
+    asyncio.run(_run_mission("oneday", target, target_kind, topology, db, model=model or DEFAULT_MODEL, prompt=prompt, **opts))
 
 
 @cli.command()
@@ -1334,8 +1336,11 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                 if len(set_parts) == 3:
                     key, val = set_parts[1].lower(), set_parts[2]
                     if key == "model":
-                        cfg["model"] = val
-                        console.print(f"[green]Model → {val}[/green]")
+                        if val.lower() in ("opus", "sonnet", "haiku"):
+                            cfg["model"] = val.lower()
+                            console.print(f"[green]Model → {val.lower()}[/green]")
+                        else:
+                            console.print("[red]Use 'opus', 'sonnet', or 'haiku'.[/red]")
                     elif key == "topology":
                         if val in ("ooda", "attack_graph", "fanout"):
                             cfg["topology"] = val
