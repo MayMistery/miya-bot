@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import Any, AsyncIterator, Callable, Protocol, runtime_checkable
 
@@ -194,6 +195,21 @@ def extract_events_from_output(output: str, mission: Mission) -> list[DomainEven
             logger.warning(f"Failed to create {event_type_name}: {e}")
 
     return events
+
+
+def _sdk_env() -> dict[str, str]:
+    """Build env overrides for ClaudeAgentOptions from Miya config env vars.
+
+    Supported env vars:
+        ANTHROPIC_API_KEY   — Anthropic API key
+        ANTHROPIC_BASE_URL  — Custom API base URL (e.g. for proxies or bedrock)
+    """
+    env: dict[str, str] = {}
+    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"):
+        val = os.environ.get(key)
+        if val:
+            env[key] = val
+    return env
 
 
 TopologyFactory = Callable[..., Topology]

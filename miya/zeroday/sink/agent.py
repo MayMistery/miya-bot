@@ -70,7 +70,7 @@ may reduce real-world impact even if code is vulnerable.
 """
 
 
-def create_agent() -> AgentHandle:
+def create_agent(model: str = "opus") -> AgentHandle:
     """Create the sink analysis agent."""
     return AgentHandle(
         name="sink",
@@ -81,7 +81,7 @@ def create_agent() -> AgentHandle:
         system_prompt=SINK_SYSTEM_PROMPT,
         tools=["Read", "Write", "Bash", "Grep", "Glob"],
         mcp_servers=["semgrep"],
-        model="opus",
+        model=model,
         context_name="sink",
         mission_type="zeroday",
     )

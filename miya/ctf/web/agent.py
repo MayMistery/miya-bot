@@ -59,7 +59,7 @@ Always explain your reasoning, document each step, and capture the flag.
 """
 
 
-def create_agent() -> AgentHandle:
+def create_agent(model: str = "opus") -> AgentHandle:
     """Create the Web CTF agent handle."""
     return AgentHandle(
         name="ctf-web",
@@ -67,7 +67,7 @@ def create_agent() -> AgentHandle:
         system_prompt=_SYSTEM_PROMPT,
         tools=["Bash", "Read", "Write", "Glob", "Grep"],
         mcp_servers=["sqlmap", "nuclei"],
-        model="opus",
+        model=model,
         context_name="ctf.web",
         mission_type="ctf",
     )

@@ -67,7 +67,7 @@ Always run checksec first. Document your exploit development process step by ste
 """
 
 
-def create_agent() -> AgentHandle:
+def create_agent(model: str = "opus") -> AgentHandle:
     """Create the Pwn CTF agent handle."""
     return AgentHandle(
         name="ctf-pwn",
@@ -75,7 +75,7 @@ def create_agent() -> AgentHandle:
         system_prompt=_SYSTEM_PROMPT,
         tools=["Bash", "Read", "Write", "Glob", "Grep"],
         mcp_servers=["ghidra", "gdb"],
-        model="opus",
+        model=model,
         context_name="ctf.pwn",
         mission_type="ctf",
     )

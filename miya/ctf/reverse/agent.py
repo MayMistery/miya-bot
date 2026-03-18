@@ -63,7 +63,7 @@ Always document the algorithm you identify and your constraint extraction proces
 """
 
 
-def create_agent() -> AgentHandle:
+def create_agent(model: str = "opus") -> AgentHandle:
     """Create the Reverse Engineering CTF agent handle."""
     return AgentHandle(
         name="ctf-reverse",
@@ -71,7 +71,7 @@ def create_agent() -> AgentHandle:
         system_prompt=_SYSTEM_PROMPT,
         tools=["Bash", "Read", "Write", "Glob", "Grep"],
         mcp_servers=["ghidra", "gdb"],
-        model="opus",
+        model=model,
         context_name="ctf.reverse",
         mission_type="ctf",
     )

@@ -126,7 +126,7 @@ For each validated PoC:
 """
 
 
-def create_agent() -> AgentHandle:
+def create_agent(model: str = "opus") -> AgentHandle:
     """Create the PoC construction agent."""
     return AgentHandle(
         name="poc",
@@ -137,7 +137,7 @@ def create_agent() -> AgentHandle:
         system_prompt=POC_SYSTEM_PROMPT,
         tools=["Read", "Write", "Bash", "Grep", "Glob"],
         mcp_servers=[],
-        model="opus",
+        model=model,
         context_name="poc",
         mission_type="zeroday",
     )

@@ -82,7 +82,7 @@ Always show your mathematical reasoning and explain the vulnerability.
 """
 
 
-def create_agent() -> AgentHandle:
+def create_agent(model: str = "opus") -> AgentHandle:
     """Create the Crypto CTF agent handle."""
     return AgentHandle(
         name="ctf-crypto",
@@ -90,7 +90,7 @@ def create_agent() -> AgentHandle:
         system_prompt=_SYSTEM_PROMPT,
         tools=["Bash", "Read", "Write", "Glob", "Grep"],
         mcp_servers=[],
-        model="opus",
+        model=model,
         context_name="ctf.crypto",
         mission_type="ctf",
     )

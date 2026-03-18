@@ -29,7 +29,7 @@ from miya.shared.events import (
 )
 from miya.shared.ports import CoordinatorPort, EventStorePort
 from miya.shared.types import Mission, OODAPhase, MissionType
-from miya.topology.base import Topology, TopologyRegistry, AgentHandle, extract_events_from_output
+from miya.topology.base import Topology, TopologyRegistry, AgentHandle, extract_events_from_output, _sdk_env
 
 logger = logging.getLogger(__name__)
 
@@ -388,6 +388,7 @@ class OODATopology:
             ] + [f"mcp__{name}__*" for name in mcp_names],
             permission_mode="acceptEdits",
             max_turns=30,
+            env=_sdk_env(),
         )
 
         output_parts: list[str] = []

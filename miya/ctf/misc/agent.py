@@ -75,7 +75,7 @@ Always run `file` and `strings` first. Document every extraction step.
 """
 
 
-def create_agent() -> AgentHandle:
+def create_agent(model: str = "opus") -> AgentHandle:
     """Create the Misc CTF agent handle."""
     return AgentHandle(
         name="ctf-misc",
@@ -83,7 +83,7 @@ def create_agent() -> AgentHandle:
         system_prompt=_SYSTEM_PROMPT,
         tools=["Bash", "Read", "Write", "Glob", "Grep"],
         mcp_servers=[],
-        model="opus",
+        model=model,
         context_name="ctf.misc",
         mission_type="ctf",
     )

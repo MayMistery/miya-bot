@@ -82,7 +82,7 @@ class MissionReport:
 # ═══════════════════════════════════════════════════════════════════
 
 
-def _build_oneday_agents() -> dict[str, AgentHandle]:
+def _build_oneday_agents(model: str = "opus") -> dict[str, AgentHandle]:
     """Import and build 1-day kill chain agents."""
     try:
         from miya.oneday.recon.agent import create_agent as recon
@@ -91,18 +91,18 @@ def _build_oneday_agents() -> dict[str, AgentHandle]:
         from miya.oneday.exploit.agent import create_agent as exploit
         from miya.oneday.post.agent import create_agent as post
         return {
-            "recon": recon(),
-            "scan": scan(),
-            "vuln": vuln(),
-            "exploit": exploit(),
-            "post": post(),
+            "recon": recon(model=model),
+            "scan": scan(model=model),
+            "vuln": vuln(model=model),
+            "exploit": exploit(model=model),
+            "post": post(model=model),
         }
     except ImportError as e:
         logger.warning(f"Could not load oneday agents: {e}")
         return {}
 
 
-def _build_zeroday_agents() -> dict[str, AgentHandle]:
+def _build_zeroday_agents(model: str = "opus") -> dict[str, AgentHandle]:
     """Import and build 0-day API chain agents."""
     try:
         from miya.zeroday.entrypoint.agent import create_agent as entrypoint
@@ -110,17 +110,17 @@ def _build_zeroday_agents() -> dict[str, AgentHandle]:
         from miya.zeroday.sink.agent import create_agent as sink
         from miya.zeroday.poc.agent import create_agent as poc
         return {
-            "entrypoint": entrypoint(),
-            "dataflow": dataflow(),
-            "sink": sink(),
-            "poc": poc(),
+            "entrypoint": entrypoint(model=model),
+            "dataflow": dataflow(model=model),
+            "sink": sink(model=model),
+            "poc": poc(model=model),
         }
     except ImportError as e:
         logger.warning(f"Could not load zeroday agents: {e}")
         return {}
 
 
-def _build_ctf_agents() -> dict[str, AgentHandle]:
+def _build_ctf_agents(model: str = "opus") -> dict[str, AgentHandle]:
     """Import and build CTF agents."""
     try:
         from miya.ctf.web.agent import create_agent as web
@@ -129,11 +129,11 @@ def _build_ctf_agents() -> dict[str, AgentHandle]:
         from miya.ctf.reverse.agent import create_agent as reverse
         from miya.ctf.misc.agent import create_agent as misc
         return {
-            "web": web(),
-            "pwn": pwn(),
-            "crypto": crypto(),
-            "reverse": reverse(),
-            "misc": misc(),
+            "web": web(model=model),
+            "pwn": pwn(model=model),
+            "crypto": crypto(model=model),
+            "reverse": reverse(model=model),
+            "misc": misc(model=model),
         }
     except ImportError as e:
         logger.warning(f"Could not load ctf agents: {e}")
@@ -183,6 +183,7 @@ class MissionService:
         target_uri: str,
         target_kind: str = "service",
         topology: str = "ooda",
+        model: str = "opus",
         **options: Any,
     ) -> MissionReport:
         """Execute a mission and return a report."""
@@ -214,7 +215,7 @@ class MissionService:
         builder = AGENT_BUILDERS.get(mission_type)
         if not builder:
             raise ValueError(f"No agents registered for mission type: {mission_type}")
-        agents = builder()
+        agents = builder(model=model)
         if not agents:
             raise ValueError(f"Failed to build agents for: {mission_type}")
 

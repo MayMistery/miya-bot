@@ -71,7 +71,7 @@ When multiple CVEs affect the same target, flag chaining potential in the assess
 """
 
 
-def create_agent() -> AgentHandle:
+def create_agent(model: str = "opus") -> AgentHandle:
     """Create the Vuln Assessment agent handle."""
     return AgentHandle(
         name="vuln",

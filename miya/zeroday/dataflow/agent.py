@@ -73,7 +73,7 @@ For each taint path, emit structured data with:
 """
 
 
-def create_agent() -> AgentHandle:
+def create_agent(model: str = "opus") -> AgentHandle:
     """Create the data flow analysis agent."""
     return AgentHandle(
         name="dataflow",
@@ -84,7 +84,7 @@ def create_agent() -> AgentHandle:
         system_prompt=DATAFLOW_SYSTEM_PROMPT,
         tools=["Read", "Write", "Bash", "Grep", "Glob"],
         mcp_servers=["semgrep"],
-        model="opus",
+        model=model,
         context_name="dataflow",
         mission_type="zeroday",
     )

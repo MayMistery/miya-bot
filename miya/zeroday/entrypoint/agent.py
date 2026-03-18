@@ -65,7 +65,7 @@ endpoints, and internal APIs are often less hardened.
 """
 
 
-def create_agent() -> AgentHandle:
+def create_agent(model: str = "opus") -> AgentHandle:
     """Create the entry point discovery agent."""
     return AgentHandle(
         name="entrypoint",
@@ -76,7 +76,7 @@ def create_agent() -> AgentHandle:
         system_prompt=ENTRYPOINT_SYSTEM_PROMPT,
         tools=["Read", "Write", "Bash", "Grep", "Glob"],
         mcp_servers=["semgrep"],
-        model="opus",
+        model=model,
         context_name="entrypoint",
         mission_type="zeroday",
     )

@@ -58,7 +58,7 @@ Report all scan findings as structured data:
 """
 
 
-def create_agent() -> AgentHandle:
+def create_agent(model: str = "opus") -> AgentHandle:
     """Create the Scan agent handle."""
     return AgentHandle(
         name="scan",

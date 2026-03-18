@@ -56,7 +56,7 @@ Report all discovered assets as structured data:
 """
 
 
-def create_agent() -> AgentHandle:
+def create_agent(model: str = "opus") -> AgentHandle:
     """Create the Recon agent handle."""
     return AgentHandle(
         name="recon",

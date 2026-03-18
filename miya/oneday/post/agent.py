@@ -90,7 +90,7 @@ CAP_SYS_ADMIN, mounted Docker socket, exploitable kernel via Dirty Pipe).
 """
 
 
-def create_agent() -> AgentHandle:
+def create_agent(model: str = "opus") -> AgentHandle:
     """Create the Post-Exploitation agent handle."""
     return AgentHandle(
         name="post",

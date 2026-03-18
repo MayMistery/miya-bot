@@ -10,8 +10,23 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from typing import Any
+
+DEFAULT_MODEL = os.environ.get("MIYA_MODEL", "opus")
+
+_MODEL_HELP = "Claude model (opus/sonnet/haiku). Env: MIYA_MODEL"
+_KEY_HELP = "Anthropic API key. Env: ANTHROPIC_API_KEY"
+_BASE_URL_HELP = "Anthropic API base URL. Env: ANTHROPIC_BASE_URL"
+
+
+def _apply_api_env(api_key: str | None, base_url: str | None) -> None:
+    """Apply CLI overrides to environment so the SDK picks them up."""
+    if api_key:
+        os.environ["ANTHROPIC_API_KEY"] = api_key
+    if base_url:
+        os.environ["ANTHROPIC_BASE_URL"] = base_url
 
 import click
 from rich.console import Console
@@ -209,23 +224,43 @@ def cli(ctx: click.Context) -> None:
         console.print("[dim]       miya info[/dim]")
 
 
+def _common_options(f: Any) -> Any:
+    """Shared --model, --api-key, --base-url options."""
+    f = click.option("--model", "-m", default=None, help=_MODEL_HELP)(f)
+    f = click.option("--api-key", default=None, help=_KEY_HELP)(f)
+    f = click.option("--base-url", default=None, help=_BASE_URL_HELP)(f)
+    return f
+
+
 @cli.command()
 @click.option("--target", "-t", required=True, help="Target (IP, URL, CIDR, hostname)")
+@click.option("--source", "-s", default=None, help="Source code path for white-box analysis (optional)")
 @click.option("--topology", "-T", default="ooda", type=click.Choice(["ooda", "attack_graph"]))
 @click.option("--db", default="miya_events.db", help="SQLite database path")
-def oneday(target: str, topology: str, db: str) -> None:
+@_common_options
+def oneday(target: str, source: str | None, topology: str, db: str, model: str | None, api_key: str | None, base_url: str | None) -> None:
     """Exploit known CVEs (1-day vulnerabilities)"""
-    asyncio.run(_run_mission("oneday", target, "service", topology, db))
+    _apply_api_env(api_key, base_url)
+    opts: dict[str, Any] = {}
+    if source:
+        opts["source_path"] = source
+    asyncio.run(_run_mission("oneday", target, "service", topology, db, model=model or DEFAULT_MODEL, **opts))
 
 
 @cli.command()
-@click.option("--target", "-t", required=True, help="Target source code path or repo URL")
+@click.option("--target", "-t", required=True, help="Source code path or repo URL")
+@click.option("--service", default=None, help="Live service URL/IP to exploit after analysis (optional)")
 @click.option("--language", "-l", default="", help="Programming language hint")
 @click.option("--topology", "-T", default="ooda", type=click.Choice(["ooda", "attack_graph"]))
 @click.option("--db", default="miya_events.db", help="SQLite database path")
-def zeroday(target: str, language: str, topology: str, db: str) -> None:
+@_common_options
+def zeroday(target: str, service: str | None, language: str, topology: str, db: str, model: str | None, api_key: str | None, base_url: str | None) -> None:
     """Discover unknown vulnerabilities (0-day)"""
-    asyncio.run(_run_mission("zeroday", target, "source", topology, db, language=language))
+    _apply_api_env(api_key, base_url)
+    opts: dict[str, Any] = {"language": language}
+    if service:
+        opts["service_url"] = service
+    asyncio.run(_run_mission("zeroday", target, "source", topology, db, model=model or DEFAULT_MODEL, **opts))
 
 
 @cli.command()
@@ -233,10 +268,12 @@ def zeroday(target: str, language: str, topology: str, db: str) -> None:
 @click.option("--category", "-c", default="", help="Challenge category (web/pwn/crypto/reverse/misc)")
 @click.option("--topology", "-T", default="ooda", type=click.Choice(["ooda", "attack_graph"]))
 @click.option("--db", default="miya_events.db", help="SQLite database path")
-def ctf(target: str, category: str, topology: str, db: str) -> None:
+@_common_options
+def ctf(target: str, category: str, topology: str, db: str, model: str | None, api_key: str | None, base_url: str | None) -> None:
     """Solve CTF challenges"""
+    _apply_api_env(api_key, base_url)
     kind = "challenge" if not target.startswith(("http", "/")) else "url"
-    asyncio.run(_run_mission("ctf", target, kind, topology, db, category=category))
+    asyncio.run(_run_mission("ctf", target, kind, topology, db, model=model or DEFAULT_MODEL, category=category))
 
 
 @cli.command()
@@ -252,9 +289,11 @@ def info() -> None:
 
 @cli.command()
 @click.option("--db", default="miya_events.db", help="SQLite database path")
-def interactive(db: str) -> None:
+@_common_options
+def interactive(db: str, model: str | None, api_key: str | None, base_url: str | None) -> None:
     """Interactive REPL mode"""
-    asyncio.run(_interactive_loop(db))
+    _apply_api_env(api_key, base_url)
+    asyncio.run(_interactive_loop(db, model=model or DEFAULT_MODEL))
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -268,6 +307,7 @@ async def _run_mission(
     target_kind: str,
     topology: str,
     db: str,
+    model: str = "opus",
     **options: Any,
 ) -> None:
     from miya.mission.service import MissionService
@@ -278,6 +318,7 @@ async def _run_mission(
         f"[bold]Mission:[/bold] {mission_type.upper()}\n"
         f"[bold]Target:[/bold]  {target}\n"
         f"[bold]Topology:[/bold] {topology}\n"
+        f"[bold]Model:[/bold]   {model}\n"
         + (f"[bold]Options:[/bold] {options}" if options else ""),
         title="[bold cyan]Mission Configuration[/bold cyan]",
         border_style="cyan",
@@ -298,6 +339,7 @@ async def _run_mission(
                 target_uri=target,
                 target_kind=target_kind,
                 topology=topology,
+                model=model,
                 **options,
             )
 
@@ -313,7 +355,7 @@ async def _run_mission(
         await service.close()
 
 
-async def _interactive_loop(db: str) -> None:
+async def _interactive_loop(db: str, model: str = "opus") -> None:
     from miya.mission.service import MissionService
 
     show_banner()
@@ -398,6 +440,7 @@ async def _interactive_loop(db: str) -> None:
                         target_uri=target,
                         target_kind=kind_map[mission_type],
                         topology=topology,
+                        model=model,
                         **options,
                     )
                     progress.update(task, completed=True)
