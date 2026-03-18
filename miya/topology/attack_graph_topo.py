@@ -11,6 +11,7 @@ Inspired by MITRE ATT&CK framework and automated attack planning research.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any, AsyncIterator
@@ -22,6 +23,7 @@ from miya.shared.events import (
     MissionStarted,
     MissionCompleted,
     MissionFailed,
+    OperatorMessage,
     PhaseTransition,
 )
 from miya.shared.ports import CoordinatorPort, EventStorePort
@@ -151,6 +153,7 @@ class AttackGraphTopology:
         blackboard: Blackboard,
         agents: dict[str, AgentHandle],
         event_store: EventStorePort,
+        operator_queue: asyncio.Queue[str] | None = None,
     ) -> AsyncIterator[DomainEvent]:
         """Execute the mission using attack graph planning."""
 
@@ -167,6 +170,14 @@ class AttackGraphTopology:
 
         graph = blackboard.attack_graph
         mission_desc = f"{mission.mission_type.value}: {mission.target}"
+
+        # ── Operator initial prompt ───────────────────────────────
+        operator_prompt = ""
+        if mission.prompt:
+            operator_prompt = (
+                f"\n\n## Operator Instructions\n{mission.prompt}\n"
+            )
+            logger.info("📋 Operator prompt: %s", mission.prompt[:120])
 
         # ── Phase 1: Initial Recon to Build Graph ─────────────────
         yield PhaseTransition(
@@ -202,7 +213,7 @@ class AttackGraphTopology:
                 f"Discover the attack surface. Report all assets, services, "
                 f"entry points, and potential vulnerabilities found.\n"
                 f"Blackboard:\n{blackboard.to_context_prompt()}\n"
-                + EVENT_INSTRUCTION
+                + operator_prompt + EVENT_INSTRUCTION
             )
             recon_output = await self._run_agent(recon_prompt, mission, agents, blackboard)
 
@@ -212,7 +223,30 @@ class AttackGraphTopology:
 
         # ── Phase 2: Plan-Execute Loop ────────────────────────────
         for step in range(1, self._max_steps + 1):
-            logger.info(f"AttackGraph step {step}/{self._max_steps}")
+            logger.info("━━━━ AG step %d/%d ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", step, self._max_steps)
+
+            # ── Drain HITL queue ──────────────────────────────────
+            hitl_extra = ""
+            if operator_queue is not None:
+                hitl_msgs: list[str] = []
+                while not operator_queue.empty():
+                    try:
+                        hitl_msgs.append(operator_queue.get_nowait())
+                    except asyncio.QueueEmpty:
+                        break
+                if hitl_msgs:
+                    for m in hitl_msgs:
+                        logger.info("📨 Operator HITL: %s", m[:120])
+                        ev = OperatorMessage(
+                            aggregate_id=mission.id, content=m,
+                            mission=mission.mission_type.value,
+                        )
+                        yield ev
+                        blackboard.apply(ev)
+                    hitl_extra = (
+                        "\n\n## Operator Live Directives\n"
+                        + "\n".join(f"- {m}" for m in hitl_msgs) + "\n"
+                    )
 
             # Check if we have unexplored edges
             unexplored = graph.get_unexplored_edges()
@@ -262,7 +296,7 @@ class AttackGraphTopology:
                     for i, p in enumerate(all_paths[:5])
                 ) or "No paths available",
                 mission_description=mission_desc,
-            )
+            ) + operator_prompt + hitl_extra
 
             plan_output = await self._run_agent(plan_prompt, mission, agents, blackboard)
 
@@ -294,7 +328,7 @@ class AttackGraphTopology:
                 agent_name=selected_agent or next(iter(agents), ""),
                 blackboard_context=blackboard.to_context_prompt(),
                 preparation=plan_output[:3000],
-            ) + EVENT_INSTRUCTION
+            ) + operator_prompt + hitl_extra + EVENT_INSTRUCTION
 
             exec_output = await self._run_agent(exec_prompt, mission, agents, blackboard)
 

@@ -7,13 +7,13 @@ without touching domain code.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import re
-from typing import Any, AsyncIterator, Callable, Protocol, runtime_checkable
-
 import time
+from typing import Any, AsyncIterator, Callable, Protocol, runtime_checkable
 
 from claude_agent_sdk.types import (
     AssistantMessage,
@@ -106,11 +106,16 @@ class Topology(Protocol):
         blackboard: Blackboard,
         agents: dict[str, AgentHandle],
         event_store: EventStorePort,
+        operator_queue: asyncio.Queue[str] | None = None,
     ) -> AsyncIterator[DomainEvent]:
         """Execute the mission using this topology.
 
         Yields DomainEvents as the mission progresses.
         The caller is responsible for persisting events to the EventStore.
+
+        Args:
+            operator_queue: Optional async queue for HITL messages.
+                            The topology drains it between phases.
         """
         ...
 

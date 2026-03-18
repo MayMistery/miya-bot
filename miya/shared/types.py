@@ -145,6 +145,7 @@ class Mission:
     mission_type: MissionType = MissionType.ONEDAY
     target: Target = field(default_factory=lambda: Target(uri="", kind="service"))
     topology: str = "ooda"
+    prompt: str = ""  # operator instructions passed at launch
     options: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=_now)
     status: Literal["created", "running", "completed", "failed"] = "created"

@@ -6,6 +6,7 @@ executes the mission, and produces a report.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -186,15 +187,22 @@ class MissionService:
         target_kind: str = "service",
         topology: str = "ooda",
         model: str = "opus",
+        prompt: str = "",
         on_event: Callable[[DomainEvent], None] | None = None,
+        operator_queue: asyncio.Queue[str] | None = None,
         **options: Any,
     ) -> MissionReport:
         """Execute a mission and return a report.
 
         Args:
+            prompt: Operator instructions passed at launch — included
+                    in every phase prompt as additional context.
             on_event: Optional callback invoked for each domain event as it
                       is produced.  Used by the interactive REPL to render
                       a live event feed.
+            operator_queue: Optional async queue for HITL messages injected
+                            during execution.  The topology drains it between
+                            phases.
         """
 
         if isinstance(mission_type, str):
@@ -205,6 +213,7 @@ class MissionService:
             mission_type=mission_type,
             target=target,
             topology=topology,
+            prompt=prompt,
             options=options,
         )
         mission.start()
@@ -237,7 +246,8 @@ class MissionService:
 
         try:
             async for event in topo.execute(
-                mission, blackboard, agents, self._event_store
+                mission, blackboard, agents, self._event_store,
+                operator_queue=operator_queue,
             ):
                 collected_events.append(event)
                 await self._event_store.append([event])

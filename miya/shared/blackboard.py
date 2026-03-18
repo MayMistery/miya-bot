@@ -32,6 +32,7 @@ from miya.shared.events import (
     LootCollected,
     PhaseTransition,
     ReflectionCompleted,
+    OperatorMessage,
 )
 
 
@@ -76,6 +77,9 @@ class Blackboard:
     phase_history: list[dict[str, str]] = field(default_factory=list)
     reflections: list[dict[str, str]] = field(default_factory=list)
     exploit_attempts: list[dict[str, Any]] = field(default_factory=list)
+
+    # ── Operator (HITL) ───────────────────────────────────────────
+    operator_messages: list[str] = field(default_factory=list)
 
     # ── Projectors ────────────────────────────────────────────────
 
@@ -289,6 +293,9 @@ class Blackboard:
             "insights": e.insights,
         })
 
+    def _on_OperatorMessage(self, e: OperatorMessage) -> None:
+        self.operator_messages.append(e.content)
+
     # ── Query helpers ─────────────────────────────────────────────
 
     def critical_findings(self) -> list[Finding]:
@@ -372,6 +379,11 @@ class Blackboard:
             lines.append(f"\n### Exploit Attempts ({len(self.exploit_attempts)})")
             for ea in self.exploit_attempts[-5:]:
                 lines.append(f"- {ea['cve_id']}: {ea['technique']} [{ea.get('status', '?')}]")
+
+        if self.operator_messages:
+            lines.append(f"\n### Operator Messages ({len(self.operator_messages)})")
+            for msg in self.operator_messages[-5:]:
+                lines.append(f"- {msg}")
 
         lines.append(f"\n### Current Access: {self.current_access_level}")
         lines.append(f"### Attack Graph: {self.attack_graph.summary()}")

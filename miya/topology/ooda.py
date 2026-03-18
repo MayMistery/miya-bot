@@ -15,6 +15,7 @@ Nested OODA: each phase can invoke sub-agents that themselves follow OODA intern
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, AsyncIterator
 
@@ -24,6 +25,7 @@ from miya.shared.events import (
     MissionStarted,
     MissionCompleted,
     MissionFailed,
+    OperatorMessage,
     PhaseTransition,
     ReflectionCompleted,
 )
@@ -180,6 +182,7 @@ class OODATopology:
         blackboard: Blackboard,
         agents: dict[str, AgentHandle],
         event_store: EventStorePort,
+        operator_queue: asyncio.Queue[str] | None = None,
     ) -> AsyncIterator[DomainEvent]:
         """Run the OODA loop until completion or max iterations."""
 
@@ -199,6 +202,14 @@ class OODATopology:
         agent_desc = "\n".join(
             f"- **{name}**: {a.description}" for name, a in agents.items()
         )
+
+        # ── Operator initial prompt ───────────────────────────────
+        operator_prompt = ""
+        if mission.prompt:
+            operator_prompt = (
+                f"\n\n## Operator Instructions\n{mission.prompt}\n"
+            )
+            logger.info("📋 Operator prompt: %s", mission.prompt[:120])
 
         observe_output = ""
         orient_output = ""
@@ -222,6 +233,35 @@ class OODATopology:
             if previous_insights:
                 logger.info("  focus: %s", previous_insights[:120])
 
+            # ── Drain HITL queue ──────────────────────────────────
+            hitl_messages: list[str] = []
+            if operator_queue is not None:
+                while not operator_queue.empty():
+                    try:
+                        msg = operator_queue.get_nowait()
+                        hitl_messages.append(msg)
+                    except asyncio.QueueEmpty:
+                        break
+            if hitl_messages:
+                for msg in hitl_messages:
+                    logger.info("📨 Operator HITL: %s", msg[:120])
+                    ev = OperatorMessage(
+                        aggregate_id=mission.id,
+                        content=msg,
+                        mission=mission.mission_type.value,
+                    )
+                    yield ev
+                    blackboard.apply(ev)
+
+            # Build per-iteration operator context (initial + HITL)
+            _iter_operator = operator_prompt
+            if hitl_messages:
+                _iter_operator += (
+                    "\n\n## Operator Live Directives\n"
+                    + "\n".join(f"- {m}" for m in hitl_messages)
+                    + "\n"
+                )
+
             # ── OBSERVE ───────────────────────────────────────────
             phase_event = PhaseTransition(
                 from_phase=OODAPhase.REFLECT.value if iteration > 1 else "",
@@ -239,7 +279,7 @@ class OODATopology:
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
                 agent_descriptions=agent_desc,
-            ) + EVENT_INSTRUCTION
+            ) + _iter_operator + EVENT_INSTRUCTION
 
             observe_output = await self._run_coordinator(
                 observe_prompt, mission, agents, blackboard, phase_label="OBSERVE"
@@ -262,7 +302,7 @@ class OODATopology:
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
                 observe_output=observe_output[:4000],
-            ) + EVENT_INSTRUCTION
+            ) + _iter_operator + EVENT_INSTRUCTION
             orient_output = await self._run_coordinator(
                 orient_prompt, mission, agents, blackboard, phase_label="ORIENT"
             )
@@ -284,7 +324,7 @@ class OODATopology:
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
                 orient_output=orient_output[:4000],
-            )
+            ) + _iter_operator
             decide_output = await self._run_coordinator(
                 decide_prompt, mission, agents, blackboard, phase_label="DECIDE"
             )
@@ -303,7 +343,7 @@ class OODATopology:
                 mission_description=mission_desc,
                 decide_output=decide_output[:4000],
                 agent_descriptions=agent_desc,
-            ) + EVENT_INSTRUCTION
+            ) + _iter_operator + EVENT_INSTRUCTION
             act_output = await self._run_coordinator(
                 act_prompt, mission, agents, blackboard, phase_label="ACT"
             )

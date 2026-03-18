@@ -246,33 +246,35 @@ def _common_options(f: Any) -> Any:
 
 @cli.command()
 @click.option("--target", "-t", required=True, help="Target (IP, URL, CIDR, hostname)")
+@click.option("--prompt", "-p", default="", help="Operator instructions for the mission")
 @click.option("--source", "-s", default=None, help="Source code path for white-box analysis (optional)")
 @click.option("--topology", "-T", default="ooda", type=click.Choice(["ooda", "attack_graph"]))
 @click.option("--db", default="miya_events.db", help="SQLite database path")
 @_common_options
-def oneday(target: str, source: str | None, topology: str, db: str, model: str | None, api_key: str | None, base_url: str | None) -> None:
+def oneday(target: str, prompt: str, source: str | None, topology: str, db: str, model: str | None, api_key: str | None, base_url: str | None) -> None:
     """Exploit known CVEs (1-day vulnerabilities)"""
     _apply_api_env(api_key, base_url)
     opts: dict[str, Any] = {}
     if source:
         opts["source_path"] = source
-    asyncio.run(_run_mission("oneday", target, "service", topology, db, model=model or DEFAULT_MODEL, **opts))
+    asyncio.run(_run_mission("oneday", target, "service", topology, db, model=model or DEFAULT_MODEL, prompt=prompt, **opts))
 
 
 @cli.command()
 @click.option("--target", "-t", required=True, help="Source code path or repo URL")
+@click.option("--prompt", "-p", default="", help="Operator instructions for the mission")
 @click.option("--service", default=None, help="Live service URL/IP to exploit after analysis (optional)")
 @click.option("--language", "-l", default="", help="Programming language hint")
 @click.option("--topology", "-T", default="ooda", type=click.Choice(["ooda", "attack_graph"]))
 @click.option("--db", default="miya_events.db", help="SQLite database path")
 @_common_options
-def zeroday(target: str, service: str | None, language: str, topology: str, db: str, model: str | None, api_key: str | None, base_url: str | None) -> None:
+def zeroday(target: str, prompt: str, service: str | None, language: str, topology: str, db: str, model: str | None, api_key: str | None, base_url: str | None) -> None:
     """Discover unknown vulnerabilities (0-day)"""
     _apply_api_env(api_key, base_url)
     opts: dict[str, Any] = {"language": language}
     if service:
         opts["service_url"] = service
-    asyncio.run(_run_mission("zeroday", target, "source", topology, db, model=model or DEFAULT_MODEL, **opts))
+    asyncio.run(_run_mission("zeroday", target, "source", topology, db, model=model or DEFAULT_MODEL, prompt=prompt, **opts))
 
 
 def _detect_target_kind(target: str) -> str:
@@ -288,15 +290,16 @@ def _detect_target_kind(target: str) -> str:
 
 @cli.command()
 @click.option("--target", "-t", required=True, help="Challenge URL or file path")
+@click.option("--prompt", "-p", default="", help="Operator instructions (challenge description, hints, etc.)")
 @click.option("--category", "-c", default="", help="Challenge category (web/pwn/crypto/reverse/misc)")
 @click.option("--topology", "-T", default="ooda", type=click.Choice(["ooda", "attack_graph"]))
 @click.option("--db", default="miya_events.db", help="SQLite database path")
 @_common_options
-def ctf(target: str, category: str, topology: str, db: str, model: str | None, api_key: str | None, base_url: str | None) -> None:
+def ctf(target: str, prompt: str, category: str, topology: str, db: str, model: str | None, api_key: str | None, base_url: str | None) -> None:
     """Solve CTF challenges"""
     _apply_api_env(api_key, base_url)
     kind = _detect_target_kind(target)
-    asyncio.run(_run_mission("ctf", target, kind, topology, db, model=model or DEFAULT_MODEL, category=category))
+    asyncio.run(_run_mission("ctf", target, kind, topology, db, model=model or DEFAULT_MODEL, prompt=prompt, category=category))
 
 
 @cli.command()
@@ -510,18 +513,25 @@ async def _run_mission(
     topology: str,
     db: str,
     model: str = "opus",
+    prompt: str = "",
     **options: Any,
 ) -> None:
     from miya.mission.service import MissionService
 
     show_banner()
 
+    panel_lines = [
+        f"[bold]Mission:[/bold] {mission_type.upper()}",
+        f"[bold]Target:[/bold]  {target}",
+        f"[bold]Topology:[/bold] {topology}",
+        f"[bold]Model:[/bold]   {model}",
+    ]
+    if prompt:
+        panel_lines.append(f"[bold]Prompt:[/bold]  {prompt[:80]}")
+    if options:
+        panel_lines.append(f"[bold]Options:[/bold] {options}")
     console.print(Panel(
-        f"[bold]Mission:[/bold] {mission_type.upper()}\n"
-        f"[bold]Target:[/bold]  {target}\n"
-        f"[bold]Topology:[/bold] {topology}\n"
-        f"[bold]Model:[/bold]   {model}\n"
-        + (f"[bold]Options:[/bold] {options}" if options else ""),
+        "\n".join(panel_lines),
         title="[bold cyan]Mission Configuration[/bold cyan]",
         border_style="cyan",
     ))
@@ -542,6 +552,7 @@ async def _run_mission(
                 target_kind=target_kind,
                 topology=topology,
                 model=model,
+                prompt=prompt,
                 **options,
             )
 
@@ -593,7 +604,7 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
             "report", "export", "replay", "info", "clear", "help",
             "exit", "quit",
             # options
-            "--topology", "--category", "--language", "--source", "--service",
+            "--topology", "--category", "--language", "--source", "--service", "--prompt",
             # set targets
             "model", "topology", "api_key", "base_url", "verbose",
             # values
@@ -658,6 +669,7 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
         t.add_row("ctf <target> [opts]", "Solve CTF challenge")
         t.add_row("", "")
         t.add_row("[dim]Mission options:[/dim]", "")
+        t.add_row("  --prompt/-p <text>", "Operator instructions / context")
         t.add_row("  --topology/-T <topo>", "ooda or attack_graph")
         t.add_row("  --category/-c <cat>", "CTF: web/pwn/crypto/reverse/misc")
         t.add_row("  --language/-l <lang>", "Language hint (zeroday)")
@@ -738,6 +750,9 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                 i += 2
             elif parts[i] == "--service" and i + 1 < len(parts):
                 options["service_url"] = parts[i + 1]
+                i += 2
+            elif parts[i] in ("--prompt", "-p") and i + 1 < len(parts):
+                options["_prompt"] = parts[i + 1]
                 i += 2
             elif parts[i] in ("--model", "-m") and i + 1 < len(parts):
                 # per-mission model override
@@ -1008,15 +1023,22 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
 
             mission_type, target, topology, options = parsed
             mission_model = options.pop("_model_override", cfg["model"])
+            mission_prompt = options.pop("_prompt", "")
 
             kind_map = {"oneday": "service", "zeroday": "source", "ctf": "challenge"}
 
+            panel_lines = [
+                f"[bold]Mission:[/bold]  {mission_type.upper()}",
+                f"[bold]Target:[/bold]   {target}",
+                f"[bold]Topology:[/bold] {topology}",
+                f"[bold]Model:[/bold]    {mission_model}",
+            ]
+            if mission_prompt:
+                panel_lines.append(f"[bold]Prompt:[/bold]  {mission_prompt[:80]}")
+            if options:
+                panel_lines.append(f"[bold]Options:[/bold]  {options}")
             console.print(Panel(
-                f"[bold]Mission:[/bold]  {mission_type.upper()}\n"
-                f"[bold]Target:[/bold]   {target}\n"
-                f"[bold]Topology:[/bold] {topology}\n"
-                f"[bold]Model:[/bold]    {mission_model}"
-                + (f"\n[bold]Options:[/bold]  {options}" if options else ""),
+                "\n".join(panel_lines),
                 title="[bold cyan]Launching Mission[/bold cyan]",
                 border_style="cyan",
             ))
@@ -1035,17 +1057,49 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                     f"{detail[:60]}",
                 )
 
-            try:
-                console.print("[dim]── Events ──[/dim]")
-                report = await service.execute(
+            # Create HITL operator queue
+            import asyncio as _aio
+            op_queue: _aio.Queue[str] = _aio.Queue()
+
+            async def _execute_mission() -> MissionReport:
+                return await service.execute(
                     mission_type=mission_type,
                     target_uri=target,
                     target_kind=kind_map[mission_type],
                     topology=topology,
                     model=mission_model,
+                    prompt=mission_prompt,
                     on_event=_on_event,
+                    operator_queue=op_queue,
                     **options,
                 )
+
+            try:
+                console.print("[dim]── Events (type to inject HITL, Ctrl+C to cancel) ──[/dim]")
+                mission_task = _aio.create_task(_execute_mission())
+
+                # HITL input loop — runs while mission is executing
+                while not mission_task.done():
+                    try:
+                        hitl_input = await asyncio.wait_for(
+                            asyncio.get_event_loop().run_in_executor(
+                                None,
+                                lambda: session.prompt(
+                                    HTML('<ansiyellow><b>hitl</b></ansiyellow> <ansibrightblack>&gt;</ansibrightblack> '),
+                                ),
+                            ),
+                            timeout=1.0,
+                        )
+                        hitl_input = hitl_input.strip()
+                        if hitl_input:
+                            op_queue.put_nowait(hitl_input)
+                            console.print(f"  [yellow]📨 queued:[/yellow] {hitl_input[:80]}")
+                    except asyncio.TimeoutError:
+                        continue  # check if mission is done
+                    except EOFError:
+                        break
+
+                report = await mission_task
                 console.print(f"[dim]── {len(live_events)} events ──[/dim]")
                 console.print()
                 print_report(report)
@@ -1055,6 +1109,12 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
 
             except KeyboardInterrupt:
                 console.print("\n[yellow]Mission cancelled by user.[/yellow]")
+                if not mission_task.done():
+                    mission_task.cancel()
+                    try:
+                        await mission_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
             except Exception as e:
                 console.print(f"[bold red]Error:[/bold red] {e}")
 

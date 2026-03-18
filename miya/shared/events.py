@@ -287,6 +287,19 @@ class LootCollected(DomainEvent):
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  Operator (HITL) Events
+# ═══════════════════════════════════════════════════════════════════
+
+
+@dataclass(frozen=True)
+class OperatorMessage(DomainEvent):
+    """Human-in-the-loop message injected by the operator during execution."""
+    event_type: ClassVar[str] = "operator.message"
+    content: str = ""
+    context: str = "operator"
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  Event Registry
 # ═══════════════════════════════════════════════════════════════════
 
