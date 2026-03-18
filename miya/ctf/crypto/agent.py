@@ -72,11 +72,14 @@ Detect by checking if server validates point-on-curve. Attack steps: \
 
 ## Tools
 - Python with PyCryptodome, gmpy2 for crypto operations
-- SageMath for number theory and algebra
 - z3 for constraint solving
 - RsaCtfTool for automated RSA attacks
 - hashcat/john for hash cracking when applicable
-- All via Bash — no MCP servers needed
+
+## MCP Tools Available
+- **sage** (SageMath): Number theory, algebra, polynomial rings, elliptic curves, lattice reduction (LLL/BKZ). Use for factorization, discrete log, and algebraic attacks.
+- **factordb**: Query FactorDB for known factorizations of large integers. Essential for RSA challenges with reused or weak moduli.
+- **cyberchef**: Multi-layer encoding/decoding, XOR brute-force, classical cipher operations. Use for data transformation chains.
 
 Always show your mathematical reasoning and explain the vulnerability.
 

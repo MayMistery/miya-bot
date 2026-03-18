@@ -85,6 +85,7 @@ def create_agent(model: str = "opus") -> AgentHandle:
             "nmap",
             "shodan",
         ],
+        model=model,
         context_name="recon",
         mission_type="oneday",
     )

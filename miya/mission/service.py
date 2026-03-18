@@ -261,12 +261,15 @@ class MissionService:
                 await self._event_store.append([event])
                 # Record solved challenges in campaign
                 if hasattr(event, "flag") and hasattr(event, "challenge_name"):
-                    self.campaign.record_solved(
-                        event.challenge_name,  # type: ignore[attr-defined]
-                        event.flag,  # type: ignore[attr-defined]
-                        getattr(event, "approach", ""),
-                        mission_id=mission.id,
-                    )
+                    try:
+                        self.campaign.record_solved(
+                            event.challenge_name,  # type: ignore[attr-defined]
+                            event.flag,  # type: ignore[attr-defined]
+                            getattr(event, "approach", ""),
+                            mission_id=mission.id,
+                        )
+                    except Exception:
+                        logger.debug("Failed to record solved challenge in campaign", exc_info=True)
                 if on_event is not None:
                     try:
                         on_event(event)

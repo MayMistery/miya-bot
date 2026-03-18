@@ -116,6 +116,7 @@ def create_agent(model: str = "opus") -> AgentHandle:
         mcp_servers=[
             "metasploit",
         ],
+        model=model,
         context_name="post",
         mission_type="oneday",
     )

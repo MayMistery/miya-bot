@@ -84,6 +84,7 @@ def create_agent(model: str = "opus") -> AgentHandle:
         mcp_servers=[
             "nuclei",
         ],
+        model=model,
         context_name="scan",
         mission_type="oneday",
     )

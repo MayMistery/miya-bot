@@ -97,6 +97,7 @@ def create_agent(model: str = "opus") -> AgentHandle:
         mcp_servers=[
             "exploitdb",
         ],
+        model=model,
         context_name="vuln",
         mission_type="oneday",
     )
