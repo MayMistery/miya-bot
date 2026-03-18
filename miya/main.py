@@ -312,8 +312,9 @@ def info() -> None:
 
 @cli.command()
 def health() -> None:
-    """Check that miya and its dependencies are properly configured."""
+    """Verify miya works end-to-end: deps, SDK connectivity, LLM ping."""
     import importlib
+    import subprocess
     import miya as _miya_pkg
 
     console.print(Panel(
@@ -324,63 +325,16 @@ def health() -> None:
 
     checks: list[tuple[str, bool, str]] = []
 
-    # 1. Python version
+    # ── Environment ──────────────────────────────────────────────
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     py_ok = sys.version_info >= (3, 10)
     checks.append(("Python", py_ok, f"{py_ver}" + ("" if py_ok else " (need >=3.10)")))
-
-    # 2. Miya version
     checks.append(("Miya", True, _miya_pkg.__version__))
 
-    # 3. Core dependencies
-    _deps = [
-        ("claude_agent_sdk", "Claude Agent SDK"),
-        ("pydantic", "Pydantic"),
-        ("rich", "Rich"),
-        ("click", "Click"),
-        ("aiosqlite", "aiosqlite"),
-        ("prompt_toolkit", "prompt-toolkit"),
-    ]
-    for mod_name, display_name in _deps:
-        try:
-            mod = importlib.import_module(mod_name)
-            ver = getattr(mod, "__version__", "ok")
-            checks.append((display_name, True, str(ver)))
-        except ImportError:
-            checks.append((display_name, False, "not installed"))
-
-    # 4. API key
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if api_key:
-        masked = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else "***"
-        checks.append(("API Key", True, masked))
-    else:
-        checks.append(("API Key", False, "not set (ANTHROPIC_API_KEY)"))
-
-    # 5. Base URL (optional — not required for local Claude Code)
-    base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
-    checks.append(("Base URL", True, base_url if base_url else "default (api.anthropic.com)"))
-
-    # 6. SDK connectivity — lightweight ping via SDK import check
-    sdk_ok = False
-    sdk_msg = ""
-    try:
-        from claude_agent_sdk import query, ClaudeAgentOptions  # noqa: F811
-        sdk_ok = True
-        sdk_msg = "SDK loaded, ready"
-    except ImportError as exc:
-        sdk_msg = f"import error: {exc}"
-    except Exception as exc:
-        sdk_msg = f"error: {exc}"
-    checks.append(("SDK Ready", sdk_ok, sdk_msg))
-
-    # 7. Project root
     project_root = str(Path(__file__).resolve().parent.parent)
     checks.append(("Project Root", True, project_root))
 
-    # 8. Git info
     try:
-        import subprocess
         git_hash = subprocess.check_output(
             ["git", "-C", project_root, "rev-parse", "--short", "HEAD"],
             stderr=subprocess.DEVNULL, text=True,
@@ -391,9 +345,50 @@ def health() -> None:
         ).strip()
         checks.append(("Git", True, f"{git_branch}@{git_hash}"))
     except Exception:
-        checks.append(("Git", True, "not a git repo"))
+        checks.append(("Git", True, "n/a"))
 
-    # Render table
+    # ── Dependencies ─────────────────────────────────────────────
+    _deps = [
+        ("claude_agent_sdk", "Claude Agent SDK"),
+        ("pydantic", "Pydantic"),
+        ("rich", "Rich"),
+        ("click", "Click"),
+        ("aiosqlite", "aiosqlite"),
+    ]
+    for mod_name, display_name in _deps:
+        try:
+            mod = importlib.import_module(mod_name)
+            ver = getattr(mod, "__version__", "ok")
+            checks.append((display_name, True, str(ver)))
+        except ImportError:
+            checks.append((display_name, False, "not installed"))
+
+    # ── SDK live connectivity test ───────────────────────────────
+    # This is the real test: call Claude Agent SDK with a trivial
+    # prompt. If the user runs Claude Code locally with built-in
+    # auth, this just works — no API key or base_url config needed.
+    sdk_ok = False
+    sdk_msg = ""
+    console.print("[dim]Testing Claude Agent SDK connectivity...[/dim]")
+    try:
+        sdk_reply = asyncio.run(_health_ping_sdk())
+        if sdk_reply:
+            sdk_ok = True
+            sdk_msg = f"connected ({sdk_reply[:60]})"
+        else:
+            sdk_msg = "no response from SDK"
+    except Exception as exc:
+        err = str(exc)
+        # Provide actionable hints for common failures
+        if "API key" in err or "authentication" in err.lower() or "401" in err:
+            sdk_msg = f"auth failed — set ANTHROPIC_API_KEY or run inside Claude Code"
+        elif "Connection" in err or "timeout" in err.lower():
+            sdk_msg = f"connection failed — check network or ANTHROPIC_BASE_URL"
+        else:
+            sdk_msg = f"error: {err[:80]}"
+    checks.append(("SDK Connectivity", sdk_ok, sdk_msg))
+
+    # ── Render ───────────────────────────────────────────────────
     table = Table(box=box.ROUNDED, border_style="dim")
     table.add_column("Component", style="bold", width=20)
     table.add_column("Status", width=6)
@@ -417,8 +412,30 @@ def health() -> None:
     raise SystemExit(0 if all_ok else 1)
 
 
+async def _health_ping_sdk() -> str:
+    """Send a trivial prompt to Claude Agent SDK and return the reply text.
+
+    Uses max_turns=1 to keep it cheap and fast.  If the user's environment
+    has working auth (local Claude Code, or ANTHROPIC_API_KEY), this succeeds.
+    """
+    from claude_agent_sdk import query, ClaudeAgentOptions
+
+    options = ClaudeAgentOptions(
+        max_turns=1,
+        permission_mode="default",
+    )
+
+    parts: list[str] = []
+    async for message in query(prompt="Reply with exactly: MIYA_OK", options=options):
+        if hasattr(message, "content"):
+            for block in message.content:
+                if hasattr(block, "text"):
+                    parts.append(block.text)
+    return "".join(parts).strip()
+
+
 @cli.command()
-@click.option("--branch", "-b", default=None, help="Git branch to pull from. Env: MIYA_BRANCH")
+@click.option("--branch", "-b", default=None, help="Git branch. Default: current branch. Env: MIYA_BRANCH")
 def update(branch: str | None) -> None:
     """Pull latest code from git and re-sync dependencies."""
     import subprocess
@@ -426,15 +443,24 @@ def update(branch: str | None) -> None:
     # Resolve project root from this package's location (works from any cwd)
     project_root = str(Path(__file__).resolve().parent.parent)
 
-    target_branch = branch or os.environ.get("MIYA_BRANCH", "main")
+    # Auto-detect: explicit flag > env var > current git branch
+    target_branch = branch or os.environ.get("MIYA_BRANCH", "")
+    if not target_branch:
+        try:
+            target_branch = subprocess.check_output(
+                ["git", "-C", project_root, "rev-parse", "--abbrev-ref", "HEAD"],
+                stderr=subprocess.DEVNULL, text=True,
+            ).strip()
+        except Exception:
+            target_branch = "main"
 
     console.print(f"[cyan]Updating from origin/{target_branch}...[/cyan]")
     console.print(f"[dim]Project: {project_root}[/dim]")
 
     steps = [
         ("Fetching", ["git", "-C", project_root, "fetch", "origin", target_branch]),
-        ("Resetting", ["git", "-C", project_root, "reset", "--hard", f"origin/{target_branch}"]),
-        ("Syncing deps", ["uv", "sync", "--extra", "dev", "--directory", project_root]),
+        ("Pulling", ["git", "-C", project_root, "pull", "origin", target_branch]),
+        ("Syncing deps", ["uv", "sync", "--directory", project_root]),
     ]
 
     for label, cmd in steps:

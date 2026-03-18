@@ -2,7 +2,13 @@
 set -euo pipefail
 
 MIYA_ROOT="$(cd "$(dirname "$0")" && pwd)"
-BRANCH="${MIYA_BRANCH:-main}"
+
+# Auto-detect branch: env var > current git branch > fallback main
+if [[ -n "${MIYA_BRANCH:-}" ]]; then
+    BRANCH="$MIYA_BRANCH"
+else
+    BRANCH="$(cd "$MIYA_ROOT" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+fi
 
 # ── Helpers ──────────────────────────────────────────────────────
 
@@ -145,8 +151,8 @@ case "$CMD" in
         cd "$MIYA_ROOT"
         echo "[miya] Pulling latest from origin/$BRANCH..."
         git fetch origin "$BRANCH"
-        git reset --hard "origin/$BRANCH"
-        uv sync --extra dev
+        git pull origin "$BRANCH"
+        uv sync
         _link_bin
         echo "[miya] Updated to $(git rev-parse --short HEAD)"
         ;;
