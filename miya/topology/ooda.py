@@ -166,15 +166,28 @@ def _get_phase_prompt(mission_type: str, phase: str) -> str:
 
 # ── Auto-classification prompt (CTF only) ─────────────────────────
 
-_CLASSIFY_PROMPT = """Classify this CTF challenge.
+_CLASSIFY_PROMPT = """Explore and classify this CTF challenge.
 
 Target: {target}
 {file_info}
 
-Respond with EXACTLY:
+## Instructions
+1. **Explore**: Read challenge files, check file types, inspect source code, \
+examine provided artifacts. If there's a URL, make an initial request to observe \
+behavior. Use `file`, `strings`, `checksec` as appropriate.
+2. **Classify**: Based on your exploration, determine the challenge category.
+3. **Strategize**: Based on what you found, outline your initial attack approach.
+
+## Response Format
 CATEGORY: <web|pwn|crypto|reverse|misc>
 CONFIDENCE: <0.0-1.0>
 REASONING: <one sentence>
+
+RECON_SUMMARY:
+<Multi-line summary of what you discovered during exploration. Include: \
+technology stack, key files, identified entry points, initial observations \
+about potential vulnerabilities or approach. This will be fed to the specialist \
+agent who will solve the challenge.>
 """
 
 # ── Flag submission prompt ────────────────────────────────────────
@@ -273,8 +286,9 @@ class OODATopology:
             )
 
         # ── Auto-classify (CTF only) ──────────────────────────────
+        recon_summary = ""
         if mission.mission_type == MissionType.CTF:
-            classified_category = await self._auto_classify(
+            classified_category, recon_summary = await self._auto_classify(
                 mission, agents, blackboard,
             )
             if classified_category:
@@ -288,6 +302,8 @@ class OODATopology:
                 yield classify_event
                 blackboard.apply(classify_event)
                 logger.info("Auto-classified as: %s", classified_category)
+                if recon_summary:
+                    logger.info("  recon summary: %s", recon_summary[:120])
 
         for iteration in range(1, self._max_iterations + 1):
             logger.info(
@@ -321,11 +337,18 @@ class OODATopology:
                 focus_hint = (
                     f"\nFocus from last REFLECT: {previous_insights}\n"
                 )
+            # Inject recon summary from CLASSIFY into first OBSERVE iteration
+            recon_hint = ""
+            if recon_summary and iteration == 1:
+                recon_hint = (
+                    f"\n## Initial Reconnaissance (from CLASSIFY phase)\n"
+                    f"{recon_summary}\n"
+                )
             observe_prompt = _get_phase_prompt(mission_key, "OBSERVE").format(
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
                 agent_descriptions=agent_desc,
-            ) + campaign_context + focus_hint + op_suffix + EVENT_INSTRUCTION
+            ) + campaign_context + focus_hint + recon_hint + op_suffix + EVENT_INSTRUCTION
 
             observe_output = await self._run_coordinator(
                 observe_prompt, mission, agents, blackboard, phase_label="OBSERVE"
@@ -584,12 +607,18 @@ class OODATopology:
         mission: Mission,
         agents: dict[str, AgentHandle],
         blackboard: Blackboard,
-    ) -> str:
-        """Lightweight classification of a CTF challenge before OBSERVE.
+    ) -> tuple[str, str]:
+        """Explore and classify a CTF challenge before OBSERVE.
 
-        Uses a single SDK call with max_turns=1 to inspect the challenge
-        artifacts and determine the category. Returns one of:
-        web, pwn, crypto, reverse, misc, or "" if classification fails.
+        Inspired by D-CIPHER's Auto-Prompter pattern: instead of just
+        classifying the category, the agent briefly explores the challenge
+        environment (reads files, checks services, inspects artifacts) and
+        produces BOTH a category AND a recon summary that feeds into the
+        specialist agent's OBSERVE phase.
+
+        Returns (category, recon_summary) where category is one of
+        web|pwn|crypto|reverse|misc (or "" if classification fails)
+        and recon_summary is the exploration findings (or "").
         """
         import re
 
@@ -598,20 +627,28 @@ class OODATopology:
             file_info=f"Operator hint: {mission.prompt[:200]}" if mission.prompt else "",
         )
 
-        logger.info("▶ CLASSIFY — auto-detecting challenge category")
+        logger.info("▶ CLASSIFY — exploring and classifying challenge")
         try:
             output = await self._run_coordinator(
                 classify_prompt, mission, agents, blackboard,
                 phase_label="CLASSIFY",
-                max_turns=3,  # lightweight: just inspect files, don't solve
+                max_turns=5,  # slightly more turns to allow actual exploration
             )
         except Exception:
             logger.debug("Auto-classify failed, skipping", exc_info=True)
-            return ""
+            return "", ""
 
         # Parse CATEGORY: from output
         m = re.search(r"CATEGORY\s*:\s*(web|pwn|crypto|reverse|misc)", output, re.IGNORECASE)
-        return m.group(1).lower() if m else ""
+        category = m.group(1).lower() if m else ""
+
+        # Parse RECON_SUMMARY: from output (everything after the marker)
+        recon_summary = ""
+        rs = re.search(r"RECON_SUMMARY:\s*\n(.*)", output, re.DOTALL | re.IGNORECASE)
+        if rs:
+            recon_summary = rs.group(1).strip()[:3000]  # cap to avoid context bloat
+
+        return category, recon_summary
 
     # ── Direct agent selection (#5) ───────────────────────────────
 
