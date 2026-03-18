@@ -28,6 +28,8 @@ from miya.shared.events import (
     OperatorMessage,
     PhaseTransition,
     ReflectionCompleted,
+    ChallengeClassified,
+    FlagSubmitted,
 )
 from miya.shared.ports import CoordinatorPort, EventStorePort
 from miya.shared.types import Mission, OODAPhase, MissionType
@@ -41,126 +43,147 @@ logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  Phase prompts — what the coordinator does in each OODA phase
+#  Phase prompts — mission-type-aware, minimal by design.
+#
+#  Design principle: give the model the GOAL, not the STEPS.
+#  Claude already knows how to do security testing and CTF.
+#  Over-prompting degrades capability by boxing the model in.
 # ═══════════════════════════════════════════════════════════════════
 
-_OBSERVE_PROMPT = """## Phase: OBSERVE (Information Gathering)
+# ── Generic (pentest / oneday / zeroday) ──────────────────────────
 
-You are in the OBSERVE phase of the OODA loop.
-
-**Current Blackboard State:**
+_OBSERVE_GENERIC = """## OBSERVE
 {blackboard_context}
-
-**Mission:** {mission_description}
-
-**Your task:** Gather information about the target.
-
-**Efficiency rules (CRITICAL):**
-- Check the blackboard FIRST. If it already has relevant findings, assets, or
-  solved flags for this target, do NOT redo that work. Build on what exists.
-- Start with 1-2 quick probes (e.g. a single curl, nmap, or file read) to
-  orient yourself before launching broad scans.
-- Target max ~10 tool calls in OBSERVE. If you need more, move to ORIENT
-  with what you have — you'll get another OODA cycle.
-
-Delegate to the right agent(s) based on the mission type:
-{agent_descriptions}
+Mission: {mission_description}
+Agents: {agent_descriptions}
+Gather intelligence on the target. Build on blackboard state — don't repeat prior work.
 """
 
-_ORIENT_PROMPT = """## Phase: ORIENT (Analysis & Pattern Recognition)
-
-You are in the ORIENT phase of the OODA loop.
-
-**Current Blackboard State:**
+_ORIENT_GENERIC = """## ORIENT
 {blackboard_context}
-
-**Mission:** {mission_description}
-
-**Observations from previous phase:**
-{observe_output}
-
-**Your task:** Analyze the gathered information. Identify:
-1. Attack vectors and vulnerabilities
-2. Patterns and anomalies
-3. Priority targets (highest impact, lowest effort)
-4. Missing information that needs further investigation
-
-Do NOT execute attacks yet. Analyze and prioritize.
-Output a ranked list of opportunities with rationale.
+Mission: {mission_description}
+Observations: {observe_output}
+Analyze findings. Rank attack vectors by impact and feasibility.
 """
 
-_DECIDE_PROMPT = """## Phase: DECIDE (Action Planning)
-
-You are in the DECIDE phase of the OODA loop.
-
-**Current Blackboard State:**
+_DECIDE_GENERIC = """## DECIDE
 {blackboard_context}
-
-**Mission:** {mission_description}
-
-**Analysis from ORIENT phase:**
-{orient_output}
-
-**Your task:** Create a concrete action plan:
-1. What specific attack/analysis to attempt next
-2. Which agent(s) to use
-3. What parameters/payloads to try
-4. Success criteria — how do we know if it worked?
-5. Fallback plan if the primary attempt fails
-
-Be specific. The ACT phase will execute your plan.
+Mission: {mission_description}
+Analysis: {orient_output}
+Pick the next concrete action. Specify which agent, what parameters, success criteria.
 """
 
-_ACT_PROMPT = """## Phase: ACT (Execution)
-
-You are in the ACT phase of the OODA loop.
-
-**Current Blackboard State:**
+_ACT_GENERIC = """## ACT
 {blackboard_context}
-
-**Mission:** {mission_description}
-
-**Action Plan from DECIDE phase:**
-{decide_output}
-
-**Your task:** Execute the plan. Delegate to the appropriate specialized agent(s):
-{agent_descriptions}
-
-**Efficiency rules:**
-- Execute the DECIDE plan precisely. Do not improvise additional attacks beyond the plan.
-- If an approach fails after 2-3 attempts, STOP and report failure — the next
-  REFLECT→OBSERVE cycle will adapt the strategy.
-- Do not brute-force or enumerate exhaustively. Targeted, evidence-based actions only.
-
-Execute the planned actions and report results with evidence.
+Mission: {mission_description}
+Plan: {decide_output}
+Agents: {agent_descriptions}
+Execute the plan. Stop after 2-3 failed attempts — the next cycle will adapt.
 """
 
-_REFLECT_PROMPT = """## Phase: REFLECT (Evaluation Gate)
-
-You are at the REFLECTION GATE of the OODA loop.
-
-**Current Blackboard State:**
+_REFLECT_GENERIC = """## REFLECT
 {blackboard_context}
+Mission: {mission_description}
+Results: {act_output}
+Previous insights: {previous_insights}
 
-**Mission:** {mission_description}
-
-**Actions taken and results:**
-{act_output}
-
-**Previous reflection insights (if any):**
-{previous_insights}
-
-**Your task:** Evaluate the results and make ONE of these decisions:
-
-1. **CONTINUE** — Progress was made, continue the OODA loop to deepen the attack
-2. **PIVOT** — Current approach isn't working, try a different strategy in the next loop
-3. **COMPLETE** — Mission objective achieved, generate final report
-
-Respond EXACTLY in this format (each field on its own line):
+Decide: CONTINUE / PIVOT / COMPLETE.
 DECISION: <continue|pivot|complete>
-ASSESSMENT: <what happened and why>
+ASSESSMENT: <what happened>
 INSIGHTS: <what we learned>
-NEXT_FOCUS: <what to focus on in the next loop iteration, if continuing>
+NEXT_FOCUS: <what to do next>
+"""
+
+# ── CTF-specific (minimal — let the model reason freely) ─────────
+
+_OBSERVE_CTF = """## OBSERVE
+{blackboard_context}
+Mission: {mission_description}
+Agents: {agent_descriptions}
+Examine the challenge files and target. Identify the category and attack surface.
+"""
+
+_ORIENT_CTF = """## ORIENT
+{blackboard_context}
+Mission: {mission_description}
+Observations: {observe_output}
+Identify the vulnerability class and plan the exploitation approach.
+"""
+
+_DECIDE_CTF = """## DECIDE
+{blackboard_context}
+Mission: {mission_description}
+Analysis: {orient_output}
+Choose the exploitation technique and specify the agent to use.
+"""
+
+_ACT_CTF = """## ACT
+{blackboard_context}
+Mission: {mission_description}
+Plan: {decide_output}
+Agents: {agent_descriptions}
+Exploit the vulnerability and capture the flag.
+"""
+
+_REFLECT_CTF = """## REFLECT
+{blackboard_context}
+Mission: {mission_description}
+Results: {act_output}
+Previous insights: {previous_insights}
+
+Did we get the flag? Decide: CONTINUE / PIVOT / COMPLETE.
+DECISION: <continue|pivot|complete>
+ASSESSMENT: <what happened>
+INSIGHTS: <what we learned>
+NEXT_FOCUS: <what to do next>
+"""
+
+# ── Prompt selector by mission type ──────────────────────────────
+
+_PHASE_PROMPTS: dict[str, dict[str, str]] = {
+    "ctf": {
+        "OBSERVE": _OBSERVE_CTF,
+        "ORIENT": _ORIENT_CTF,
+        "DECIDE": _DECIDE_CTF,
+        "ACT": _ACT_CTF,
+        "REFLECT": _REFLECT_CTF,
+    },
+    "_default": {
+        "OBSERVE": _OBSERVE_GENERIC,
+        "ORIENT": _ORIENT_GENERIC,
+        "DECIDE": _DECIDE_GENERIC,
+        "ACT": _ACT_GENERIC,
+        "REFLECT": _REFLECT_GENERIC,
+    },
+}
+
+
+def _get_phase_prompt(mission_type: str, phase: str) -> str:
+    """Select the minimal phase prompt template for a mission type."""
+    prompts = _PHASE_PROMPTS.get(mission_type, _PHASE_PROMPTS["_default"])
+    return prompts[phase]
+
+
+# ── Auto-classification prompt (CTF only) ─────────────────────────
+
+_CLASSIFY_PROMPT = """Classify this CTF challenge.
+
+Target: {target}
+{file_info}
+
+Respond with EXACTLY:
+CATEGORY: <web|pwn|crypto|reverse|misc>
+CONFIDENCE: <0.0-1.0>
+REASONING: <one sentence>
+"""
+
+# ── Flag submission prompt ────────────────────────────────────────
+
+_FLAG_SUBMIT_INSTRUCTION = """
+When you find a flag, also try to submit it. Use curl or the platform's API.
+Report the result:
+[EVENT:FlagSubmitted {{"challenge_name": "...", "flag": "flag{{...}}", "accepted": true, "response": "...", "context": "ctf"}}]
+If submission fails or no API is available, just report the flag via ChallengeSolved.
 """
 
 
@@ -202,8 +225,10 @@ class OODATopology:
         agents: dict[str, AgentHandle],
         event_store: EventStorePort,
         operator_queue: asyncio.Queue[str] | None = None,
+        campaign: Any | None = None,
     ) -> AsyncIterator[DomainEvent]:
         """Run the OODA loop until completion or max iterations."""
+        from miya.shared.campaign import Campaign as _Campaign
 
         # ── Mission Start ─────────────────────────────────────────
         start_event = MissionStarted(
@@ -222,6 +247,11 @@ class OODATopology:
             f"- **{name}**: {a.description}" for name, a in agents.items()
         )
 
+        # ── Campaign context (cross-mission knowledge) ────────────
+        campaign_context = ""
+        if isinstance(campaign, _Campaign) and campaign.entries:
+            campaign_context = campaign.to_context_prompt()
+
         # ── Operator initial prompt ───────────────────────────────
         operator_prompt = ""
         if mission.prompt:
@@ -235,11 +265,29 @@ class OODATopology:
         decide_output = ""
         act_output = ""
         previous_insights = ""
+        classified_category = ""  # populated by auto-classify for CTF
 
         def _drain_hitl() -> tuple[list[OperatorMessage], str]:
             return drain_hitl_queue(
                 operator_queue, mission.id, mission.mission_type.value, operator_prompt,
             )
+
+        # ── Auto-classify (CTF only) ──────────────────────────────
+        if mission.mission_type == MissionType.CTF:
+            classified_category = await self._auto_classify(
+                mission, agents, blackboard,
+            )
+            if classified_category:
+                classify_event = ChallengeClassified(
+                    aggregate_id=mission.id,
+                    category=classified_category,
+                    confidence=0.8,
+                    reasoning="auto-classified from challenge artifacts",
+                    mission=mission.mission_type.value,
+                )
+                yield classify_event
+                blackboard.apply(classify_event)
+                logger.info("Auto-classified as: %s", classified_category)
 
         for iteration in range(1, self._max_iterations + 1):
             logger.info(
@@ -267,18 +315,17 @@ class OODATopology:
             blackboard.apply(phase_event)
 
             logger.info("▶ OBSERVE — %s", self._PHASE_DESC["OBSERVE"])
-            # On iteration >1, inject the focus from REFLECT so OBSERVE is targeted
+            mission_key = mission.mission_type.value
             focus_hint = ""
             if previous_insights:
                 focus_hint = (
-                    f"\n**Focus from last REFLECT:** {previous_insights}\n"
-                    f"This is iteration {iteration}. Gather ONLY what's needed for the above focus.\n"
+                    f"\nFocus from last REFLECT: {previous_insights}\n"
                 )
-            observe_prompt = _OBSERVE_PROMPT.format(
+            observe_prompt = _get_phase_prompt(mission_key, "OBSERVE").format(
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
                 agent_descriptions=agent_desc,
-            ) + focus_hint + op_suffix + EVENT_INSTRUCTION
+            ) + campaign_context + focus_hint + op_suffix + EVENT_INSTRUCTION
 
             observe_output = await self._run_coordinator(
                 observe_prompt, mission, agents, blackboard, phase_label="OBSERVE"
@@ -302,7 +349,7 @@ class OODATopology:
             )
 
             logger.info("▶ ORIENT — %s", self._PHASE_DESC["ORIENT"])
-            orient_prompt = _ORIENT_PROMPT.format(
+            orient_prompt = _get_phase_prompt(mission_key, "ORIENT").format(
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
                 observe_output=observe_output[:4000],
@@ -329,7 +376,7 @@ class OODATopology:
             )
 
             logger.info("▶ DECIDE — %s", self._PHASE_DESC["DECIDE"])
-            decide_prompt = _DECIDE_PROMPT.format(
+            decide_prompt = _get_phase_prompt(mission_key, "DECIDE").format(
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
                 orient_output=orient_output[:4000],
@@ -352,14 +399,25 @@ class OODATopology:
             )
 
             logger.info("▶ ACT — %s", self._PHASE_DESC["ACT"])
-            act_prompt = _ACT_PROMPT.format(
+            # For CTF with known category: invoke specialist directly (#5)
+            flag_hint = _FLAG_SUBMIT_INSTRUCTION if mission_key == "ctf" else ""
+            act_prompt = _get_phase_prompt(mission_key, "ACT").format(
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
                 decide_output=decide_output[:4000],
                 agent_descriptions=agent_desc,
-            ) + op_suffix + EVENT_INSTRUCTION
+            ) + op_suffix + EVENT_INSTRUCTION + flag_hint
+
+            # Direct agent invocation: if classification is known, only pass the
+            # relevant specialist agent to reduce coordinator overhead (#5).
+            act_agents = agents
+            if classified_category and mission_key == "ctf":
+                direct = self._pick_direct_agent(classified_category, agents)
+                if direct:
+                    act_agents = direct
+
             act_output = await self._run_coordinator(
-                act_prompt, mission, agents, blackboard, phase_label="ACT"
+                act_prompt, mission, act_agents, blackboard, phase_label="ACT"
             )
 
             for extracted in extract_events_from_output(act_output, mission):
@@ -380,7 +438,7 @@ class OODATopology:
             )
 
             logger.info("▶ REFLECT — %s", self._PHASE_DESC["REFLECT"])
-            reflect_prompt = _REFLECT_PROMPT.format(
+            reflect_prompt = _get_phase_prompt(mission_key, "REFLECT").format(
                 blackboard_context=blackboard.to_context_prompt(),
                 mission_description=mission_desc,
                 act_output=act_output[:4000],
@@ -509,6 +567,69 @@ class OODATopology:
                     result["assessment"] = "Objective achieved (auto-detected)"
 
         return result
+
+    # ── Auto-classification (#1) ──────────────────────────────────
+
+    async def _auto_classify(
+        self,
+        mission: Mission,
+        agents: dict[str, AgentHandle],
+        blackboard: Blackboard,
+    ) -> str:
+        """Lightweight classification of a CTF challenge before OBSERVE.
+
+        Uses a single SDK call with max_turns=1 to inspect the challenge
+        artifacts and determine the category. Returns one of:
+        web, pwn, crypto, reverse, misc, or "" if classification fails.
+        """
+        import re
+
+        classify_prompt = _CLASSIFY_PROMPT.format(
+            target=mission.target.uri,
+            file_info=f"Operator hint: {mission.prompt[:200]}" if mission.prompt else "",
+        )
+
+        logger.info("▶ CLASSIFY — auto-detecting challenge category")
+        try:
+            output = await self._run_coordinator(
+                classify_prompt, mission, agents, blackboard,
+                phase_label="CLASSIFY",
+            )
+        except Exception:
+            logger.debug("Auto-classify failed, skipping", exc_info=True)
+            return ""
+
+        # Parse CATEGORY: from output
+        m = re.search(r"CATEGORY\s*:\s*(web|pwn|crypto|reverse|misc)", output, re.IGNORECASE)
+        return m.group(1).lower() if m else ""
+
+    # ── Direct agent selection (#5) ───────────────────────────────
+
+    @staticmethod
+    def _pick_direct_agent(
+        category: str,
+        agents: dict[str, AgentHandle],
+    ) -> dict[str, AgentHandle] | None:
+        """Pick the specialist agent for a known CTF category.
+
+        Returns a single-agent dict, or None if no match found.
+        For ACT phases: skip the coordinator overhead and invoke directly.
+        """
+        # Map category to agent context_name patterns
+        _CAT_PATTERNS = {
+            "web": ("ctf.web", "web"),
+            "pwn": ("ctf.pwn", "pwn"),
+            "crypto": ("ctf.crypto", "crypto"),
+            "reverse": ("ctf.reverse", "reverse"),
+            "misc": ("ctf.misc", "misc"),
+        }
+        patterns = _CAT_PATTERNS.get(category, ())
+        for name, handle in agents.items():
+            ctx = handle.context_name.lower()
+            nm = name.lower()
+            if any(p in ctx or p == nm for p in patterns):
+                return {name: handle}
+        return None
 
 
 # ── Register ──────────────────────────────────────────────────────

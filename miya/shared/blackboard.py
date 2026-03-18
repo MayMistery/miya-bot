@@ -28,6 +28,8 @@ from miya.shared.events import (
     PoCValidated,
     ChallengeIdentified,
     ChallengeSolved,
+    ChallengeClassified,
+    FlagSubmitted,
     PrivilegeEscalated,
     LootCollected,
     PhaseTransition,
@@ -71,6 +73,8 @@ class Blackboard:
     # ── CTF specific ──────────────────────────────────────────────
     challenges: list[dict[str, Any]] = field(default_factory=list)
     solved_flags: list[dict[str, Any]] = field(default_factory=list)
+    classification: dict[str, Any] = field(default_factory=dict)  # auto-classified category
+    flag_submissions: list[dict[str, Any]] = field(default_factory=list)
 
     # ── Execution trace ───────────────────────────────────────────
     events: list[DomainEvent] = field(default_factory=list)
@@ -259,6 +263,21 @@ class Blackboard:
             "approach": e.approach,
         })
 
+    def _on_ChallengeClassified(self, e: ChallengeClassified) -> None:
+        self.classification = {
+            "category": e.category,
+            "confidence": e.confidence,
+            "reasoning": e.reasoning,
+        }
+
+    def _on_FlagSubmitted(self, e: FlagSubmitted) -> None:
+        self.flag_submissions.append({
+            "challenge": e.challenge_name,
+            "flag": e.flag,
+            "accepted": e.accepted,
+            "response": e.response,
+        })
+
     def _on_PrivilegeEscalated(self, e: PrivilegeEscalated) -> None:
         self.current_access_level = e.to_level
 
@@ -314,78 +333,102 @@ class Blackboard:
             "attack_graph": self.attack_graph.summary(),
         }
 
-    def to_context_prompt(self, *, max_findings: int = 30) -> str:
+    def to_context_prompt(
+        self,
+        *,
+        max_findings: int = 30,
+        recent_detail: int = 8,
+    ) -> str:
         """Serialize blackboard state into a context string for LLM prompts.
+
+        Uses context windowing: recent items in full detail, older items as
+        one-line summaries. This prevents context bloat on later iterations.
 
         Args:
             max_findings: Cap on findings shown (most severe first).
-                          Keeps the prompt from ballooning on large engagements.
+            recent_detail: Number of most-recent findings shown in full.
+                           Older findings are compressed to one-liners.
         """
-        lines = ["## Current Knowledge Base (Blackboard)"]
+        lines = ["## Blackboard"]
 
         if self.assets:
             lines.append(f"\n### Assets ({len(self.assets)})")
             for a in self.assets.values():
-                ports_str = ", ".join(str(p) for p in a.ports) if a.ports else "unknown"
-                lines.append(f"- {a.address}: ports=[{ports_str}] services={list(a.services)} os={a.os}")
-                if a.fingerprint:
-                    lines.append(f"  fingerprint: {a.fingerprint}")
+                ports_str = ", ".join(str(p) for p in a.ports) if a.ports else "?"
+                lines.append(f"- {a.address}: ports=[{ports_str}] svc={list(a.services)} os={a.os}")
 
         if self.findings:
             sorted_findings = sorted(self.findings, key=lambda x: -x.severity.score)
             shown = sorted_findings[:max_findings]
             omitted = len(sorted_findings) - len(shown)
             lines.append(f"\n### Findings ({len(self.findings)})")
-            for f in shown:
+            # Recent findings: full detail
+            for f in shown[:recent_detail]:
                 lines.append(f"- {f.oneliner()}: {f.detail[:100]}")
+            # Older findings: compressed one-liner
+            if len(shown) > recent_detail:
+                lines.append(f"  (older {len(shown) - recent_detail}:)")
+                for f in shown[recent_detail:]:
+                    lines.append(f"  · {f.severity.value.upper()}: {f.title[:60]}")
             if omitted:
-                lines.append(f"  ... and {omitted} more (lower severity)")
+                lines.append(f"  ... +{omitted} more")
 
         if self.cve_matches:
-            lines.append(f"\n### CVE Matches ({len(self.cve_matches)})")
+            lines.append(f"\n### CVEs ({len(self.cve_matches)})")
             for c in self.cve_matches:
-                exploit_tag = " [EXPLOIT AVAILABLE]" if c.get("exploit_available") else ""
-                lines.append(f"- {c['cve_id']} (CVSS {c['cvss']}){exploit_tag}: {c['affected']}")
+                exploit_tag = " [EXPLOIT]" if c.get("exploit_available") else ""
+                lines.append(f"- {c['cve_id']} CVSS={c['cvss']}{exploit_tag}")
 
         if self.entry_points:
             lines.append(f"\n### Entry Points ({len(self.entry_points)})")
-            for ep in self.entry_points:
-                lines.append(f"- {ep['endpoint']}: inputs={ep['input_vectors']}")
+            for ep in self.entry_points[:10]:
+                lines.append(f"- {ep['endpoint']}: {ep['input_vectors']}")
+            if len(self.entry_points) > 10:
+                lines.append(f"  ... +{len(self.entry_points) - 10} more")
 
         if self.taint_paths:
             unsanitized = [t for t in self.taint_paths if not t["sanitized"]]
-            lines.append(f"\n### Taint Paths ({len(self.taint_paths)}, {len(unsanitized)} unsanitized)")
-            for t in unsanitized[:10]:
-                lines.append(f"- {t['source']} → {t['sink']} (UNSANITIZED)")
+            if unsanitized:
+                lines.append(f"\n### Unsanitized Taint Paths ({len(unsanitized)})")
+                for t in unsanitized[:5]:
+                    lines.append(f"- {t['source']} → {t['sink']}")
 
         if self.confirmed_sinks:
-            lines.append(f"\n### Confirmed Sinks ({len(self.confirmed_sinks)})")
-            for s in self.confirmed_sinks:
-                lines.append(f"- {s['sink_type']} ({s.get('cwe_id', '')}): {s.get('exploitability', '')}")
+            lines.append(f"\n### Sinks ({len(self.confirmed_sinks)})")
+            for s in self.confirmed_sinks[:5]:
+                lines.append(f"- {s['sink_type']} {s.get('cwe_id', '')}")
 
         if self.validated_pocs:
-            lines.append(f"\n### Validated PoCs ({len(self.validated_pocs)})")
+            lines.append(f"\n### PoCs ({len(self.validated_pocs)})")
             for p in self.validated_pocs:
-                lines.append(f"- {p['vuln_type']}: {p['result'][:80]}")
+                lines.append(f"- {p['vuln_type']}: {p['result'][:60]}")
 
         if self.challenges:
             solved_names = {s["challenge"] for s in self.solved_flags}
-            lines.append(f"\n### Challenges ({len(self.challenges)}, {len(solved_names)} solved)")
-            for c in self.challenges:
-                status = "SOLVED" if c["name"] in solved_names else "unsolved"
-                lines.append(f"- [{status}] {c['name']} ({c['category']}, {c['points']}pts)")
+            unsolved = [c for c in self.challenges if c["name"] not in solved_names]
+            solved = [c for c in self.challenges if c["name"] in solved_names]
+            lines.append(f"\n### Challenges ({len(self.challenges)}, {len(solved)} solved)")
+            for c in unsolved:
+                lines.append(f"- [TODO] {c['name']} ({c['category']})")
+            for c in solved:
+                lines.append(f"- [DONE] {c['name']} ({c['category']})")
+
+        if self.solved_flags:
+            lines.append(f"\n### Flags ({len(self.solved_flags)})")
+            for sf in self.solved_flags:
+                lines.append(f"- {sf['challenge']}: {sf['flag']}")
 
         if self.exploit_attempts:
-            lines.append(f"\n### Exploit Attempts ({len(self.exploit_attempts)})")
-            for ea in self.exploit_attempts[-5:]:
-                lines.append(f"- {ea['cve_id']}: {ea['technique']} [{ea.get('status', '?')}]")
+            recent = self.exploit_attempts[-5:]
+            lines.append(f"\n### Recent Exploits ({len(self.exploit_attempts)} total)")
+            for ea in recent:
+                lines.append(f"- {ea.get('cve_id','?')}: {ea['technique']} [{ea.get('status', '?')}]")
 
         if self.operator_messages:
-            lines.append(f"\n### Operator Messages ({len(self.operator_messages)})")
-            for msg in self.operator_messages[-5:]:
+            lines.append(f"\n### Operator ({len(self.operator_messages)})")
+            for msg in self.operator_messages[-3:]:
                 lines.append(f"- {msg}")
 
-        lines.append(f"\n### Current Access: {self.current_access_level}")
-        lines.append(f"### Attack Graph: {self.attack_graph.summary()}")
+        lines.append(f"\nAccess: {self.current_access_level} | Graph: {self.attack_graph.summary()}")
 
         return "\n".join(lines)

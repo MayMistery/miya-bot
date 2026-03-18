@@ -106,6 +106,7 @@ class Topology(Protocol):
         agents: dict[str, AgentHandle],
         event_store: EventStorePort,
         operator_queue: asyncio.Queue[str] | None = None,
+        campaign: Any | None = None,
     ) -> AsyncIterator[DomainEvent]:
         """Execute the mission using this topology.
 
@@ -115,6 +116,7 @@ class Topology(Protocol):
         Args:
             operator_queue: Optional async queue for HITL messages.
                             The topology drains it between phases.
+            campaign: Optional Campaign for cross-mission knowledge.
         """
         ...
 
@@ -261,7 +263,9 @@ Available event types:
 
 **CTF:**
   [EVENT:ChallengeIdentified {{"challenge_name": "...", "category": "web", "difficulty": "medium", "technology_stack": ["PHP"], "context": "ctf"}}]
+  [EVENT:ChallengeClassified {{"challenge_name": "...", "category": "web", "confidence": 0.9, "reasoning": "...", "context": "ctf"}}]
   [EVENT:ChallengeSolved {{"challenge_name": "...", "flag": "flag{{...}}", "technique": "...", "context": "ctf"}}]
+  [EVENT:FlagSubmitted {{"challenge_name": "...", "flag": "flag{{...}}", "accepted": true, "response": "Correct!", "context": "ctf"}}]
 
 Emit events inline in your response as you discover things. Every finding MUST have an EVENT marker.
 """

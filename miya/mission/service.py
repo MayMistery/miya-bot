@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from miya.shared.blackboard import Blackboard
+from miya.shared.campaign import Campaign
 from miya.shared.events import DomainEvent, MissionFailed
 from miya.shared.ports import CoordinatorPort, EventStorePort
 from miya.shared.types import Finding, Mission, MissionType, Target
@@ -25,6 +26,7 @@ from miya.topology.base import AgentHandle, TopologyRegistry
 # Ensure topologies are registered
 import miya.topology.ooda  # noqa: F401
 import miya.topology.attack_graph_topo  # noqa: F401
+import miya.topology.fanout_topo  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -164,12 +166,16 @@ class MissionService:
         mcp_registry: MCPRegistry | None = None,
         coordinator: CoordinatorPort | None = None,
         db_path: str | Path = "miya_events.db",
+        campaign: Campaign | None = None,
     ) -> None:
         self._event_store = event_store
         self._mcp_registry = mcp_registry or MCPRegistry()
         self._coordinator = coordinator
         self._db_path = db_path
         self._owns_store = event_store is None
+        self.campaign = campaign or Campaign.load(
+            Path(str(db_path)).with_suffix(".campaign.json")
+        )
 
     @classmethod
     async def create(cls, db_path: str | Path = "miya_events.db") -> MissionService:
@@ -249,9 +255,18 @@ class MissionService:
             async for event in topo.execute(
                 mission, blackboard, agents, self._event_store,
                 operator_queue=operator_queue,
+                campaign=self.campaign,
             ):
                 collected_events.append(event)
                 await self._event_store.append([event])
+                # Record solved challenges in campaign
+                if hasattr(event, "flag") and hasattr(event, "challenge_name"):
+                    self.campaign.record_solved(
+                        event.challenge_name,  # type: ignore[attr-defined]
+                        event.flag,  # type: ignore[attr-defined]
+                        getattr(event, "approach", ""),
+                        mission_id=mission.id,
+                    )
                 if on_event is not None:
                     try:
                         on_event(event)

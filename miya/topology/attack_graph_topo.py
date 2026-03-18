@@ -154,6 +154,7 @@ class AttackGraphTopology:
         agents: dict[str, AgentHandle],
         event_store: EventStorePort,
         operator_queue: asyncio.Queue[str] | None = None,
+        campaign: Any | None = None,
     ) -> AsyncIterator[DomainEvent]:
         """Execute the mission using attack graph planning."""
 

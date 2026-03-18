@@ -248,7 +248,7 @@ def _common_options(f: Any) -> Any:
 @click.option("--target", "-t", required=True, help="Target (IP, URL, CIDR, hostname)")
 @click.option("--prompt", "-p", default="", help="Operator instructions for the mission")
 @click.option("--source", "-s", default=None, help="Source code path for white-box analysis (optional)")
-@click.option("--topology", "-T", default="ooda", type=click.Choice(["ooda", "attack_graph"]))
+@click.option("--topology", "-T", default="ooda", type=click.Choice(["ooda", "attack_graph", "fanout"]))
 @click.option("--db", default="miya_events.db", help="SQLite database path")
 @_common_options
 def oneday(target: str, prompt: str, source: str | None, topology: str, db: str, model: str | None, api_key: str | None, base_url: str | None) -> None:
@@ -265,7 +265,7 @@ def oneday(target: str, prompt: str, source: str | None, topology: str, db: str,
 @click.option("--prompt", "-p", default="", help="Operator instructions for the mission")
 @click.option("--service", default=None, help="Live service URL/IP to exploit after analysis (optional)")
 @click.option("--language", "-l", default="", help="Programming language hint")
-@click.option("--topology", "-T", default="ooda", type=click.Choice(["ooda", "attack_graph"]))
+@click.option("--topology", "-T", default="ooda", type=click.Choice(["ooda", "attack_graph", "fanout"]))
 @click.option("--db", default="miya_events.db", help="SQLite database path")
 @_common_options
 def zeroday(target: str, prompt: str, service: str | None, language: str, topology: str, db: str, model: str | None, api_key: str | None, base_url: str | None) -> None:
@@ -292,7 +292,7 @@ def _detect_target_kind(target: str) -> str:
 @click.option("--target", "-t", required=True, help="Challenge URL or file path")
 @click.option("--prompt", "-p", default="", help="Operator instructions (challenge description, hints, etc.)")
 @click.option("--category", "-c", default="", help="Challenge category (web/pwn/crypto/reverse/misc)")
-@click.option("--topology", "-T", default="ooda", type=click.Choice(["ooda", "attack_graph"]))
+@click.option("--topology", "-T", default="ooda", type=click.Choice(["ooda", "attack_graph", "fanout"]))
 @click.option("--db", default="miya_events.db", help="SQLite database path")
 @_common_options
 def ctf(target: str, prompt: str, category: str, topology: str, db: str, model: str | None, api_key: str | None, base_url: str | None) -> None:
@@ -519,10 +519,11 @@ _NL_PARSE_PROMPT = (
     "Available topologies:\n"
     "- ooda          — Observe→Orient→Decide→Act loop with reflection gate (default)\n"
     "- attack_graph  — DAG-based attack path planning\n"
+    "- fanout        — parallel solving for multi-challenge CTF competitions\n"
     "\n"
     'Respond EXACTLY in this format (JSON on a single line):\n'
     '{"mission_type": "ctf|oneday|zeroday", "target": "<url_or_path>", '
-    '"topology": "ooda|attack_graph", "prompt": "<task description for the agent>", '
+    '"topology": "ooda|attack_graph|fanout", "prompt": "<task description for the agent>", '
     '"options": {}, "meta": {}}\n'
     "\n"
     "Rules for mission parameters:\n"
@@ -714,7 +715,7 @@ async def _nl_parse_mission(
             if field_name == "mission":
                 hint = " [dim](oneday/zeroday/ctf)[/dim]"
             elif field_name == "topology":
-                hint = " [dim](ooda/attack_graph)[/dim]"
+                hint = " [dim](ooda/attack_graph/fanout)[/dim]"
             elif field_name == "model":
                 hint = " [dim](opus/sonnet/haiku)[/dim]"
             elif field_name == "verbose":
@@ -736,8 +737,8 @@ async def _nl_parse_mission(
             if field_name == "mission" and new_val not in ("oneday", "zeroday", "ctf"):
                 console_obj.print("[red]Must be oneday, zeroday, or ctf[/red]")
                 continue
-            if field_name == "topology" and new_val not in ("ooda", "attack_graph"):
-                console_obj.print("[red]Must be ooda or attack_graph[/red]")
+            if field_name == "topology" and new_val not in ("ooda", "attack_graph", "fanout"):
+                console_obj.print("[red]Must be ooda, attack_graph, or fanout[/red]")
                 continue
             if field_name == "model" and new_val not in ("opus", "sonnet", "haiku"):
                 console_obj.print("[red]Must be opus, sonnet, or haiku[/red]")
@@ -896,7 +897,7 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
             # set targets
             "model", "topology", "api_key", "base_url", "verbose",
             # values
-            "opus", "sonnet", "haiku", "ooda", "attack_graph",
+            "opus", "sonnet", "haiku", "ooda", "attack_graph", "fanout",
             "info", "debug", "trace",
             # categories
             "web", "pwn", "crypto", "reverse", "misc",
@@ -958,7 +959,7 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
         t.add_row("", "")
         t.add_row("[dim]Mission options:[/dim]", "")
         t.add_row("  --prompt/-p <text>", "Operator instructions / context")
-        t.add_row("  --topology/-T <topo>", "ooda or attack_graph")
+        t.add_row("  --topology/-T <topo>", "ooda, attack_graph, or fanout")
         t.add_row("  --category/-c <cat>", "CTF: web/pwn/crypto/reverse/misc")
         t.add_row("  --language/-l <lang>", "Language hint (zeroday)")
         t.add_row("  --source/-s <path>", "Source code path (oneday white-box)")
@@ -1297,11 +1298,11 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                         cfg["model"] = val
                         console.print(f"[green]Model → {val}[/green]")
                     elif key == "topology":
-                        if val in ("ooda", "attack_graph"):
+                        if val in ("ooda", "attack_graph", "fanout"):
                             cfg["topology"] = val
                             console.print(f"[green]Topology → {val}[/green]")
                         else:
-                            console.print("[red]Use 'ooda' or 'attack_graph'.[/red]")
+                            console.print("[red]Use 'ooda', 'attack_graph', or 'fanout'.[/red]")
                     elif key == "verbose":
                         val_lower = val.lower()
                         _valid_levels = {"info": _logging.INFO, "debug": _logging.DEBUG, "trace": TRACE,

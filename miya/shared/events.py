@@ -263,6 +263,30 @@ class ChallengeSolved(DomainEvent):
     mission: str = "ctf"
 
 
+@dataclass(frozen=True)
+class ChallengeClassified(DomainEvent):
+    """Auto-classification of a CTF challenge before OBSERVE."""
+    event_type: ClassVar[str] = "ctf.challenge_classified"
+    challenge_name: str = ""
+    category: str = ""       # web, pwn, crypto, reverse, misc
+    confidence: float = 0.0  # 0.0–1.0
+    reasoning: str = ""
+    context: str = "ctf"
+    mission: str = "ctf"
+
+
+@dataclass(frozen=True)
+class FlagSubmitted(DomainEvent):
+    """Result of submitting a flag to the CTF platform."""
+    event_type: ClassVar[str] = "ctf.flag_submitted"
+    challenge_name: str = ""
+    flag: str = ""
+    accepted: bool = False
+    response: str = ""  # platform's response text
+    context: str = "ctf"
+    mission: str = "ctf"
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  Post-exploitation Events
 # ═══════════════════════════════════════════════════════════════════

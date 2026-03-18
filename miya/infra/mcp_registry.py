@@ -116,6 +116,50 @@ GDB_MCP = MCPServerConfig(
     required_tools=("start", "run_command"),
 )
 
+# ── Crypto tools ──────────────────────────────────────────────────
+
+SAGEMATH_MCP = MCPServerConfig(
+    name="sage",
+    command="uvx",
+    args=("sage-mcp",),
+    description="SageMath for number theory, algebra, and cryptanalysis",
+    required_tools=("evaluate", "factor", "solve"),
+)
+
+FACTORDB_MCP = MCPServerConfig(
+    name="factordb",
+    command="uvx",
+    args=("factordb-mcp",),
+    description="Integer factorization database (factordb.com API)",
+    required_tools=("factor", "status"),
+)
+
+CYBERCHEF_MCP = MCPServerConfig(
+    name="cyberchef",
+    command="uvx",
+    args=("cyberchef-mcp",),
+    description="CyberChef encoding/decoding chains (GCHQ CyberChef)",
+    required_tools=("bake", "magic"),
+)
+
+# ── Misc / forensics tools ────────────────────────────────────────
+
+BINWALK_MCP = MCPServerConfig(
+    name="binwalk",
+    command="uvx",
+    args=("binwalk-mcp",),
+    description="Firmware analysis, embedded file extraction (binwalk)",
+    required_tools=("scan", "extract"),
+)
+
+EXIFTOOL_MCP = MCPServerConfig(
+    name="exiftool",
+    command="uvx",
+    args=("exiftool-mcp",),
+    description="File metadata extraction (ExifTool)",
+    required_tools=("read_metadata", "write_metadata"),
+)
+
 
 # ═══════════════════════════════════════════════════════════════════
 #  Registry
@@ -138,6 +182,8 @@ class MCPRegistry:
             SEMGREP_MCP, NMAP_MCP, NUCLEI_MCP, SHODAN_MCP,
             METASPLOIT_MCP, SQLMAP_MCP, EXPLOITDB_MCP,
             GHIDRA_MCP, GDB_MCP,
+            SAGEMATH_MCP, FACTORDB_MCP, CYBERCHEF_MCP,
+            BINWALK_MCP, EXIFTOOL_MCP,
         ]:
             self._servers[config.name] = config
 
