@@ -8,7 +8,7 @@ without agents needing to query the event store directly.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
 
 from miya.shared.types import Asset, Credential, Finding, Severity
 from miya.shared.attack_graph import AttackGraph, GraphNode, GraphEdge
@@ -145,7 +145,8 @@ class Blackboard:
             context=e.context,
             mission=e.mission,
         )
-        self.findings.append(finding)
+        if not self._is_duplicate_finding(finding):
+            self.findings.append(finding)
         # Add vulnerability node to attack graph
         vuln_node = GraphNode(
             id=finding.id,
@@ -190,7 +191,7 @@ class Blackboard:
         })
 
     # Access level ordering for monotonic escalation
-    _ACCESS_RANK: dict[str, int] = {
+    _ACCESS_RANK: ClassVar[dict[str, int]] = {
         "": 0, "none": 0, "user": 1, "admin": 2,
         "data_read": 1, "rce": 3, "root": 4, "system": 4,
     }
@@ -231,19 +232,23 @@ class Blackboard:
                 break
 
     def _on_EntryPointDiscovered(self, e: EntryPointDiscovered) -> None:
-        self.entry_points.append({
+        ep = {
             "endpoint": e.endpoint,
             "input_vectors": list(e.input_vectors),
             "framework": e.framework,
-        })
+        }
+        if not self._is_duplicate_entry_point(ep):
+            self.entry_points.append(ep)
 
     def _on_TaintPathTraced(self, e: TaintPathTraced) -> None:
-        self.taint_paths.append({
+        tp = {
             "source": e.source,
             "sink": e.sink,
             "path": list(e.path),
             "sanitized": e.sanitized,
-        })
+        }
+        if not self._is_duplicate_taint_path(tp):
+            self.taint_paths.append(tp)
 
     def _on_SinkConfirmed(self, e: SinkConfirmed) -> None:
         self.confirmed_sinks.append({
@@ -327,6 +332,92 @@ class Blackboard:
 
     def _on_OperatorMessage(self, e: OperatorMessage) -> None:
         self.operator_messages.append(e.content)
+
+    # ── Deduplication helpers ─────────────────────────────────────
+
+    def _is_duplicate_finding(self, finding: Finding) -> bool:
+        """Check if a finding is a duplicate based on title + context."""
+        for existing in self.findings:
+            if existing.title == finding.title and existing.context == finding.context:
+                return True
+        return False
+
+    def _is_duplicate_entry_point(self, ep: dict[str, Any]) -> bool:
+        for existing in self.entry_points:
+            if existing["endpoint"] == ep["endpoint"]:
+                return True
+        return False
+
+    def _is_duplicate_taint_path(self, tp: dict[str, Any]) -> bool:
+        for existing in self.taint_paths:
+            if existing["source"] == tp["source"] and existing["sink"] == tp["sink"]:
+                return True
+        return False
+
+    # ── Compaction ─────────────────────────────────────────────────
+
+    def compact(
+        self,
+        *,
+        max_findings: int = 200,
+        max_events: int = 500,
+        max_phase_history: int = 50,
+        max_reflections: int = 20,
+        max_exploit_attempts: int = 50,
+        max_entry_points: int = 100,
+        max_taint_paths: int = 100,
+        max_confirmed_sinks: int = 50,
+        max_challenges: int = 200,
+    ) -> dict[str, int]:
+        """Compact the blackboard by trimming unbounded lists.
+
+        Keeps the most important items: critical findings over info,
+        recent events over old, etc. Returns a dict of {list_name: items_removed}.
+
+        Call this periodically (e.g. between OODA iterations) to prevent
+        unbounded memory growth on long-running missions.
+        """
+        removed: dict[str, int] = {}
+
+        def _trim_list(lst: list, max_size: int, name: str, *, keep_tail: bool = True) -> None:
+            """Trim list in-place, keeping tail (most recent) by default."""
+            if len(lst) <= max_size:
+                return
+            excess = len(lst) - max_size
+            if keep_tail:
+                del lst[:excess]
+            else:
+                del lst[max_size:]
+            removed[name] = excess
+
+        # Findings: keep most severe, then most recent within same severity
+        if len(self.findings) > max_findings:
+            sorted_findings = sorted(
+                self.findings,
+                key=lambda f: (-f.severity.score, self.findings.index(f)),
+            )
+            excess = len(self.findings) - max_findings
+            self.findings[:] = sorted_findings[:max_findings]
+            removed["findings"] = excess
+
+        # Events: keep most recent
+        _trim_list(self.events, max_events, "events")
+
+        # Execution trace lists: keep most recent
+        _trim_list(self.phase_history, max_phase_history, "phase_history")
+        _trim_list(self.reflections, max_reflections, "reflections")
+        _trim_list(self.exploit_attempts, max_exploit_attempts, "exploit_attempts")
+
+        # 0-day lists
+        _trim_list(self.entry_points, max_entry_points, "entry_points")
+        _trim_list(self.taint_paths, max_taint_paths, "taint_paths")
+        _trim_list(self.confirmed_sinks, max_confirmed_sinks, "confirmed_sinks")
+
+        # CTF lists
+        _trim_list(self.challenges, max_challenges, "challenges")
+        # Never compact solved_flags or credentials — these are high-value outputs
+
+        return removed
 
     # ── Query helpers ─────────────────────────────────────────────
 

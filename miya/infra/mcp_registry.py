@@ -160,6 +160,16 @@ EXIFTOOL_MCP = MCPServerConfig(
     required_tools=("read_metadata", "write_metadata"),
 )
 
+# ── Internal tools ───────────────────────────────────────────────
+
+EVENT_BUS_MCP = MCPServerConfig(
+    name="event_bus",
+    command="python",
+    args=("-m", "miya.infra.emit_event_server"),
+    description="Structured event emission — replaces text-based [EVENT:...] markers with validated tool calls",
+    required_tools=("emit_event",),
+)
+
 
 # ═══════════════════════════════════════════════════════════════════
 #  Registry
@@ -184,6 +194,7 @@ class MCPRegistry:
             GHIDRA_MCP, GDB_MCP,
             SAGEMATH_MCP, FACTORDB_MCP, CYBERCHEF_MCP,
             BINWALK_MCP, EXIFTOOL_MCP,
+            EVENT_BUS_MCP,
         ]:
             self._servers[config.name] = config
 

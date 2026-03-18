@@ -85,7 +85,9 @@ class TestMCPRegistry:
     def test_all_servers_available(self):
         registry = MCPRegistry()
         expected = {"semgrep", "nmap", "nuclei", "shodan", "metasploit",
-                    "sqlmap", "exploitdb", "ghidra", "gdb"}
+                    "sqlmap", "exploitdb", "ghidra", "gdb",
+                    "sage", "factordb", "cyberchef", "binwalk", "exiftool",
+                    "event_bus"}
         assert set(registry.available()) == expected
 
     def test_get_configs_for_agent(self):
@@ -96,7 +98,7 @@ class TestMCPRegistry:
     def test_describe(self):
         registry = MCPRegistry()
         descriptions = registry.describe()
-        assert len(descriptions) == 9
+        assert len(descriptions) == 15
         for desc in descriptions:
             assert "name" in desc
             assert "description" in desc

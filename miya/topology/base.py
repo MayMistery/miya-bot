@@ -131,7 +131,12 @@ class Topology(Protocol):
 # ═══════════════════════════════════════════════════════════════════
 
 
-def extract_events_from_output(output: str, mission: Mission) -> list[DomainEvent]:
+def extract_events_from_output(
+    output: str,
+    mission: Mission,
+    *,
+    causation_id: str = "",
+) -> list[DomainEvent]:
     """Extract structured domain events from coordinator/agent output.
 
     The coordinator can embed events in the format:
@@ -140,6 +145,11 @@ def extract_events_from_output(output: str, mission: Mission) -> list[DomainEven
 
     This allows topologies to yield real domain events from LLM output,
     populating the blackboard with findings, assets, CVEs, etc.
+
+    Args:
+        causation_id: If set, each extracted event's causation_id will be
+                      set to this value, and events will chain: each event's
+                      causation_id points to the previous event's event_id.
     """
     import dataclasses
     from miya.shared.events import _EVENT_REGISTRY
@@ -154,6 +164,7 @@ def extract_events_from_output(output: str, mission: Mission) -> list[DomainEven
     events: list[DomainEvent] = []
     # Accept optional whitespace between EventTypeName and the JSON brace
     pattern = r'\[EVENT:(\w+)\s*\{'
+    current_causation = causation_id
 
     for match in re.finditer(pattern, output):
         event_type_name = match.group(1)
@@ -207,6 +218,11 @@ def extract_events_from_output(output: str, mission: Mission) -> list[DomainEven
         data.setdefault("mission", mission.mission_type.value)
         data.setdefault("aggregate_id", mission.id)
 
+        # Chain causation: each event caused by the previous one
+        if current_causation:
+            data.setdefault("causation_id", current_causation)
+        data.setdefault("correlation_id", mission.id)
+
         # Handle tuple fields
         for f_name in ("ports", "services", "input_vectors", "path", "technology_stack", "target_ports"):
             if f_name in data and isinstance(data[f_name], list):
@@ -214,10 +230,21 @@ def extract_events_from_output(output: str, mission: Mission) -> list[DomainEven
 
         # Filter to valid fields
         valid_fields = {f.name for f in dataclasses.fields(event_cls)}
+        # Warn about unknown fields (likely field name mismatches)
+        unknown = set(data.keys()) - valid_fields
+        if unknown:
+            logger.warning(
+                "Event %s has unknown fields %s (will be dropped). Valid: %s",
+                event_type_name, unknown,
+                {f.name for f in dataclasses.fields(event_cls)} - {f.name for f in dataclasses.fields(DomainEvent)},
+            )
         filtered = {k: v for k, v in data.items() if k in valid_fields}
 
         try:
-            events.append(event_cls(**filtered))
+            event = event_cls(**filtered)
+            events.append(event)
+            # Chain: next event's causation_id = this event's event_id
+            current_causation = event.event_id
         except Exception as e:
             logger.warning("Failed to create %s: %s (data=%s)", event_type_name, e, filtered)
 
@@ -231,8 +258,12 @@ def extract_events_from_output(output: str, mission: Mission) -> list[DomainEven
 EVENT_INSTRUCTION = """
 ## Structured Event Output (IMPORTANT)
 Throughout your response, emit structured events so findings are captured
-in the system's blackboard.  Format:
+in the system's blackboard.
 
+**Preferred method** — use the `emit_event` tool for validated event emission:
+    emit_event(event_type="EventTypeName", data={"field": "value", ...})
+
+**Fallback** — embed inline markers if the tool is unavailable:
     [EVENT:EventTypeName {"field": "value", ...}]
 
 Available event types:
@@ -377,13 +408,22 @@ async def run_sdk_coordinator(
     mcp_configs = registry.get_configs_for_agent(mcp_names)
     cfg = _get_topology_config()
 
+    # Always include the event_bus MCP server for structured event emission
+    if "event_bus" not in mcp_configs:
+        event_bus_config = registry.get("event_bus")
+        if event_bus_config:
+            mcp_configs["event_bus"] = event_bus_config.to_sdk_config()
+    all_mcp_patterns = [f"mcp__{name}__*" for name in mcp_names]
+    if "mcp__event_bus__*" not in all_mcp_patterns:
+        all_mcp_patterns.append("mcp__event_bus__*")
+
     options = ClaudeAgentOptions(
         agents=sdk_agents,
         mcp_servers=mcp_configs,
         allowed_tools=[
             "Read", "Write", "Edit", "Bash", "Grep", "Glob",
             "WebSearch", "WebFetch", "Agent",
-        ] + [f"mcp__{name}__*" for name in mcp_names],
+        ] + all_mcp_patterns,
         permission_mode="acceptEdits",
         max_turns=max_turns if max_turns is not None else cfg["max_turns"],
         cwd=os.getcwd(),

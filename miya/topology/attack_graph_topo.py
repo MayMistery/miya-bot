@@ -242,6 +242,12 @@ class AttackGraphTopology:
 
         # ── Phase 2: Plan-Execute Loop ────────────────────────────
         for step in range(1, self._max_steps + 1):
+            # Compact blackboard between steps to bound memory growth
+            if step > 1:
+                removed = blackboard.compact()
+                if removed:
+                    logger.debug("Blackboard compacted: %s", removed)
+
             logger.info("━━━━ AG step %d/%d ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", step, self._max_steps)
 
             # ── Drain HITL queue ──────────────────────────────────

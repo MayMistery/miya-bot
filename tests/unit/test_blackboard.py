@@ -218,7 +218,7 @@ class TestBlackboardQueries:
         prompt = bb.to_context_prompt()
         assert "1.2.3.4" in prompt
         assert "CVE-2023-1234" in prompt
-        assert "EXPLOIT AVAILABLE" in prompt
+        assert "[EXPLOIT]" in prompt
 
     def test_apply_all(self, bb):
         events = [

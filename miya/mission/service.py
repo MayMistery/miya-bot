@@ -51,6 +51,12 @@ class MissionReport:
     status: str = "completed"
     error: str = ""
 
+    # ── Original parameters for replay ─────────────────────────────
+    target_kind: str = ""
+    model: str = ""
+    prompt: str = ""
+    options: dict[str, Any] = field(default_factory=dict)
+
     @property
     def critical_count(self) -> int:
         return len([f for f in self.findings if f.severity.score >= 4])
@@ -309,6 +315,10 @@ class MissionService:
                 blackboard_summary=blackboard.summary(),
                 status="failed",
                 error=str(e),
+                target_kind=target_kind,
+                model=model,
+                prompt=prompt,
+                options=dict(options),
             )
 
         duration = (datetime.now(timezone.utc) - start_time).total_seconds()
@@ -323,6 +333,10 @@ class MissionService:
             duration_seconds=duration,
             blackboard_summary=blackboard.summary(),
             status=mission.status,
+            target_kind=target_kind,
+            model=model,
+            prompt=prompt,
+            options=dict(options),
         )
 
     async def list_topologies(self) -> list[dict[str, str]]:

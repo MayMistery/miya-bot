@@ -281,9 +281,17 @@ class TestReflectionParsing:
         assert result["decision"] == "complete"
 
     def test_heuristic_fallback_flag_found(self):
-        output = "The flag is flag{h3ll0_w0rld}. Mission accomplished!"
+        # "flag{" alone no longer triggers complete (false positive risk).
+        # But "flag found" still works as a completion heuristic.
+        output = "We found the flag. Flag found after SQL injection in login form."
         result = OODATopology._parse_reflection(output)
         assert result["decision"] == "complete"
+
+    def test_flag_brace_alone_does_not_complete(self):
+        # Regression: "flag{" in discussion should NOT trigger completion
+        output = "The challenge uses flag{...} format. Let me try another approach."
+        result = OODATopology._parse_reflection(output)
+        assert result["decision"] == "continue"
 
     def test_heuristic_fallback_objective_achieved(self):
         output = "We have achieved our objective. Root access obtained via kernel exploit."

@@ -6,6 +6,7 @@ import json
 import aiosqlite
 from datetime import datetime
 from pathlib import Path
+from collections.abc import AsyncIterator
 from typing import Any
 
 from miya.shared.events import DomainEvent, event_from_dict
@@ -146,15 +147,33 @@ class SQLiteEventStore(EventStorePort):
             rows = await cursor.fetchall()
         return [event_from_dict(json.loads(row[0])) for row in rows]
 
-    async def load_all(self, since: datetime | None = None) -> list[DomainEvent]:
+    async def load_all(
+        self,
+        since: datetime | None = None,
+        *,
+        limit: int = 0,
+        offset: int = 0,
+    ) -> list[DomainEvent]:
         db = self._ensure_connected()
+        clauses: list[str] = []
+        params: list[Any] = []
+
         if since:
-            sql = "SELECT payload FROM events WHERE created_at >= ? ORDER BY id"
-            async with db.execute(sql, (since.isoformat(),)) as cursor:
-                rows = await cursor.fetchall()
-        else:
-            async with db.execute("SELECT payload FROM events ORDER BY id") as cursor:
-                rows = await cursor.fetchall()
+            clauses.append("created_at >= ?")
+            params.append(since.isoformat())
+
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"SELECT payload FROM events{where} ORDER BY id"
+
+        if limit > 0:
+            sql += " LIMIT ?"
+            params.append(limit)
+            if offset > 0:
+                sql += " OFFSET ?"
+                params.append(offset)
+
+        async with db.execute(sql, params) as cursor:
+            rows = await cursor.fetchall()
         return [event_from_dict(json.loads(row[0])) for row in rows]
 
     async def count(self) -> int:
@@ -162,6 +181,42 @@ class SQLiteEventStore(EventStorePort):
         async with db.execute("SELECT COUNT(*) FROM events") as cursor:
             row = await cursor.fetchone()
             return row[0] if row else 0
+
+    async def stream_all(
+        self,
+        since: datetime | None = None,
+        *,
+        batch_size: int = 100,
+    ) -> AsyncIterator[DomainEvent]:
+        """Stream events in batches to avoid loading everything into memory.
+
+        Yields individual DomainEvent objects, fetching from the database
+        in batches of `batch_size` rows at a time.
+        """
+        db = self._ensure_connected()
+        offset = 0
+
+        while True:
+            params: list[Any] = []
+            if since:
+                sql = "SELECT payload FROM events WHERE created_at >= ? ORDER BY id LIMIT ? OFFSET ?"
+                params = [since.isoformat(), batch_size, offset]
+            else:
+                sql = "SELECT payload FROM events ORDER BY id LIMIT ? OFFSET ?"
+                params = [batch_size, offset]
+
+            async with db.execute(sql, params) as cursor:
+                rows = await cursor.fetchall()
+
+            if not rows:
+                break
+
+            for row in rows:
+                yield event_from_dict(json.loads(row[0]))
+
+            offset += len(rows)
+            if len(rows) < batch_size:
+                break
 
     async def load_by_type(self, event_type: str) -> list[DomainEvent]:
         db = self._ensure_connected()

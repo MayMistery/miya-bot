@@ -306,6 +306,12 @@ class OODATopology:
                     logger.info("  recon summary: %s", recon_summary[:120])
 
         for iteration in range(1, self._max_iterations + 1):
+            # Compact blackboard between iterations to bound memory growth
+            if iteration > 1:
+                removed = blackboard.compact()
+                if removed:
+                    logger.debug("Blackboard compacted: %s", removed)
+
             logger.info(
                 "━━━━ OODA #%d/%d ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
                 iteration, self._max_iterations,
@@ -354,7 +360,9 @@ class OODATopology:
                 observe_prompt, mission, agents, blackboard, phase_label="OBSERVE"
             )
 
-            for extracted in extract_events_from_output(observe_output, mission):
+            for extracted in extract_events_from_output(
+                observe_output, mission, causation_id=phase_event.event_id,
+            ):
                 yield extracted
                 blackboard.apply(extracted)
 

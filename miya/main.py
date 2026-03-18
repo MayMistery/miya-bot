@@ -1321,8 +1321,15 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                 if r:
                     console.print(f"[cyan]Replaying mission #{arg or len(mission_history)}: "
                                   f"{r.mission_type} → {r.target}[/cyan]")
-                    # Re-construct the raw command
-                    replay_raw = f"{r.mission_type} {r.target}"
+                    # Reconstruct full command from preserved parameters
+                    replay_parts = [r.mission_type, r.target]
+                    if r.topology and r.topology != "ooda":
+                        replay_parts.extend(["--topology", r.topology])
+                    if r.prompt:
+                        replay_parts.extend(["--prompt", r.prompt])
+                    if r.model and r.model != cfg.get("model", "opus"):
+                        replay_parts.extend(["--model", r.model])
+                    replay_raw = " ".join(replay_parts)
                     # Fall through to mission execution below
                     raw = replay_raw
                     lower = raw.lower()

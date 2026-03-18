@@ -37,8 +37,20 @@ class EventStorePort(Protocol):
         """Load events filtered by bounded context."""
         ...
 
-    async def load_all(self, since: datetime | None = None) -> list[DomainEvent]:
-        """Load all events, optionally since a timestamp."""
+    async def load_all(
+        self,
+        since: datetime | None = None,
+        *,
+        limit: int = 0,
+        offset: int = 0,
+    ) -> list[DomainEvent]:
+        """Load events, optionally since a timestamp, with pagination.
+
+        Args:
+            since: Only load events created at or after this timestamp.
+            limit: Maximum number of events to return (0 = unlimited).
+            offset: Skip this many events before returning results.
+        """
         ...
 
     async def load_by_type(self, event_type: str) -> list[DomainEvent]:
