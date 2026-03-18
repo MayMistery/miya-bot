@@ -84,7 +84,7 @@ def create_agent(model: str = "opus") -> AgentHandle:
             "and assesses exploitability using CVSS-like scoring."
         ),
         system_prompt=SINK_SYSTEM_PROMPT,
-        tools=["Read", "Write", "Bash", "Grep", "Glob"],
+        tools=["Read", "Write", "Bash", "Grep", "Glob", "WebSearch", "WebFetch"],
         mcp_servers=["semgrep"],
         model=model,
         context_name="sink",

@@ -152,3 +152,43 @@ class TestMission:
     def test_default_topology(self):
         m = Mission()
         assert m.topology == "ooda"
+
+    def test_double_start_raises(self):
+        m = Mission()
+        m.start()
+        with pytest.raises(ValueError, match="Cannot start"):
+            m.start()
+
+    def test_complete_without_start_raises(self):
+        m = Mission()
+        with pytest.raises(ValueError, match="Cannot complete"):
+            m.complete()
+
+    def test_fail_completed_raises(self):
+        m = Mission()
+        m.start()
+        m.complete()
+        with pytest.raises(ValueError, match="Cannot fail"):
+            m.fail()
+
+    def test_fail_from_created(self):
+        m = Mission()
+        m.fail()
+        assert m.status == "failed"
+
+
+class TestSeverityComparison:
+    def test_lt(self):
+        assert Severity.LOW < Severity.HIGH
+        assert not Severity.HIGH < Severity.LOW
+
+    def test_le(self):
+        assert Severity.HIGH <= Severity.HIGH
+        assert Severity.LOW <= Severity.HIGH
+        assert not Severity.CRITICAL <= Severity.HIGH
+
+    def test_full_ordering(self):
+        ordered = sorted(
+            [Severity.HIGH, Severity.INFO, Severity.CRITICAL, Severity.LOW, Severity.MEDIUM]
+        )
+        assert ordered == [Severity.INFO, Severity.LOW, Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL]

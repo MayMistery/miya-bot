@@ -35,6 +35,14 @@ from miya.shared.events import (
 )
 
 
+def _parse_severity(raw: str) -> Severity:
+    """Parse severity string with fallback to MEDIUM."""
+    try:
+        return Severity(raw.lower())
+    except (ValueError, AttributeError):
+        return Severity.MEDIUM
+
+
 @dataclass
 class Blackboard:
     """Cross-agent shared knowledge base.
@@ -123,7 +131,7 @@ class Blackboard:
         finding = Finding(
             id=e.vuln_id or e.event_id,
             title=f"{e.cwe_id} {e.vuln_type}",
-            severity=Severity(e.severity) if e.severity in Severity.__members__.values() else Severity.MEDIUM,
+            severity=_parse_severity(e.severity),
             detail=e.description,
             evidence=e.location,
             context=e.context,

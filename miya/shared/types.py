@@ -31,6 +31,12 @@ class Severity(str, Enum):
     def __ge__(self, other: Severity) -> bool:  # type: ignore[override]
         return self.score >= other.score
 
+    def __lt__(self, other: Severity) -> bool:  # type: ignore[override]
+        return self.score < other.score
+
+    def __le__(self, other: Severity) -> bool:  # type: ignore[override]
+        return self.score <= other.score
+
 
 class MissionType(str, Enum):
     ZERODAY = "zeroday"
@@ -144,10 +150,16 @@ class Mission:
     status: Literal["created", "running", "completed", "failed"] = "created"
 
     def start(self) -> None:
+        if self.status != "created":
+            raise ValueError(f"Cannot start mission in '{self.status}' state")
         self.status = "running"
 
     def complete(self) -> None:
+        if self.status != "running":
+            raise ValueError(f"Cannot complete mission in '{self.status}' state")
         self.status = "completed"
 
     def fail(self) -> None:
+        if self.status not in ("created", "running"):
+            raise ValueError(f"Cannot fail mission in '{self.status}' state")
         self.status = "failed"

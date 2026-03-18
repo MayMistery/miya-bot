@@ -371,6 +371,7 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
     from miya.mission.service import MissionService, MissionReport
     from miya.shared.blackboard import Blackboard
     from miya.shared.events import DomainEvent
+    from miya.topology.base import TopologyRegistry
 
     show_banner()
     console.print(make_mission_table())
@@ -429,6 +430,10 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
         "MissionFailed": "bold red",
         "PhaseTransition": "dim",
     }
+
+    def _truncate(text: str, maxlen: int) -> str:
+        """Truncate with ellipsis indicator."""
+        return text if len(text) <= maxlen else text[:maxlen - 1] + "…"
 
     def _event_detail(ev: DomainEvent) -> str:
         for attr in ("cve_id", "vulnerability", "host", "ip", "software",
@@ -543,6 +548,12 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
             console.print("[dim]Available: oneday, zeroday, ctf. Type 'help'.[/dim]")
             return None
 
+        if topology not in TopologyRegistry.available():
+            available = ", ".join(TopologyRegistry.available())
+            console.print(f"[red]Unknown topology: {topology}[/red]")
+            console.print(f"[dim]Available: {available}[/dim]")
+            return None
+
         return mission_type, target, topology, options
 
     # ── Get report by index ───────────────────────────────────────
@@ -582,7 +593,8 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                 continue
 
             lower = raw.lower()
-            cmd = lower.split()[0] if lower.split() else ""
+            parts = lower.split()
+            cmd = parts[0] if parts else ""
 
             # ── Exit ──────────────────────────────────────────────
             if cmd in ("exit", "quit", "q"):
@@ -645,7 +657,7 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                                 name,
                                 getattr(ev, "context", ""),
                                 str(getattr(ev, "timestamp", ""))[:19],
-                                _event_detail(ev)[:50],
+                                _truncate(_event_detail(ev), 50),
                             )
                         console.print(table)
                 continue
@@ -824,6 +836,8 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                 console.print()
                 print_report(report)
                 mission_history.append(report)
+                if report.error:
+                    console.print(f"[yellow]Mission ended with error: {report.error}[/yellow]")
 
             except KeyboardInterrupt:
                 console.print("\n[yellow]Mission cancelled by user.[/yellow]")

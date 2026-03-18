@@ -408,3 +408,30 @@ class TestMissionReport:
         report = MissionReport(error="Something went wrong", status="failed")
         assert report.error == "Something went wrong"
         assert report.status == "failed"
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Severity parsing robustness
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestSeverityParsing:
+    def test_valid_severity(self, bb):
+        from miya.shared.events import VulnerabilityFound
+        bb.apply(VulnerabilityFound(severity="critical", vuln_type="RCE", cwe_id="CWE-78"))
+        assert bb.findings[0].severity == Severity.CRITICAL
+
+    def test_unknown_severity_defaults_to_medium(self, bb):
+        from miya.shared.events import VulnerabilityFound
+        bb.apply(VulnerabilityFound(severity="unknown_value", vuln_type="Test", cwe_id="CWE-0"))
+        assert bb.findings[0].severity == Severity.MEDIUM
+
+    def test_empty_severity_defaults_to_medium(self, bb):
+        from miya.shared.events import VulnerabilityFound
+        bb.apply(VulnerabilityFound(severity="", vuln_type="Test", cwe_id="CWE-0"))
+        assert bb.findings[0].severity == Severity.MEDIUM
+
+    def test_uppercase_severity(self, bb):
+        from miya.shared.events import VulnerabilityFound
+        bb.apply(VulnerabilityFound(severity="HIGH", vuln_type="Test", cwe_id="CWE-0"))
+        assert bb.findings[0].severity == Severity.HIGH

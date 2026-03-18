@@ -41,6 +41,10 @@ class EventStorePort(Protocol):
         """Load all events, optionally since a timestamp."""
         ...
 
+    async def load_by_type(self, event_type: str) -> list[DomainEvent]:
+        """Load events filtered by event type."""
+        ...
+
     async def count(self) -> int:
         """Total event count."""
         ...

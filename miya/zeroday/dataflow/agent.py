@@ -87,7 +87,7 @@ def create_agent(model: str = "opus") -> AgentHandle:
             "sink functions, identifying unsanitized data flow paths."
         ),
         system_prompt=DATAFLOW_SYSTEM_PROMPT,
-        tools=["Read", "Write", "Bash", "Grep", "Glob"],
+        tools=["Read", "Write", "Bash", "Grep", "Glob", "WebSearch", "WebFetch"],
         mcp_servers=["semgrep"],
         model=model,
         context_name="dataflow",

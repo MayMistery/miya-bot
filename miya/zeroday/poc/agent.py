@@ -140,7 +140,7 @@ def create_agent(model: str = "opus") -> AgentHandle:
             "vulnerabilities and validates them in a sandbox environment."
         ),
         system_prompt=POC_SYSTEM_PROMPT,
-        tools=["Read", "Write", "Bash", "Grep", "Glob"],
+        tools=["Read", "Write", "Bash", "Grep", "Glob", "WebSearch", "WebFetch"],
         mcp_servers=[],
         model=model,
         context_name="poc",
