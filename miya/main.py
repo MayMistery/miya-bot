@@ -506,47 +506,48 @@ def interactive(ctx: click.Context, db: str, model: str | None, api_key: str | N
 # ═══════════════════════════════════════════════════════════════════
 
 
-_NL_PARSE_PROMPT = """\
-You are Miya's task parser. The user typed a natural language description of a
-penetration testing or CTF task.  Your job is to extract structured mission
-parameters AND runtime directives from their input.
-
-Available mission types:
-- ctf      — Solve a CTF challenge (categories: web, pwn, crypto, reverse, misc)
-- oneday   — Exploit known CVEs in a target service/software
-- zeroday  — Discover 0-day vulnerabilities in source code or binaries
-
-Available topologies:
-- ooda          — Observe→Orient→Decide→Act loop with reflection gate (default)
-- attack_graph  — DAG-based attack path planning
-
-Respond EXACTLY in this format (JSON on a single line):
-{{"mission_type": "ctf|oneday|zeroday", "target": "<url_or_path>", "topology": "ooda|attack_graph", "prompt": "<task description for the agent>", "options": {{}}, "meta": {{}}}}
-
-Rules for mission parameters:
-- "target" should be a URL, IP, file path, or network range extracted from the input
-- "prompt" should include the full task context (challenge description, hints, etc.)
-  but NOT runtime directives (verbose, model, etc.) — those go in "meta"
-- If a URL is present, extract it as "target"
-- If a file path (.zip, .py, .c, etc.) is present, extract it as "target"
-- For CTF, add "category" to options if you can determine it (web/pwn/crypto/reverse/misc)
-- If you cannot determine mission_type, default to "ctf"
-- If you cannot determine topology, use "ooda"
-
-Rules for "meta" (runtime directives — set ONLY if user explicitly requests):
-- "verbose": "trace" | "debug" | "info" — log verbosity level
-  Detect from phrases like: 详细日志/verbose/debug日志/trace/show details → "trace"
-                             调试模式/debug mode → "debug"
-                             安静/quiet → "info"
-- "model": "opus" | "sonnet" | "haiku" — model override
-  Detect from phrases like: 用sonnet/use haiku/模型用opus → the named model
-- Only include keys in "meta" that the user explicitly requested. Empty {{}} if none.
-
-Do NOT wrap JSON in markdown code blocks.
-
-User input:
-{user_input}
-"""
+_NL_PARSE_PROMPT = (
+    "You are Miya's task parser. The user typed a natural language description of a\n"
+    "penetration testing or CTF task.  Your job is to extract structured mission\n"
+    "parameters AND runtime directives from their input.\n"
+    "\n"
+    "Available mission types:\n"
+    "- ctf      — Solve a CTF challenge (categories: web, pwn, crypto, reverse, misc)\n"
+    "- oneday   — Exploit known CVEs in a target service/software\n"
+    "- zeroday  — Discover 0-day vulnerabilities in source code or binaries\n"
+    "\n"
+    "Available topologies:\n"
+    "- ooda          — Observe→Orient→Decide→Act loop with reflection gate (default)\n"
+    "- attack_graph  — DAG-based attack path planning\n"
+    "\n"
+    'Respond EXACTLY in this format (JSON on a single line):\n'
+    '{"mission_type": "ctf|oneday|zeroday", "target": "<url_or_path>", '
+    '"topology": "ooda|attack_graph", "prompt": "<task description for the agent>", '
+    '"options": {}, "meta": {}}\n'
+    "\n"
+    "Rules for mission parameters:\n"
+    '- "target" should be a URL, IP, file path, or network range extracted from the input\n'
+    '- "prompt" should include the full task context (challenge description, hints, etc.)\n'
+    '  but NOT runtime directives (verbose, model, etc.) — those go in "meta"\n'
+    "- If a URL is present, extract it as target\n"
+    "- If a file path (.zip, .py, .c, etc.) is present, extract it as target\n"
+    '- For CTF, add "category" to options if you can determine it (web/pwn/crypto/reverse/misc)\n'
+    "- If you cannot determine mission_type, default to ctf\n"
+    "- If you cannot determine topology, use ooda\n"
+    "\n"
+    'Rules for "meta" (runtime directives — set ONLY if user explicitly requests):\n'
+    '- "verbose": "trace" | "debug" | "info" — log verbosity level\n'
+    "  Detect from phrases like: 详细日志/verbose/debug日志/trace/show details → trace\n"
+    "                             调试模式/debug mode → debug\n"
+    "                             安静/quiet → info\n"
+    '- "model": "opus" | "sonnet" | "haiku" — model override\n'
+    "  Detect from phrases like: 用sonnet/use haiku/模型用opus → the named model\n"
+    "- Only include keys in meta that the user explicitly requested. Empty {} if none.\n"
+    "\n"
+    "Do NOT wrap JSON in markdown code blocks.\n"
+    "\n"
+    "User input:\n"
+)  # User input is appended via concatenation, NOT .format(), to avoid brace issues
 
 
 def _apply_verbose(level_name: str, cfg: dict[str, Any], console_obj: Any) -> None:
@@ -584,9 +585,12 @@ async def _nl_parse_mission(
             permission_mode="default",
         )
 
+        # Concatenate — NOT .format() — to avoid breaking on flag{...} in user input
+        prompt_text = _NL_PARSE_PROMPT + raw
+
         parts: list[str] = []
         async for message in query(
-            prompt=_NL_PARSE_PROMPT.format(user_input=raw),
+            prompt=prompt_text,
             options=options,
         ):
             if isinstance(message, AssistantMessage):
@@ -614,11 +618,12 @@ async def _nl_parse_mission(
         extra_options = data.get("options", {})
         meta = data.get("meta", {})
 
-        # Apply runtime meta directives (verbose, model, etc.)
-        if meta.get("verbose"):
-            _apply_verbose(meta["verbose"], cfg, console_obj)
-        if meta.get("model"):
-            extra_options["_model_override"] = meta["model"]
+        # Validate mission_type — LLM may hallucinate
+        if mission_type not in ("oneday", "zeroday", "ctf"):
+            console_obj.print(f"[yellow]AI suggested unknown mission '{mission_type}', defaulting to ctf[/yellow]")
+            mission_type = "ctf"
+
+        # Meta directives (verbose, model) are applied AFTER user confirmation
 
         if not target:
             console_obj.print("[red]Could not extract a target from your input.[/red]")
@@ -626,20 +631,19 @@ async def _nl_parse_mission(
             return None
 
         # Show proposed mission and ask for confirmation
+        model_display = meta.get("model") or cfg.get("model", "opus")
         panel_lines = [
             f"[bold]Mission:[/bold]  {mission_type.upper()}",
             f"[bold]Target:[/bold]   {target}",
             f"[bold]Topology:[/bold] {topology}",
+            f"[bold]Model:[/bold]    {model_display}",
         ]
-        if meta.get("model"):
-            panel_lines.append(f"[bold]Model:[/bold]    {meta['model']}")
         if meta.get("verbose"):
             panel_lines.append(f"[bold]Verbose:[/bold]  {meta['verbose']}")
         if prompt:
             display_prompt = prompt[:150] + ("..." if len(prompt) > 150 else "")
             panel_lines.append(f"[bold]Prompt:[/bold]  {display_prompt}")
         if extra_options:
-            # Filter out internal keys for display
             display_opts = {k: v for k, v in extra_options.items() if not k.startswith("_")}
             if display_opts:
                 panel_lines.append(f"[bold]Options:[/bold]  {display_opts}")
@@ -668,14 +672,15 @@ async def _nl_parse_mission(
             return None
 
         if confirm in ("e", "edit"):
-            # Let user edit as structured command
-            prefill = f"{mission_type} {target}"
+            import shlex as _shlex
+            prefill = f"{mission_type} {_shlex.quote(target)}"
             if topology != "ooda":
                 prefill += f" --topology {topology}"
             if prompt:
-                prefill += f' --prompt "{prompt}"'
+                prefill += f" --prompt {_shlex.quote(prompt)}"
             for k, v in extra_options.items():
-                prefill += f" --{k} {v}"
+                if not k.startswith("_"):
+                    prefill += f" --{k} {_shlex.quote(str(v))}"
             console_obj.print(f"[dim]Edit and press Enter:[/dim]")
             edited = await asyncio.get_event_loop().run_in_executor(
                 None,
@@ -688,9 +693,6 @@ async def _nl_parse_mission(
                 ),
             )
             if edited.strip():
-                # Re-parse the edited input
-                from miya.main import _detect_target_kind  # avoid forward ref
-                import shlex
                 try:
                     eparts = shlex.split(edited.strip())
                 except ValueError:
@@ -699,14 +701,20 @@ async def _nl_parse_mission(
                 if len(eparts) < 2:
                     console_obj.print("[red]Need at least: <mission> <target>[/red]")
                     return None
-                # Minimal re-parse
                 return _reparse_edited(eparts, cfg, console_obj)
             return None
 
-        # User confirmed — build the result tuple
+        # User confirmed — NOW apply meta side-effects
+        if meta.get("verbose"):
+            _apply_verbose(meta["verbose"], cfg, console_obj)
+        if meta.get("model"):
+            extra_options["_model_override"] = meta["model"]
+
         opts: dict[str, Any] = dict(extra_options)
         if prompt:
             opts["_prompt"] = prompt
+        # Signal caller to skip the second "Launching Mission" panel
+        opts["_nl_confirmed"] = True
 
         return mission_type, target, topology, opts
 
@@ -1297,25 +1305,28 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
             mission_type, target, topology, options = parsed
             mission_model = options.pop("_model_override", cfg["model"])
             mission_prompt = options.pop("_prompt", "")
+            nl_confirmed = options.pop("_nl_confirmed", False)
 
             kind_map = {"oneday": "service", "zeroday": "source"}
             target_kind = kind_map.get(mission_type, _detect_target_kind(target))
 
-            panel_lines = [
-                f"[bold]Mission:[/bold]  {mission_type.upper()}",
-                f"[bold]Target:[/bold]   {target}",
-                f"[bold]Topology:[/bold] {topology}",
-                f"[bold]Model:[/bold]    {mission_model}",
-            ]
-            if mission_prompt:
-                panel_lines.append(f"[bold]Prompt:[/bold]  {mission_prompt[:80]}")
-            if options:
-                panel_lines.append(f"[bold]Options:[/bold]  {options}")
-            console.print(Panel(
-                "\n".join(panel_lines),
-                title="[bold cyan]Launching Mission[/bold cyan]",
-                border_style="cyan",
-            ))
+            # Skip panel if NL parser already showed a confirmed "Proposed Mission" panel
+            if not nl_confirmed:
+                panel_lines = [
+                    f"[bold]Mission:[/bold]  {mission_type.upper()}",
+                    f"[bold]Target:[/bold]   {target}",
+                    f"[bold]Topology:[/bold] {topology}",
+                    f"[bold]Model:[/bold]    {mission_model}",
+                ]
+                if mission_prompt:
+                    panel_lines.append(f"[bold]Prompt:[/bold]  {mission_prompt[:80]}")
+                if options:
+                    panel_lines.append(f"[bold]Options:[/bold]  {options}")
+                console.print(Panel(
+                    "\n".join(panel_lines),
+                    title="[bold cyan]Launching Mission[/bold cyan]",
+                    border_style="cyan",
+                ))
 
             # Live event table during execution
             live_events: list[DomainEvent] = []
