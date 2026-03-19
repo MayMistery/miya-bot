@@ -194,14 +194,16 @@ class FanoutTopology:
 
     def __init__(
         self,
-        max_parallel: int = 3,
+        max_parallel: int | None = None,
         max_iterations_per_challenge: int = 5,
-        per_challenge_timeout: float = 1800.0,  # 30 minutes default
+        per_challenge_timeout: float | None = None,
         coordinator: Any | None = None,
     ) -> None:
-        self._max_parallel = max_parallel
+        from miya.topology.base import _get_topology_config
+        cfg = _get_topology_config()
+        self._max_parallel = max_parallel if max_parallel is not None else cfg["fanout_parallel"]
         self._max_iter = max_iterations_per_challenge
-        self._per_challenge_timeout = per_challenge_timeout
+        self._per_challenge_timeout = per_challenge_timeout if per_challenge_timeout is not None else float(cfg["fanout_timeout"])
         self._coordinator = coordinator
 
     @property

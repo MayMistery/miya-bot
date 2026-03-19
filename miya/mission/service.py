@@ -299,8 +299,14 @@ class MissionService:
         if not agents:
             raise ValueError(f"Failed to build agents for: {mission_type}")
 
-        # Get topology (pass coordinator for testability)
-        topo = TopologyRegistry.get(topology, coordinator=self._coordinator)
+        # Get topology (pass coordinator for testability + runtime tunables)
+        topo_kwargs: dict[str, Any] = {"coordinator": self._coordinator}
+        if topology == "fanout":
+            if "max_parallel" in options:
+                topo_kwargs["max_parallel"] = int(options.pop("max_parallel"))
+            if "per_challenge_timeout" in options:
+                topo_kwargs["per_challenge_timeout"] = float(options.pop("per_challenge_timeout"))
+        topo = TopologyRegistry.get(topology, **topo_kwargs)
 
         # Execute
         start_time = datetime.now(timezone.utc)

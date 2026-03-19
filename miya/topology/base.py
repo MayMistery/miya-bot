@@ -324,6 +324,8 @@ def _get_topology_config() -> dict[str, int]:
         MIYA_OODA_MAX_ITERATIONS  — max OODA loop iterations (default 10)
         MIYA_AG_MAX_STEPS         — max attack-graph steps  (default 20)
         MIYA_MAX_TURNS            — max SDK turns per coordinator call (default 30)
+        MIYA_FANOUT_PARALLEL      — max parallel challenge solvers (default 10)
+        MIYA_FANOUT_TIMEOUT       — per-challenge timeout in seconds (default 1800)
     """
     def _int(key: str, default: int) -> int:
         raw = os.environ.get(key, "")
@@ -336,6 +338,8 @@ def _get_topology_config() -> dict[str, int]:
         "ooda_max_iterations": _int("MIYA_OODA_MAX_ITERATIONS", 10),
         "ag_max_steps": _int("MIYA_AG_MAX_STEPS", 20),
         "max_turns": _int("MIYA_MAX_TURNS", 30),
+        "fanout_parallel": _int("MIYA_FANOUT_PARALLEL", 10),
+        "fanout_timeout": _int("MIYA_FANOUT_TIMEOUT", 1800),
     }
 
 
