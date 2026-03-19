@@ -1493,7 +1493,11 @@ async def _interactive_loop(db: str, model: str = "opus", unlimited: bool = Fals
                                     _aio.shield(fg_task),
                                     timeout=5.0,
                                 )
-                            except Exception:
+                            except (
+                                _aio.CancelledError,
+                                _aio.TimeoutError,
+                                Exception,
+                            ):
                                 pass
                         break
 
@@ -2296,6 +2300,13 @@ async def _interactive_loop(db: str, model: str = "opus", unlimited: bool = Fals
                         f"'resume' to continue.[/yellow]"
                     )
 
+            except _aio.CancelledError:
+                stop_input.set()
+                console.print(
+                    f"[yellow]Mission cancelled "
+                    f"({len(live_events)} events). "
+                    f"'resume' to continue.[/yellow]"
+                )
             except Exception as e:
                 console.print(f"[bold red]Error:[/bold red] {e}")
                 stop_input.set()
