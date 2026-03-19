@@ -1935,7 +1935,11 @@ async def _interactive_loop(db: str, model: str = "opus", unlimited: bool = Fals
             parsed = _parse_mission_args(raw)
             if parsed is None:
                 # Not a structured command — try natural language understanding
-                nl_result = await _nl_parse_mission(raw, cfg, console, session)
+                try:
+                    nl_result = await _nl_parse_mission(raw, cfg, console, session)
+                except (KeyboardInterrupt, asyncio.CancelledError):
+                    console.print("\n[dim]Cancelled.[/dim]")
+                    continue
                 if nl_result is None:
                     continue
                 parsed = nl_result
@@ -2147,12 +2151,15 @@ async def _interactive_loop(db: str, model: str = "opus", unlimited: bool = Fals
                 while not mission_task.done():
                     await _aio.sleep(0.3)
 
-                    # Drain HITL input → op_queue (silently;
-                    # _hitl_router prints its own confirmations)
+                    # Drain HITL input → op_queue
                     while not hitl_queue.empty():
                         try:
                             msg = hitl_queue.get_nowait()
                             op_queue.put_nowait(msg)
+                            console.print(
+                                f"  [yellow]\U0001f4e8 queued:"
+                                f"[/yellow] {msg[:80]}"
+                            )
                         except _aio.QueueEmpty:
                             break
 
