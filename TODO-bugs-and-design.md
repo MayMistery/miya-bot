@@ -428,6 +428,205 @@ object.__setattr__(
 
 ---
 
+# 架构简化洞察 — 信任模型，减少桎梏
+
+核心哲学：**架构是帮助模型加速解决问题的，不是限制它。**
+Claude 已经知道怎么做安全测试和 CTF。我们的工作是给它正确的目标、工具和上下文，然后闪开。
+
+---
+
+## ARCH 1: [根本性] 杀掉 Phase 分离 — Iteration 1 不需要 4 次 LLM 调用
+
+**当前代价**：CTF Iteration 1 = CLASSIFY + OBSERVE + ACT + REFLECT = **4 次独立 LLM 调用**
+
+**每次调用都重复注入**：
+- `EVENT_INSTRUCTION`（2,742 chars / ~685 tokens）
+- `blackboard.to_context_prompt()`（1-3 KB）
+- Phase prompt 模板
+
+**总开销**：~9,634 chars 的 prompt 格式噪音，是一句"solve this challenge"（200 chars）的 **48 倍**。
+
+**真正的问题**：Phase 分离把模型的连贯推理**人为切断**。模型在 OBSERVE 阶段发现了漏洞的线索，但必须等到 ACT 阶段才能去利用——而此时它收到的是 OBSERVE 输出的**截断版**（4KB）。模型的思维链被打断了。
+
+**反思**：代码注释（ooda.py:48-50）写得很清楚——"give the model the GOAL, not the STEPS"。但代码本身在做相反的事：强制 OBSERVE→ACT→REFLECT 的步骤。CONTINUE prompt（iteration 2+）已经证明了合并有效——为什么 iteration 1 不能也这样？
+
+**修复方案**：
+```
+# Iteration 1 (session mode):
+prompt = """
+Solve this CTF challenge: {challenge_info}
+{recon_hint}
+
+Work through it autonomously:
+- Explore the challenge and identify the vulnerability
+- Develop and execute an exploit
+- Capture the flag
+
+When done, report what happened and whether you got the flag.
+"""
+# 1 call instead of 4
+```
+
+**ROI**: 减少 3 次 LLM 调用 / iteration，节省 ~2,400 tokens prompt 开销，**更重要的是保持模型推理的连贯性**。
+
+---
+
+## ARCH 2: [高影响] EVENT_INSTRUCTION 是一个税 — 模型不需要被教如何输出
+
+**当前代价**：2,742 chars 的结构化输出指令，每个 phase 都注入，列举了 20+ 种事件类型的 JSON schema。
+
+**问题**：
+1. 这是在告诉 Claude **如何格式化输出**，而不是**发现什么**。Claude 知道 CVE 是什么、flag 是什么——不需要教它 JSON 格式
+2. 输出格式约束会**降低**模型能力。模型需要同时做两件事：(a) 思考安全问题 (b) 在正确位置插入正确格式的 JSON。这分散了注意力
+3. 如果 JSON 格式有任何错误（少一个引号、多一个逗号），`extract_events_from_output` 会**静默丢弃**整个发现
+4. 信息被编码了**两次**——自然语言描述一次，`[EVENT:...]` marker 再一次
+
+**反思**：EVENT_INSTRUCTION 的存在说明系统不信任模型的自然输出。但对于 CTF 场景，唯一真正重要的事件是 `ChallengeSolved`（flag）。其余 19 种事件（AssetDiscovered、VulnerabilityFound、ExploitAttempted...）是**可观测性数据**，不是**业务逻辑**。用 2,742 chars 的 prompt 来获取可观测性数据，代价太高。
+
+**修复方案**：
+- CTF 场景：**只保留 ChallengeSolved 和 FlagSubmitted 两个事件的 instruction**，砍掉其他 18 个。~200 chars 就够了
+- Pentest 场景：保留完整 EVENT_INSTRUCTION（可观测性对 pentest 有价值）
+- 或更激进：完全去掉 EVENT_INSTRUCTION，用**后处理**提取结构化数据。模型输出 "I found the flag: flag{xxx}" → 后处理正则提取 flag
+
+**ROI**: 每次 LLM 调用节省 ~685 tokens input。CTF 5 iterations = 节省 ~3,400 tokens。更重要的是**不分散模型注意力**。
+
+---
+
+## ARCH 3: [高影响] 杀掉 CLASSIFY → specialist 锁定 — 让模型自己选工具
+
+**当前代价**：
+1. 额外 1 次 LLM 调用（CLASSIFY）= ~3,500 chars prompt
+2. 基于 CLASSIFY 结果锁定 specialist agent，整个 session 不可变
+3. 如果分类错误，模型被困在错误的 agent 里
+
+**问题的本质**：CLASSIFY 是在替模型做决策。我们在预测"这道题需要 web agent 还是 pwn agent"，然后基于预测锁定工具集。但 **Claude 自己就能判断需要什么工具**——它比一次快速分类更擅长这件事，因为它在解题过程中会不断更新理解。
+
+**类比**：这就像在让人做数学题之前，先让另一个人判断"这道题需要微积分还是代数"，然后只给他对应的一本教科书。不如直接给他整个图书馆。
+
+**反思**：specialist agent 的价值在于**system prompt 的专业性**（每个 agent 有针对 web/pwn/crypto 的具体指导）。但这可以通过在统一 prompt 中条件注入来实现，而不需要锁定 agent。
+
+**修复方案**：
+- 去掉独立的 CLASSIFY phase
+- 始终给模型**所有 agents 的能力**
+- 在 OBSERVE prompt 中加一句："Based on what you find, use the most appropriate tools and techniques."
+- 如果需要 category-specific hints，在发现 category 后动态注入（不需要锁定 agent）
+
+**ROI**: 省 1 次 LLM 调用，消除分类错误的风险，**让模型在运行时自适应选择工具**。
+
+---
+
+## ARCH 4: [简化] 杀掉 `_parse_reflection()` — 信任模型的自然输出
+
+**当前代价**：55 行 regex + heuristic 代码（ooda.py:951-1005），用来从模型输出中解析 `DECISION: continue/pivot/complete`。
+
+**问题**：
+1. 强制模型输出结构化字段（DECISION/ASSESSMENT/INSIGHTS/NEXT_FOCUS）
+2. Regex 解析脆弱——如果模型格式稍有偏差就失败
+3. Heuristic fallback 检查 "objective achieved" 等关键词——但只在最后 300 字符
+4. 最终结果只用了 `decision` 和 `next_focus` 两个值
+
+**真正需要的只是两个判断**：
+1. 是否已经拿到 flag？→ 看 blackboard 中有没有 `ChallengeSolved`
+2. 模型是否认为自己搞不定？→ 看输出中有没有明确的放弃信号
+
+**修复方案**：
+```python
+def _should_continue(blackboard, output, iteration, max_iter):
+    # Flag found? Done.
+    if blackboard.solved_flags:
+        return False
+    # Max iterations? Done.
+    if iteration >= max_iter:
+        return False
+    # Model explicitly gave up?
+    tail = output[-500:].lower()
+    if any(p in tail for p in ("give up", "cannot solve", "no progress possible")):
+        return False
+    # Otherwise: trust the model to keep trying
+    return True
+```
+
+不需要 DECISION/ASSESSMENT/INSIGHTS/NEXT_FOCUS 四字段。不需要 regex。不需要 heuristic。
+
+**ROI**: 删除 55 行脆弱代码，**消除结构化输出对模型的约束**。
+
+---
+
+## ARCH 5: [简化] Session mode 应该是唯一路径，不是可选优化
+
+**当前代价**：ooda.py 中 ~300 行的双路径逻辑：
+- Lines 498-535: session mode (iteration 2+)
+- Lines 536-756: stateless mode (full phase separation)
+- Lines 442-454: session 创建 + fallback 逻辑
+
+**问题**：维护两条执行路径意味着每个改动都要做两次，bug 也要修两次。Session mode 已经被证明更高效（CONTINUE = 1 call vs 5 calls），为什么还保留 stateless mode？
+
+**反思**：
+- Stateless mode 存在的理由是 "non-CTF missions" 和 "session connect failure"
+- 但 oneday/zeroday mission 同样受益于 session context——为什么要强制每个 iteration 重发所有 context？
+- Session connect failure 应该是 retry + graceful degradation，不是维护一个完整的 fallback code path
+
+**修复方案**：
+- **Always use session**（CTF + oneday + zeroday）
+- Iteration 1: 1 call（合并 OBSERVE+ACT+REFLECT）
+- Iteration 2+: 1 call（CONTINUE，已经在做了）
+- Session connect failure → retry 3 times → raise error（不 fallback 到 stateless）
+- 删除整个 stateless code path（~200 行）
+
+**ROI**: 删 ~200 行代码，统一执行路径，减少维护负担。
+
+---
+
+## ARCH 6: [思维转变] Blackboard 应该是给人看的，不是给模型看的
+
+**当前代价**：`to_context_prompt()` 每个 phase 调用一次（每 iteration 5-6 次），生成 1-3 KB 的 markdown。
+
+**问题**：在 session mode 下，模型**已经有所有历史上下文**。Blackboard 是对模型自己已经知道的信息的一个**降质摘要**——100 字符的 detail 截断、8 个 recent findings 限制。这是在用低保真摘要替换模型的高保真记忆。
+
+**反思**：
+- Blackboard 的真正价值是给**操作员**看的仪表板——"目前发现了什么、进展到哪一步"
+- 给模型看 blackboard 是有害的：(a) 浪费 tokens (b) 摘要比原始记忆质量更低 (c) 截断可能丢失关键细节
+- 唯一例外：**跨 session 传递状态**时需要 blackboard（新 session 没有历史 context）
+
+**修复方案**：
+- Session mode 下的 CONTINUE prompt：**不注入 blackboard**。模型已经有了
+- Iteration 1 prompt：注入 blackboard（此时确实是新 context）
+- `to_context_prompt()` 简化为面向操作员的 dashboard，不需要为 LLM 优化
+
+（注：这与我之前做的 INSIGHT 1 "CONTINUE 注入 blackboard" 矛盾。经过更深入的反思，我认为之前的判断是错的。Session context > Blackboard summary。INSIGHT 1 的修改应该**回退**。）
+
+**ROI**: 减少每次 CONTINUE 调用 ~200-500 tokens，**避免低质摘要覆盖高质记忆**。
+
+---
+
+## ARCH 7: [根本性] 截断是错误的解法 — 问题本身不该存在
+
+**_smart_truncate 和 [:4000] 都是症状治疗**。
+
+如果模型在 session 中连续工作，phase 间就不需要传递输出文本。OBSERVE 的输出不需要"截断后传给 ORIENT"——因为它们是同一个 session 里的同一个模型。
+
+截断只在 stateless mode 下有意义。而 stateless mode 本身应该被消除（ARCH 5）。
+
+所以：**ARCH 5 + ARCH 1 一起做**，截断问题自动消失。不需要 `_smart_truncate()`，不需要 `[:4000]`，不需要任何传递。
+
+---
+
+## 总结：架构简化路线图
+
+| 优先级 | 改动 | 删除代码量 | 效果 |
+|--------|------|-----------|------|
+| **S1** | 合并 Iteration 1 为 1 次调用（ARCH 1） | ~100 行 phase 分离代码 | 3x 减少 LLM 调用 |
+| **S1** | CTF 场景精简 EVENT_INSTRUCTION（ARCH 2） | 重写 EVENT_INSTRUCTION | 每调用省 685 tokens |
+| **S1** | 去掉 CLASSIFY → specialist 锁定（ARCH 3） | ~50 行 classify + pick_agent | 消除分类错误风险 |
+| **S2** | 用 flag 检测替代 _parse_reflection（ARCH 4） | ~55 行 regex/heuristic | 消除结构化输出约束 |
+| **S2** | 统一为 session-only 路径（ARCH 5） | ~200 行 stateless 路径 | 统一维护 |
+| **S2** | Blackboard 只给人看，不给模型看（ARCH 6） | 移除 session 内注入 | 减少噪音 tokens |
+| **S3** | 回退截断修复（ARCH 7，ARCH 5 的自然结果） | ~10 行 truncation | 架构一致性 |
+
+**净效果**：删除 ~400 行代码，CTF 单题从 8 次 LLM 调用降到 ~2 次，每次调用省 ~1,000-2,000 tokens prompt 开销。**模型获得连贯的推理链，而不是被 phase 切割的片段。**
+
+---
+
 # 业务能力提升洞察（深入反思后）
 
 以下是经过代码走读、信息流追踪、逐条反思后确认的**真正能提升 miya-bot 解题/渗透能力**的改进点。
