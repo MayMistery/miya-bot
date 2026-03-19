@@ -383,7 +383,14 @@ class FanoutTopology:
                 sub_mission.start()
 
                 sub_bb = Blackboard()
-                # Seed with classification if available
+                # Seed sub-blackboard with challenge context
+                if ch_files:
+                    from miya.shared.blackboard import ChallengeView
+                    sub_bb.challenges.append(ChallengeView(
+                        name=ch_name,
+                        category=ch_cat,
+                        file_paths=tuple(ch_files),
+                    ))
                 if ch_cat:
                     from miya.shared.blackboard import ClassificationView
                     sub_bb.classification = ClassificationView(
@@ -531,7 +538,7 @@ class FanoutTopology:
             general_instructions_detail=gi_detail,
         ) + EVENT_INSTRUCTION
 
-        prepare_output = await self._run(prepare_prompt, agents, blackboard)
+        prepare_output = await self._run(prepare_prompt, agents, blackboard, max_turns=50)
 
         for ev in extract_events_from_output(prepare_output, mission):
             yield ev
@@ -592,6 +599,7 @@ class FanoutTopology:
         prompt: str,
         agents: dict[str, AgentHandle],
         blackboard: Blackboard,
+        max_turns: int | None = None,
     ) -> str:
         """Run coordinator with all agents."""
         all_mcp_names: set[str] = set()
@@ -604,7 +612,7 @@ class FanoutTopology:
         # Use injected coordinator (for testing) or SDK
         if self._coordinator is not None:
             return await self._coordinator.run(prompt, agent_defs, list(all_mcp_names))
-        return await run_sdk_coordinator(prompt, agent_defs, list(all_mcp_names))
+        return await run_sdk_coordinator(prompt, agent_defs, list(all_mcp_names), max_turns=max_turns)
 
 
 # ── Register ──────────────────────────────────────────────────────

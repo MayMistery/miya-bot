@@ -372,7 +372,14 @@ class OODATopology:
                 for name, handle in session_agents.items()
             }
             session = SDKSession(agent_defs, list(all_mcp_names))
-            await session.connect()
+            try:
+                await session.connect()
+            except Exception:
+                logger.warning(
+                    "SDKSession connect failed — falling back to stateless mode",
+                    exc_info=True,
+                )
+                session = None
 
         try:
             for iteration in range(1, self._max_iterations + 1):

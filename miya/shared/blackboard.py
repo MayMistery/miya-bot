@@ -646,7 +646,8 @@ class Blackboard:
             solved = [c for c in self.challenges if c.name in solved_names]
             lines.append(f"\n### Challenges ({len(self.challenges)}, {len(solved)} solved)")
             for c in unsolved:
-                lines.append(f"- [TODO] {c.name} ({c.category})")
+                files = f" files={list(c.file_paths)}" if c.file_paths else ""
+                lines.append(f"- [TODO] {c.name} ({c.category}){files}")
             for c in solved:
                 lines.append(f"- [DONE] {c.name} ({c.category})")
 

@@ -260,10 +260,7 @@ EVENT_INSTRUCTION = """
 Throughout your response, emit structured events so findings are captured
 in the system's blackboard.
 
-**Preferred method** — use the `emit_event` tool for validated event emission:
-    emit_event(event_type="EventTypeName", data={"field": "value", ...})
-
-**Fallback** — embed inline markers if the tool is unavailable:
+Embed inline event markers in your response:
     [EVENT:EventTypeName {"field": "value", ...}]
 
 Available event types:
@@ -544,10 +541,12 @@ class SDKSession:
         mcp_names: list[str],
         *,
         max_turns: int | None = None,
+        session_id: str | None = None,
     ) -> None:
         self._agent_defs = agent_defs
         self._mcp_names = mcp_names
         self._max_turns = max_turns
+        self._session_id = session_id or f"miya-{id(self):x}"
         self._client: Any | None = None  # ClaudeSDKClient instance
 
     async def connect(self, initial_prompt: str | None = None) -> None:
@@ -558,7 +557,7 @@ class SDKSession:
             self._agent_defs, self._mcp_names, max_turns=self._max_turns,
         )
         self._client = ClaudeSDKClient(options)
-        await self._client.connect(initial_prompt)
+        await self._client.connect(initial_prompt, session_id=self._session_id)
 
     async def query(self, prompt: str, *, phase_label: str = "") -> str:
         """Send a prompt and collect the text response.

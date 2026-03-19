@@ -363,7 +363,7 @@ def event_from_dict(data: dict[str, Any]) -> DomainEvent:
         data["timestamp"] = datetime.fromisoformat(ts)
 
     # Handle tuple fields
-    for f_name in ("ports", "services", "input_vectors", "path", "technology_stack", "target_ports"):
+    for f_name in ("ports", "services", "input_vectors", "path", "technology_stack", "target_ports", "file_paths"):
         if f_name in data and isinstance(data[f_name], list):
             data[f_name] = tuple(data[f_name])
 
