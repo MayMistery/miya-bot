@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import aiosqlite
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +12,8 @@ from typing import Any
 
 from miya.shared.events import DomainEvent, event_from_dict
 from miya.shared.ports import EventStorePort
+
+logger = logging.getLogger(__name__)
 
 
 _SCHEMA = """
@@ -47,10 +50,35 @@ class SQLiteEventStore(EventStorePort):
         self._db: aiosqlite.Connection | None = None
 
     async def initialize(self) -> None:
-        """Create tables if they don't exist."""
-        self._db = await aiosqlite.connect(self._db_path)
-        await self._db.executescript(_SCHEMA)
-        await self._db.commit()
+        """Create tables if they don't exist.
+
+        If the on-disk database is read-only (e.g. filesystem permissions,
+        macOS sandbox, Docker bind-mount), falls back to an in-memory
+        database so the mission can still run without persistence.
+        """
+        try:
+            self._db = await aiosqlite.connect(self._db_path)
+            await self._db.executescript(_SCHEMA)
+            await self._db.commit()
+        except Exception as exc:
+            err_msg = str(exc).lower()
+            if "readonly" in err_msg or "read-only" in err_msg or "read only" in err_msg:
+                logger.warning(
+                    "Database '%s' is read-only (%s) — falling back to "
+                    "in-memory event store. Events will NOT be persisted "
+                    "across sessions.",
+                    self._db_path, exc,
+                )
+                if self._db:
+                    try:
+                        await self._db.close()
+                    except Exception:
+                        pass
+                self._db = await aiosqlite.connect(":memory:")
+                await self._db.executescript(_SCHEMA)
+                await self._db.commit()
+            else:
+                raise
 
     async def close(self) -> None:
         if self._db:
