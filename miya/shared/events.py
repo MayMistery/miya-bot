@@ -91,6 +91,7 @@ class ReflectionCompleted(DomainEvent):
     assessment: str = ""
     decision: str = ""  # "continue", "pivot", "retry", "complete"
     insights: str = ""
+    next_focus: str = ""
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -332,6 +333,14 @@ class MissionSuspended(DomainEvent):
     event_type: ClassVar[str] = "mission.suspended"
     reason: str = ""
     checkpoint: str = ""  # JSON: phase, iteration, solved challenges, etc.
+
+
+@dataclass(frozen=True)
+class MissionResumed(DomainEvent):
+    """Emitted when a previously suspended mission is resumed."""
+    event_type: ClassVar[str] = "mission.resumed"
+    previous_mission_id: str = ""
+    resumed_from_checkpoint: str = ""  # JSON: which checkpoint we're resuming from
 
 
 @dataclass(frozen=True)

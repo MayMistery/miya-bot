@@ -153,10 +153,10 @@ class Mission:
     prompt: str = ""  # operator instructions passed at launch
     options: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=_now)
-    status: Literal["created", "running", "completed", "failed"] = "created"
+    status: Literal["created", "running", "suspended", "completed", "failed"] = "created"
 
     def start(self) -> None:
-        if self.status != "created":
+        if self.status not in ("created", "suspended"):
             raise ValueError(f"Cannot start mission in '{self.status}' state")
         self.status = "running"
 
@@ -169,3 +169,8 @@ class Mission:
         if self.status not in ("created", "running"):
             raise ValueError(f"Cannot fail mission in '{self.status}' state")
         self.status = "failed"
+
+    def suspend(self) -> None:
+        if self.status != "running":
+            raise ValueError(f"Cannot suspend mission in '{self.status}' state")
+        self.status = "suspended"

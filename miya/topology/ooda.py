@@ -244,6 +244,18 @@ If submission fails or no API is available, just report the flag via ChallengeSo
 """
 
 
+def _smart_truncate(text: str, max_len: int = 4000) -> str:
+    """Truncate keeping both head and tail to preserve conclusions.
+
+    LLM outputs typically have exploration at the top and conclusions at
+    the bottom.  Head-only truncation loses the conclusions.
+    """
+    if len(text) <= max_len:
+        return text
+    half = max_len // 2
+    return text[:half] + "\n... (truncated) ...\n" + text[-half:]
+
+
 class OODATopology:
     """OODA loop orchestration with reflection gate."""
 
@@ -390,6 +402,7 @@ class OODATopology:
         previous_insights = ""
         classified_category = ""  # populated by auto-classify for CTF
         mission_key = mission.mission_type.value
+        _reflection_log: list[str] = []  # accumulated ASSESSMENT history
 
         def _drain_hitl() -> tuple[list[OperatorMessage], str]:
             return drain_hitl_queue(
@@ -399,14 +412,14 @@ class OODATopology:
         # ── Auto-classify (CTF only) ──────────────────────────────
         recon_summary = ""
         if mission.mission_type == MissionType.CTF:
-            classified_category, recon_summary = await self._auto_classify(
+            classified_category, recon_summary, classify_confidence = await self._auto_classify(
                 mission, agents, blackboard,
             )
             if classified_category:
                 classify_event = ChallengeClassified(
                     aggregate_id=mission.id,
                     category=classified_category,
-                    confidence=0.8,
+                    confidence=classify_confidence,
                     reasoning="auto-classified from challenge artifacts",
                     mission=mission.mission_type.value,
                 )
@@ -494,10 +507,21 @@ class OODATopology:
                     self._log(logging.INFO, "▶ CONTINUE (autonomous iteration)")
                     self._report(phase="CONTINUE", iteration=iteration)
                     continue_tmpl = _CONTINUE_CTF if mission_key == "ctf" else _CONTINUE_GENERIC
+                    bb_checkpoint = (
+                        f"\n## Blackboard Checkpoint\n"
+                        f"{blackboard.to_context_prompt()}\n"
+                    )
+                    reflection_history = ""
+                    if _reflection_log:
+                        recent = _reflection_log[-3:]
+                        reflection_history = (
+                            "\n## Prior Assessments (avoid repeating failed approaches)\n"
+                            + "\n".join(f"- {a}" for a in recent) + "\n"
+                        )
                     continue_prompt = continue_tmpl.format(
                         iteration=iteration,
                         previous_insights=previous_insights or "(none)",
-                    ) + op_suffix + EVENT_INSTRUCTION + (
+                    ) + bb_checkpoint + reflection_history + op_suffix + EVENT_INSTRUCTION + (
                         _FLAG_SUBMIT_INSTRUCTION if mission_key == "ctf" else ""
                     )
 
@@ -601,7 +625,7 @@ class OODATopology:
                         orient_prompt = _get_phase_prompt(mission_key, "ORIENT").format(
                             blackboard_context=blackboard.to_context_prompt(),
                             mission_description=mission_desc,
-                            observe_output=observe_output[:4000],
+                            observe_output=_smart_truncate(observe_output),
                         ) + op_suffix + EVENT_INSTRUCTION
                         orient_output = await self._run_coordinator(
                             orient_prompt, mission, agents, blackboard, phase_label="ORIENT"
@@ -627,7 +651,7 @@ class OODATopology:
                         decide_prompt = _get_phase_prompt(mission_key, "DECIDE").format(
                             blackboard_context=blackboard.to_context_prompt(),
                             mission_description=mission_desc,
-                            orient_output=orient_output[:4000],
+                            orient_output=_smart_truncate(orient_output),
                         ) + op_suffix + EVENT_INSTRUCTION
                         decide_output = await self._run_coordinator(
                             decide_prompt, mission, agents, blackboard, phase_label="DECIDE"
@@ -653,7 +677,7 @@ class OODATopology:
                     act_prompt = _get_phase_prompt(mission_key, "ACT").format(
                         blackboard_context=blackboard.to_context_prompt(),
                         mission_description=mission_desc,
-                        decide_output=decide_output[:4000],
+                        decide_output=_smart_truncate(decide_output),
                         agent_descriptions=agent_desc,
                     ) + op_suffix + EVENT_INSTRUCTION + flag_hint
 
@@ -710,12 +734,19 @@ class OODATopology:
                     )
                     self._log(logging.INFO, "▶ REFLECT — %s", self._PHASE_DESC["REFLECT"])
                     self._report(phase="REFLECT")
+                    reflection_history = ""
+                    if _reflection_log:
+                        recent = _reflection_log[-3:]
+                        reflection_history = (
+                            "\n## Prior Assessments\n"
+                            + "\n".join(f"- {a}" for a in recent) + "\n"
+                        )
                     reflect_prompt = _get_phase_prompt(mission_key, "REFLECT").format(
                         blackboard_context=blackboard.to_context_prompt(),
                         mission_description=mission_desc,
-                        act_output=act_output[:4000],
+                        act_output=_smart_truncate(act_output),
                         previous_insights=previous_insights or "(first iteration)",
-                    ) + op_suffix
+                    ) + reflection_history + op_suffix
 
                     if session is not None:
                         reflect_output = await session.query(reflect_prompt, phase_label="REFLECT")
@@ -740,6 +771,11 @@ class OODATopology:
 
                 # ── Common: process reflection decision ───────────
                 previous_insights = decision.get("next_focus", "") or decision.get("insights", "")
+                assessment = decision.get("assessment", "")
+                if assessment:
+                    _reflection_log.append(
+                        f"[iter {iteration}] {assessment[:200]}"
+                    )
                 d = decision.get("decision", "continue")
 
                 if d == "continue" and _stagnation_count >= _STAGNATION_THRESHOLD:
@@ -769,6 +805,7 @@ class OODATopology:
                     assessment=decision.get("assessment", ""),
                     decision=d,
                     insights=decision.get("insights", ""),
+                    next_focus=decision.get("next_focus", ""),
                     mission=mission.mission_type.value,
                 )
                 yield reflection_event
@@ -974,7 +1011,7 @@ class OODATopology:
         mission: Mission,
         agents: dict[str, AgentHandle],
         blackboard: Blackboard,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, float]:
         """Explore and classify a CTF challenge before OBSERVE.
 
         Inspired by D-CIPHER's Auto-Prompter pattern: instead of just
@@ -983,9 +1020,10 @@ class OODATopology:
         produces BOTH a category AND a recon summary that feeds into the
         specialist agent's OBSERVE phase.
 
-        Returns (category, recon_summary) where category is one of
-        web|pwn|crypto|reverse|misc (or "" if classification fails)
-        and recon_summary is the exploration findings (or "").
+        Returns (category, recon_summary, confidence) where category is one of
+        web|pwn|crypto|reverse|misc (or "" if classification fails/low confidence),
+        recon_summary is the exploration findings (or ""), and confidence is
+        the parsed confidence value (0.0-1.0).
         """
         import re
 
@@ -1004,7 +1042,7 @@ class OODATopology:
             )
         except Exception:
             logger.warning("Auto-classify failed, skipping", exc_info=True)
-            return "", ""
+            return "", "", 0.0
 
         # Extract any events emitted during classification exploration
         for extracted in extract_events_from_output(output, mission):
@@ -1014,13 +1052,26 @@ class OODATopology:
         m = re.search(r"CATEGORY\s*:\s*(web|pwn|crypto|reverse|misc)", output, re.IGNORECASE)
         category = m.group(1).lower() if m else ""
 
+        # Parse CONFIDENCE: from output
+        cm = re.search(r"CONFIDENCE\s*:\s*([\d.]+)", output, re.IGNORECASE)
+        confidence = float(cm.group(1)) if cm else 0.5
+
         # Parse RECON_SUMMARY: from output (everything after the marker)
         recon_summary = ""
         rs = re.search(r"RECON_SUMMARY:\s*\n(.*)", output, re.DOTALL | re.IGNORECASE)
         if rs:
             recon_summary = rs.group(1).strip()[:3000]  # cap to avoid context bloat
 
-        return category, recon_summary
+        # Low confidence: don't commit to a specialist — keep all agents
+        if category and confidence < 0.7:
+            self._log(
+                logging.INFO,
+                "Classification confidence %.2f < 0.7 — keeping all agents",
+                confidence,
+            )
+            category = ""
+
+        return category, recon_summary, confidence
 
     # ── Direct agent selection (#5) ───────────────────────────────
 

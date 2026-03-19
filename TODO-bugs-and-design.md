@@ -6,9 +6,21 @@
 
 - **[已修复] #1** os.environ 污染 → `finally` 块恢复原值 (`service.py`)
 - **[已修复] #2** Campaign 前向兼容 → 过滤未知字段 (`campaign.py`)
+- **[已修复] #3** fanout 取消时吞异常 → 分离 CancelledError/Exception，添加 debug 日志 (`fanout_topo.py`)
+- **[已修复] #5** Mission 状态机 → 新增 `suspended` 状态、`suspend()` 方法、`MissionResumed` 事件 (`types.py`, `events.py`)
 - **[已修复] #6** REFLECT heuristic 误判 → 仅检查输出尾部 300 字符 (`ooda.py`)
+- **[已修复] #11** 事件解析无校验 → ChallengeSolved 空 flag 丢弃、ChallengeSolved/FlagSubmitted 去重 (`base.py`)
+- **[已修复] #14** Whitebox target 语义 → 不再覆盖 target，使用 `_source_files` 单独传递 (`fanout_topo.py`)
 - **[已修复] #17** OODA 无 stagnation detection → 连续 3 次无新 finding 自动终止 (`ooda.py`)
+- **[已修复] #19** CostTracker docstring → 改为 "Event-loop-bound accumulator" (`base.py`)
+- **[已修复] #20** events 命令负数序号 → `max(len(all_ev) - limit, 0) + 1` (`main.py`)
 - **[已修复] AttackGraph** 完善实现：recon→graph_build 阶段、图变更产生事件、事件审计链 (`attack_graph_topo.py`, `events.py`)
+- **[已修复] INSIGHT 1** CONTINUE 注入 blackboard checkpoint → 每次 CONTINUE 迭代包含结构化状态 (`ooda.py`)
+- **[已修复] INSIGHT 2** REFLECT 累积 ASSESSMENT 历史 → 最近 3 条注入 REFLECT/CONTINUE prompt (`ooda.py`)
+- **[已修复] INSIGHT 3** Classification 低 confidence fallback → confidence < 0.7 时保留所有 agents (`ooda.py`)
+- **[已修复] INSIGHT 4** Phase 间截断首尾组合 → `_smart_truncate()` 保留头 2KB + 尾 2KB (`ooda.py`)
+- **[已修复] INSIGHT 5** Blackboard evidence 可见 → 最近 3 个 findings 展示 evidence[:80] (`blackboard.py`)
+- **[已修复] ReflectionCompleted** 新增 `next_focus` 字段，存储到事件和 blackboard (`events.py`, `blackboard.py`)
 
 ## 深入反思后移除/降级的问题
 

@@ -519,6 +519,7 @@ class FanoutTopology:
                 is_whitebox = challenge.get("_whitebox", False)
                 sub_prompt = f"Solve challenge: {ch_name}."
                 if is_whitebox:
+                    source_files = challenge.get("_source_files", ch_files)
                     sub_prompt += (
                         "\n\n\u26a0 WHITEBOX MODE: The target service is unreachable. "
                         "Analyze source code ONLY. Find vulnerabilities, construct "
@@ -528,6 +529,8 @@ class FanoutTopology:
                     original_target = challenge.get("_original_target", "")
                     if original_target:
                         sub_prompt += f"\nOriginal target (offline): {original_target}"
+                    if source_files:
+                        sub_prompt += f"\nSource files for analysis: {', '.join(source_files)}"
                 if ch_files:
                     sub_prompt += f"\nChallenge attachments: {', '.join(ch_files)}"
 
@@ -646,8 +649,13 @@ class FanoutTopology:
                                 ooda_task.cancel()
                                 try:
                                     await ooda_task
-                                except (asyncio.CancelledError, Exception):
+                                except asyncio.CancelledError:
                                     pass
+                                except Exception:
+                                    logger.debug(
+                                        "Exception during OODA task cleanup for %s",
+                                        ch_name, exc_info=True,
+                                    )
                                 _elapsed = display.get_elapsed(ch_name)
                                 display.log_event(
                                     f"\u274c {ch_name}: timed out (no extension)"
@@ -1337,12 +1345,11 @@ class FanoutTopology:
                                     "whitebox analysis may be limited",
                                     name,
                                 )
-                            # Mark as whitebox mode: clear network target,
-                            # set target to file paths
+                            # Mark as whitebox mode: preserve original target,
+                            # store source files separately
                             ch["_whitebox"] = True
                             ch["_original_target"] = ch.get("target", "")
-                            if ch_files:
-                                ch["target"] = ch_files[0]
+                            ch["_source_files"] = ch_files
                             logger.info(
                                 "Operator: whitebox %s — source-only analysis "
                                 "(files: %s)",
