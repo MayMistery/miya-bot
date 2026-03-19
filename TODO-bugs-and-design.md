@@ -627,6 +627,458 @@ def _should_continue(blackboard, output, iteration, max_iter):
 
 ---
 
+# 架构简化 — 具体实施方案
+
+> 决策记录（2026-03-19）：
+> - ARCH 3（去掉 CLASSIFY）：**保留现状**，不实施
+> - ARCH 5（session-only）：改为"session 作为默认模式，保留 stateless 作为可切换选项"
+> - 其余 ARCH：写详细实施方案
+
+---
+
+## ARCH 1 实施方案：合并 Iteration 1 为单次 LLM 调用
+
+### 问题定位
+
+`ooda.py:561-756`，CTF Iteration 1 的执行路径：
+```
+OBSERVE (line 563-604) → skip ORIENT+DECIDE (line 607-609) → ACT (line 661-721) → REFLECT (line 723-759)
+= 3 次独立 LLM 调用，每次重注入 blackboard + EVENT_INSTRUCTION
+```
+
+### 改什么
+
+**1. 新增统一 prompt `_SOLVE_CTF`**（替代 OBSERVE+ACT+REFLECT 三个 prompt）
+
+位置：`ooda.py` line 97 附近，在 CTF prompt 区域
+
+```python
+_SOLVE_CTF = """\
+## SOLVE (Iteration {iteration})
+{blackboard_context}
+Mission: {mission_description}
+Agents: {agent_descriptions}
+{recon_hint}{campaign_context}{operator_suffix}
+
+Solve this CTF challenge autonomously:
+- Explore the challenge files and target, identify the vulnerability
+- Develop and execute an exploit
+- Capture the flag
+
+{flag_submit_instruction}
+
+When done, report your results.
+DECISION: <continue|pivot|complete>
+ASSESSMENT: <what happened>
+NEXT_FOCUS: <what to try next if not solved>
+"""
+```
+
+**2. 修改 session mode iteration 1 路径**
+
+位置：`ooda.py:498` 的 `if iteration > 1 and session is not None:` 条件
+
+改为：
+```python
+if session is not None:
+    if iteration == 1:
+        # ── SOLVE: unified first iteration ──
+        yield PhaseTransition(
+            from_phase="",
+            to_phase="SOLVE",
+            reason=f"Iteration 1 — unified solve",
+            aggregate_id=mission.id,
+            mission=mission.mission_type.value,
+        )
+        self._log(logging.INFO, "▶ SOLVE (unified iteration 1)")
+        self._report(phase="SOLVE", iteration=1)
+
+        solve_prompt = _SOLVE_CTF.format(
+            iteration=1,
+            blackboard_context=blackboard.to_context_prompt(),
+            mission_description=mission_desc,
+            agent_descriptions=agent_desc,
+            recon_hint=(f"\n## Initial Recon\n{recon_summary}\n" if recon_summary else ""),
+            campaign_context=campaign_context,
+            operator_suffix=op_suffix,
+            flag_submit_instruction=_FLAG_SUBMIT_INSTRUCTION,
+        ) + EVENT_INSTRUCTION  # ← 只注入 1 次而非 3 次
+
+        solve_output = await session.query(solve_prompt, phase_label="SOLVE")
+        # ... extract events, check flag, parse reflection（复用现有逻辑）
+    else:
+        # ── CONTINUE: 已有的 iteration 2+ 逻辑 ──
+        # ...（现有代码不变）
+```
+
+**3. 保留 stateless fallback 路径不变**
+
+`else:` 分支（line 560-756）的 OBSERVE→ACT→REFLECT 保持原样，作为 session 不可用时的降级路径。
+
+### 删什么
+
+- 不需要删除 `_OBSERVE_CTF`、`_ACT_CTF`、`_REFLECT_CTF`（stateless 路径还需要）
+- 但 session mode 的 iteration 1 不再使用它们
+
+### 影响分析
+
+| 影响点 | 处理方式 |
+|--------|---------|
+| `PhaseTransition` 事件 | 改为 emit 一个 "SOLVE" phase 而非 3 个 |
+| `blackboard.phase_history` | 会记录 1 个 SOLVE 而非 3 个 phase。writeup 需要适配 |
+| `extract_events_from_output` | 在 solve_output 上调用一次（而非分别在 observe/act 上各调一次） |
+| `_parse_reflection` | 在 solve_output 上调用（输出末尾应包含 DECISION 字段） |
+| Flag 快速退出 | 复用现有 `_solved_in_act` 逻辑，改名为 `_solved_in_solve` |
+| `_reflection_log` | 从 solve_output 的 parse 结果中提取 assessment |
+
+### 预期效果
+
+- CTF session mode iteration 1：3 → 1 次 LLM 调用
+- 节省 ~2 × (blackboard + EVENT_INSTRUCTION) = ~1,400 tokens/iteration
+- 模型推理链不再被打断
+
+---
+
+## ARCH 2 实施方案：CTF 场景精简 EVENT_INSTRUCTION
+
+### 问题定位
+
+`base.py:328-369`，2,742 chars 的 EVENT_INSTRUCTION 列举 20+ 种事件类型，每个 phase 都注入。
+
+CTF 场景真正需要的事件只有：
+- `ChallengeSolved`（找到 flag）
+- `FlagSubmitted`（提交 flag 验证）
+- `ChallengeClassified`（可选，CLASSIFY 阶段已处理）
+
+其余 17 种事件（AssetDiscovered、VulnerabilityFound、ExploitAttempted 等）对 CTF 无业务价值。
+
+### 改什么
+
+**1. 新增 `EVENT_INSTRUCTION_CTF`**
+
+位置：`base.py` line 369 之后
+
+```python
+EVENT_INSTRUCTION_CTF = """
+## Structured Output
+When you find a flag, emit:
+    [EVENT:ChallengeSolved {"challenge_name": "...", "flag": "flag{...}", "approach": "...", "context": "ctf"}]
+When you submit a flag to a platform, emit:
+    [EVENT:FlagSubmitted {"challenge_name": "...", "flag": "flag{...}", "accepted": true, "response": "...", "context": "ctf"}]
+"""
+```
+
+~300 chars vs 2,742 chars = **减少 89%**。
+
+**2. 在 ooda.py 中按 mission type 选择指令**
+
+位置：所有拼接 `EVENT_INSTRUCTION` 的地方
+
+```python
+_event_instr = EVENT_INSTRUCTION_CTF if mission_key == "ctf" else EVENT_INSTRUCTION
+```
+
+需要改的行：
+- Line 524: `... + EVENT_INSTRUCTION + ...` → `... + _event_instr + ...`
+- Line 590: `... + EVENT_INSTRUCTION` → `... + _event_instr`
+- Line 629: `... + EVENT_INSTRUCTION` → `... + _event_instr`
+- Line 655: `... + EVENT_INSTRUCTION` → `... + _event_instr`
+- Line 682: `... + EVENT_INSTRUCTION + flag_hint` → `... + _event_instr + flag_hint`
+
+**3. fanout_topo.py 同理**
+
+位置：`fanout_topo.py` line 55 的 import 处加入 `EVENT_INSTRUCTION_CTF`，line 351, 396, 1177 处按 mission type 选择。
+
+### 删什么
+
+- 不删 `EVENT_INSTRUCTION`（pentest/zeroday 仍需完整版本）
+
+### 影响分析
+
+| 影响点 | 处理方式 |
+|--------|---------|
+| `extract_events_from_output` | 不受影响。模型少 emit 事件但解析逻辑不变 |
+| blackboard 丰富度降低 | CTF 场景不需要 AssetDiscovered 等。pentest 不受影响 |
+| writeup 质量 | CTF writeup 主要靠模型自然语言输出 + ChallengeSolved，不依赖其他事件 |
+
+### 预期效果
+
+- 每次 LLM 调用省 ~600 tokens input
+- 模型不再需要同时处理"解题"和"格式化 20 种 JSON 事件"两个任务
+- CTF 5 iterations = 节省 ~3,000 tokens
+
+---
+
+## ARCH 4 实施方案：用 flag 检测替代 `_parse_reflection()`
+
+### 问题定位
+
+`ooda.py:951-1005`，55 行 regex + heuristic 代码。强制模型输出 `DECISION: xxx / ASSESSMENT: xxx / INSIGHTS: xxx / NEXT_FOCUS: xxx` 结构化字段。
+
+实际消费这些字段的只有：
+- `decision`（line 779）：决定 continue/pivot/complete
+- `next_focus`（line 773）：作为下一轮 `previous_insights`
+- `assessment`（line 774）：写入 `_reflection_log`
+
+### 改什么
+
+**方案 A（保守）：简化 `_parse_reflection` 但保留结构**
+
+```python
+@staticmethod
+def _parse_reflection(output: str) -> dict[str, str]:
+    """Extract reflection decision from model output."""
+    result = {"decision": "continue", "assessment": "", "insights": "", "next_focus": ""}
+
+    # 1. Try structured field extraction (simple regex, no heuristic fallback)
+    import re
+    for field in ("decision", "assessment", "insights", "next_focus"):
+        m = re.search(rf"(?:^|\n)\s*{field}\s*:\s*(.+?)(?:\n|$)", output, re.IGNORECASE)
+        if m:
+            result[field] = m.group(1).strip()
+
+    # 2. Normalize decision
+    d = result["decision"].split()[0].lower().rstrip(".,;:!") if result["decision"] else ""
+    result["decision"] = d if d in ("complete", "pivot", "continue") else "continue"
+
+    return result
+```
+
+15 行替代 55 行。去掉 heuristic fallback（"objective achieved" 等关键词检测），因为：
+- Flag 发现已经通过 `_solved_in_act` / `_solved_in_continue` + `ChallengeSolved` 事件处理
+- Stagnation 已经通过 `_stagnation_count` 处理（line 761-789）
+- Heuristic 的存在只是 regex 失败时的补偿，而非业务需求
+
+**方案 B（激进）：完全删除 `_parse_reflection`，用状态检测替代**
+
+```python
+def _infer_decision(self, blackboard, output, iteration, max_iter):
+    """Infer iteration decision from state, not structured output."""
+    # Flag found → done
+    if blackboard.solved_flags:
+        return {"decision": "complete", "assessment": "Flag captured",
+                "insights": "", "next_focus": ""}
+
+    # Extract next_focus from output tail (best-effort)
+    import re
+    nf = re.search(r"NEXT_FOCUS\s*:\s*(.+?)(?:\n|$)", output, re.IGNORECASE)
+    next_focus = nf.group(1).strip() if nf else ""
+
+    # Model explicitly says complete?
+    tail = output[-500:].lower()
+    if any(p in tail for p in ("decision: complete", "challenge solved", "flag found")):
+        return {"decision": "complete", "assessment": tail[-200:],
+                "insights": "", "next_focus": ""}
+
+    return {"decision": "continue", "assessment": "",
+            "insights": "", "next_focus": next_focus}
+```
+
+### 哪些代码受影响
+
+无需改动消费方。`_parse_reflection` 返回的 dict 格式不变（`decision`, `assessment`, `insights`, `next_focus`），所有 `.get()` 调用（line 773, 774, 779, 798, 805-808）都兼容。
+
+### 建议
+
+推荐方案 A。保守、改动小、不改变接口。方案 B 更激进但风险更高（可能误判 complete/continue）。
+
+---
+
+## ARCH 5 实施方案：Session 作为默认模式 + 保留可切换选项
+
+### 设计更新
+
+不再是 "session-only"，而是：
+- **默认 session mode**（所有 mission type）
+- **保留 stateless mode 作为 fallback / 配置选项**
+- 通过 `topology.session_mode: "auto" | "session" | "stateless"` 控制
+
+### 改什么
+
+**1. 配置项**
+
+位置：`miya/shared/config.py`（或等效配置文件）
+
+```python
+# topology section
+"session_mode": "auto",  # "auto" = session with stateless fallback
+                          # "session" = session only, fail if connect fails
+                          # "stateless" = never use session
+```
+
+**2. Session 创建扩展到所有 mission type**
+
+位置：`ooda.py:442`
+
+当前：
+```python
+use_session = mission_key == "ctf" and self._coordinator is None
+```
+
+改为：
+```python
+_mode = _get_topology_config().get("session_mode", "auto")
+use_session = (
+    _mode != "stateless"
+    and self._coordinator is None
+)
+```
+
+**3. Iteration 1 统一 prompt 扩展到 generic mission**
+
+新增 `_SOLVE_GENERIC` prompt（类似 ARCH 1 的 `_SOLVE_CTF`）：
+
+```python
+_SOLVE_GENERIC = """\
+## SOLVE (Iteration {iteration})
+{blackboard_context}
+Mission: {mission_description}
+Agents: {agent_descriptions}
+{campaign_context}{operator_suffix}
+
+Execute the next phase of this security assessment autonomously:
+- Gather intelligence on the target
+- Identify and analyze vulnerabilities
+- Attempt exploitation where feasible
+- Document all findings
+
+When done, report your results.
+DECISION: <continue|pivot|complete>
+ASSESSMENT: <what happened>
+NEXT_FOCUS: <what to do next>
+"""
+```
+
+**4. Session connect failure 处理**
+
+```python
+if _mode == "auto":
+    # fallback to stateless
+    session = None
+elif _mode == "session":
+    # retry 3 times, then raise
+    for attempt in range(3):
+        try:
+            await session.connect()
+            break
+        except Exception:
+            if attempt == 2:
+                raise
+            await asyncio.sleep(2 ** attempt)
+```
+
+**5. 保留 stateless 路径但标记为 legacy**
+
+不删除 lines 561-756 的 OBSERVE→ORIENT→DECIDE→ACT→REFLECT 路径，但加注释：
+
+```python
+# ── LEGACY STATELESS PATH ──
+# Used when session_mode="stateless" or session connect failed in "auto" mode.
+# For session mode, see the unified SOLVE/CONTINUE path above.
+```
+
+### 不删什么
+
+- 不删 stateless code path
+- 不删 OBSERVE/ORIENT/DECIDE/ACT/REFLECT prompt templates
+- 不删 `_smart_truncate`（stateless 路径仍需要）
+
+### 影响分析
+
+| 影响点 | 处理方式 |
+|--------|---------|
+| fanout_topo 的 sub-OODA | 自动受益——sub-OODA 调用 `OODATopology.execute()`，走同样的 session 路径 |
+| pentest/zeroday 场景 | 新增 `_SOLVE_GENERIC` 和 `_CONTINUE_GENERIC`（已存在）支持 |
+| 配置变更 | 新增 `session_mode` 配置项 |
+
+---
+
+## ARCH 6 实施方案：CONTINUE prompt 移除 blackboard 注入
+
+### 问题定位
+
+`ooda.py:510-513`：
+```python
+bb_checkpoint = (
+    f"\n## Blackboard Checkpoint\n"
+    f"{blackboard.to_context_prompt()}\n"
+)
+```
+
+这段在 CONTINUE prompt 中注入了完整 blackboard。但在 session mode 下，模型已经有所有历史 context。blackboard 是对已有信息的**低质摘要**。
+
+### 改什么
+
+位置：`ooda.py:510-513`
+
+```python
+# Session mode: model already has full context, don't inject blackboard summary.
+# Only inject minimal state updates (new HITL messages, flag status).
+bb_checkpoint = ""
+if blackboard.solved_flags:
+    # Remind the model that flags were already found (defensive)
+    solved = ", ".join(f"{f.challenge_name}: {f.flag}" for f in blackboard.solved_flags)
+    bb_checkpoint = f"\n## Already Solved\n{solved}\n"
+```
+
+### 特殊情况
+
+如果 ARCH 5 的 `session_mode="stateless"` 模式下运行，这段不会执行（stateless 不走 CONTINUE 路径），所以没有兼容性问题。
+
+### 预期效果
+
+- 每次 CONTINUE 调用省 ~200-500 tokens
+- 避免低质量摘要覆盖模型的高保真 session 记忆
+- `to_context_prompt()` 调用次数从 6 次/iteration 降到 1 次（仅 iteration 1）
+
+### 注意
+
+**这与之前的 INSIGHT 1（往 CONTINUE 注入 blackboard）矛盾。** 经过更深入分析后的结论：
+- INSIGHT 1 的初衷是让 CONTINUE 有 blackboard 上下文
+- 但 session mode 下模型已有 context，注入只是噪音
+- **建议回退 INSIGHT 1 的修改**，改为本方案
+
+---
+
+## ARCH 7 实施方案：清理截断代码（依赖 ARCH 5）
+
+### 前置条件
+
+仅当 ARCH 5 实施后，stateless 路径标记为 legacy 时才有意义。
+
+### 如果保留 stateless 路径
+
+**不做任何改动**。`_smart_truncate` 在 stateless 路径中仍然需要（line 628, 654, 680, 747）。
+
+### 如果未来完全删除 stateless 路径
+
+删除：
+- `_smart_truncate()` 函数（line 247-256）
+- 所有 `_smart_truncate()` 调用（4 处）
+- `[:4000]` 和 `[:8000]` 的硬编码截断
+
+### 当前建议
+
+**暂不实施**。等 ARCH 5 验证 session mode 在所有场景下稳定后，再考虑删除 stateless 路径及其依赖的截断逻辑。
+
+---
+
+## 实施依赖图
+
+```
+ARCH 2 (精简 events)  ─── 独立，可立即实施
+ARCH 6 (移除 bb 注入)  ─── 独立，可立即实施
+ARCH 4 (简化 reflection) ─── 独立，可立即实施
+
+ARCH 1 (合并 iteration 1) ─── 独立，但建议在 ARCH 2 之后（省 event 噪音后效果更好）
+ARCH 5 (session 默认)  ─── 依赖 ARCH 1（需要 _SOLVE_GENERIC prompt）
+ARCH 7 (清理截断)  ─── 依赖 ARCH 5（stateless 路径完全废弃后才安全）
+```
+
+**推荐实施顺序**：ARCH 2 → ARCH 6 → ARCH 4 → ARCH 1 → ARCH 5 → ARCH 7
+
+---
+
 # 业务能力提升洞察（深入反思后）
 
 以下是经过代码走读、信息流追踪、逐条反思后确认的**真正能提升 miya-bot 解题/渗透能力**的改进点。
