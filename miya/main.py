@@ -1003,6 +1003,7 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
         "SinkConfirmed": "bold yellow",
         "PrivilegeEscalated": "bold magenta",
         "MissionFailed": "bold red",
+        "TargetUnreachable": "bold red",
         "PhaseTransition": "dim",
     }
 
@@ -1012,7 +1013,8 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
 
     def _event_detail(ev: DomainEvent) -> str:
         for attr in ("cve_id", "vulnerability", "host", "ip", "software",
-                      "title", "challenge_name", "technique", "phase"):
+                      "title", "challenge_name", "technique", "phase",
+                      "target_url"):
             val = getattr(ev, attr, None)
             if val:
                 return str(val)

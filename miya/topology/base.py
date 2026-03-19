@@ -560,7 +560,9 @@ class SDKSession:
             self._agent_defs, self._mcp_names, max_turns=self._max_turns,
         )
         self._client = ClaudeSDKClient(options)
-        await self._client.connect(initial_prompt, session_id=self._session_id)
+        # NOTE: ClaudeSDKClient.connect() does not support session_id yet.
+        # Session ID is stored locally for future SDK support.
+        await self._client.connect(initial_prompt)
 
     async def query(self, prompt: str, *, phase_label: str = "") -> str:
         """Send a prompt and collect the text response.

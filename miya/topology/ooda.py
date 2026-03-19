@@ -249,10 +249,24 @@ class OODATopology:
         self,
         max_iterations: int | None = None,
         coordinator: CoordinatorPort | None = None,
+        challenge_tag: str = "",
+        on_progress: Any | None = None,
     ) -> None:
         cfg = _get_topology_config()
         self._max_iterations = max_iterations if max_iterations is not None else cfg["ooda_max_iterations"]
         self._coordinator = coordinator
+        self._tag = f"[{challenge_tag}] " if challenge_tag else ""
+        self._challenge_tag = challenge_tag
+        self._on_progress = on_progress  # callback(challenge_name, **kwargs)
+
+    def _log(self, level: int, msg: str, *args: Any) -> None:
+        """Log with optional challenge tag prefix."""
+        logger.log(level, "%s%s", self._tag, msg % args if args else msg)
+
+    def _report(self, **kwargs: Any) -> None:
+        """Report progress to display callback."""
+        if self._on_progress and self._challenge_tag:
+            self._on_progress(self._challenge_tag, **kwargs)
 
     @property
     def name(self) -> str:
@@ -314,7 +328,7 @@ class OODATopology:
             operator_prompt = (
                 f"\n\n## Operator Instructions\n{mission.prompt}\n"
             )
-            logger.info("📋 Operator prompt: %s", mission.prompt[:120])
+            self._log(logging.INFO, "📋 Operator prompt: %s", mission.prompt[:120])
 
         observe_output = ""
         orient_output = ""
@@ -345,9 +359,10 @@ class OODATopology:
                 )
                 yield classify_event
                 blackboard.apply(classify_event)
-                logger.info("Auto-classified as: %s", classified_category)
+                self._log(logging.INFO, "Auto-classified as: %s", classified_category)
+                self._report(category=classified_category, status="classifying")
                 if recon_summary:
-                    logger.info("  recon summary: %s", recon_summary[:120])
+                    self._log(logging.INFO, "  recon summary: %s", recon_summary[:120])
 
         # ── Determine agents for session ──────────────────────────
         # For CTF with known category, use specialist agent
@@ -373,10 +388,11 @@ class OODATopology:
             try:
                 await session.connect()
             except Exception:
-                logger.warning(
+                self._log(
+                    logging.WARNING,
                     "SDKSession connect failed — falling back to stateless mode",
-                    exc_info=True,
                 )
+                logger.debug("Session connect error details", exc_info=True)
                 session = None
 
         try:
@@ -387,12 +403,14 @@ class OODATopology:
                     if removed:
                         logger.debug("Blackboard compacted: %s", removed)
 
-                logger.info(
+                self._log(
+                    logging.INFO,
                     "━━━━ OODA #%d/%d ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
                     iteration, self._max_iterations,
                 )
+                self._report(iteration=iteration, status="running")
                 if previous_insights:
-                    logger.info("  focus: %s", previous_insights[:120])
+                    self._log(logging.INFO, "  focus: %s", previous_insights[:120])
 
                 # ── Drain HITL ────────────────────────────────────
                 hitl_events, op_suffix = _drain_hitl()
@@ -410,7 +428,8 @@ class OODATopology:
                         mission=mission.mission_type.value,
                     )
 
-                    logger.info("▶ CONTINUE (autonomous iteration)")
+                    self._log(logging.INFO, "▶ CONTINUE (autonomous iteration)")
+                    self._report(phase="CONTINUE", iteration=iteration)
                     continue_tmpl = _CONTINUE_CTF if mission_key == "ctf" else _CONTINUE_GENERIC
                     continue_prompt = continue_tmpl.format(
                         iteration=iteration,
@@ -445,7 +464,8 @@ class OODATopology:
                     yield phase_event
                     blackboard.apply(phase_event)
 
-                    logger.info("▶ OBSERVE — %s", self._PHASE_DESC["OBSERVE"])
+                    self._log(logging.INFO, "▶ OBSERVE — %s", self._PHASE_DESC["OBSERVE"])
+                    self._report(phase="OBSERVE")
                     focus_hint = ""
                     if previous_insights:
                         focus_hint = f"\nFocus from last REFLECT: {previous_insights}\n"
@@ -491,7 +511,8 @@ class OODATopology:
                             aggregate_id=mission.id,
                             mission=mission.mission_type.value,
                         )
-                        logger.info("▶ ORIENT — %s", self._PHASE_DESC["ORIENT"])
+                        self._log(logging.INFO, "▶ ORIENT — %s", self._PHASE_DESC["ORIENT"])
+                        self._report(phase="ORIENT")
                         orient_prompt = _get_phase_prompt(mission_key, "ORIENT").format(
                             blackboard_context=blackboard.to_context_prompt(),
                             mission_description=mission_desc,
@@ -515,7 +536,8 @@ class OODATopology:
                             aggregate_id=mission.id,
                             mission=mission.mission_type.value,
                         )
-                        logger.info("▶ DECIDE — %s", self._PHASE_DESC["DECIDE"])
+                        self._log(logging.INFO, "▶ DECIDE — %s", self._PHASE_DESC["DECIDE"])
+                        self._report(phase="DECIDE")
                         decide_prompt = _get_phase_prompt(mission_key, "DECIDE").format(
                             blackboard_context=blackboard.to_context_prompt(),
                             mission_description=mission_desc,
@@ -538,7 +560,8 @@ class OODATopology:
                         aggregate_id=mission.id,
                         mission=mission.mission_type.value,
                     )
-                    logger.info("▶ ACT — %s", self._PHASE_DESC["ACT"])
+                    self._log(logging.INFO, "▶ ACT — %s", self._PHASE_DESC["ACT"])
+                    self._report(phase="ACT")
                     flag_hint = _FLAG_SUBMIT_INSTRUCTION if mission_key == "ctf" else ""
                     act_prompt = _get_phase_prompt(mission_key, "ACT").format(
                         blackboard_context=blackboard.to_context_prompt(),
@@ -575,7 +598,8 @@ class OODATopology:
                         aggregate_id=mission.id,
                         mission=mission.mission_type.value,
                     )
-                    logger.info("▶ REFLECT — %s", self._PHASE_DESC["REFLECT"])
+                    self._log(logging.INFO, "▶ REFLECT — %s", self._PHASE_DESC["REFLECT"])
+                    self._report(phase="REFLECT")
                     reflect_prompt = _get_phase_prompt(mission_key, "REFLECT").format(
                         blackboard_context=blackboard.to_context_prompt(),
                         mission_description=mission_desc,
@@ -595,12 +619,15 @@ class OODATopology:
                 # ── Common: process reflection decision ───────────
                 previous_insights = decision.get("next_focus", "") or decision.get("insights", "")
                 d = decision.get("decision", "continue")
-                _DECISION_ICONS = {"complete": "✓", "pivot": "↻", "continue": "⟳"}
-                logger.info(
+                _DECISION_ICONS = {"complete": "\u2713", "pivot": "\u21bb", "continue": "\u27f3"}
+                self._log(
+                    logging.INFO,
                     "%s %s — %s",
                     _DECISION_ICONS.get(d, "?"), d.upper(),
                     (decision.get("assessment", "") or decision.get("insights", ""))[:120],
                 )
+                if d == "complete":
+                    self._report(status="solved", phase="DONE")
 
                 reflection_event = ReflectionCompleted(
                     aggregate_id=mission.id,
@@ -616,10 +643,13 @@ class OODATopology:
                     break
             else:
                 # Loop exhausted without explicit completion
-                logger.warning(
-                    f"OODA loop exhausted after {self._max_iterations} iterations "
-                    f"without explicit completion"
+                self._log(
+                    logging.WARNING,
+                    "OODA loop exhausted after %d iterations "
+                    "without explicit completion",
+                    self._max_iterations,
                 )
+                self._report(status="failed", phase="FAILED")
         finally:
             # Always clean up the session
             if session is not None:
@@ -747,7 +777,8 @@ class OODATopology:
             file_info=f"Operator hint: {mission.prompt[:200]}" if mission.prompt else "",
         )
 
-        logger.info("▶ CLASSIFY — exploring and classifying challenge")
+        self._log(logging.INFO, "▶ CLASSIFY — exploring and classifying challenge")
+        self._report(phase="CLASSIFY", status="classifying")
         try:
             output = await self._run_coordinator(
                 classify_prompt, mission, agents, blackboard,

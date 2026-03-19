@@ -249,6 +249,17 @@ class ChallengeIdentified(DomainEvent):
 
 
 @dataclass(frozen=True)
+class TargetUnreachable(DomainEvent):
+    """Emitted when a challenge target fails pre-flight connectivity check."""
+    event_type: ClassVar[str] = "ctf.target_unreachable"
+    challenge_name: str = ""
+    target_url: str = ""
+    error: str = ""
+    context: str = "ctf"
+    mission: str = "ctf"
+
+
+@dataclass(frozen=True)
 class ChallengeSolved(DomainEvent):
     event_type: ClassVar[str] = "ctf.challenge_solved"
     challenge_name: str = ""

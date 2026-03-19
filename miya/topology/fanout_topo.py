@@ -44,6 +44,7 @@ from miya.shared.events import (
     ChallengeIdentified,
     ChallengeClassified,
     PhaseTransition,
+    TargetUnreachable,
 )
 from miya.shared.ports import EventStorePort
 from miya.shared.types import Mission, MissionType, Target
@@ -293,15 +294,28 @@ class FanoutTopology:
 
             # ── Pre-flight connectivity probe ──────────────────
             reachable, unreachable = await self._probe_targets(challenges)
-            if unreachable:
-                logger.warning(
-                    "Unreachable challenges: %s",
-                    ", ".join(f"{c['name']} ({c['target']})" for c in unreachable),
-                )
             if reachable:
                 logger.info(
                     "Pre-flight: %d/%d targets reachable",
                     len(reachable), len(challenges),
+                )
+            if unreachable:
+                # Yield TargetUnreachable events so the operator sees them
+                for uc in unreachable:
+                    ev = TargetUnreachable(
+                        challenge_name=uc["name"],
+                        target_url=uc.get("target", ""),
+                        error="TCP connect failed",
+                        aggregate_id=mission.id,
+                        mission=mission.mission_type.value,
+                    )
+                    yield ev
+                    blackboard.apply(ev)
+
+                # ── HITL decision: block until operator responds ──
+                challenges = await self._handle_unreachable(
+                    challenges, reachable, unreachable,
+                    operator_queue, mission,
                 )
         else:
             # No pre-defined list — discover via agent
@@ -402,6 +416,17 @@ class FanoutTopology:
             len(challenges), self._max_parallel,
         )
 
+        # ── Rich Live display for parallel progress ───────────
+        from miya.topology.fanout_display import FanoutDisplay
+        display = FanoutDisplay(
+            [dict(ch, _max_iter=self._max_iter) for ch in challenges],
+            max_columns=self._max_parallel,
+        )
+
+        def _on_progress(challenge_name: str, **kwargs: Any) -> None:
+            """Callback from sub-OODAs to update display state."""
+            display.update(challenge_name, **kwargs)
+
         # Semaphore for concurrency control
         sem = asyncio.Semaphore(self._max_parallel)
         event_queue: asyncio.Queue[DomainEvent | None] = asyncio.Queue()
@@ -414,15 +439,27 @@ class FanoutTopology:
             async with sem:
                 ch_name = challenge["name"]
                 ch_cat = challenge.get("category", "")
-                logger.info("  → Solving: %s (%s)", ch_name, ch_cat or "unknown")
+                display.update(ch_name, status="running",
+                               started_at=__import__("time").monotonic())
+                display.log_event(f"→ Solving: {ch_name} ({ch_cat or 'unknown'})")
 
                 # Create sub-mission for this challenge
-                # Use per-challenge target URL if available, else fall back to mission target
                 ch_target = challenge.get("target", mission.target.uri)
                 ch_files = challenge.get("file_paths", [])
 
                 # Build challenge-specific prompt (NO general instructions leak)
+                is_whitebox = challenge.get("_whitebox", False)
                 sub_prompt = f"Solve challenge: {ch_name}."
+                if is_whitebox:
+                    sub_prompt += (
+                        "\n\n⚠ WHITEBOX MODE: The target service is unreachable. "
+                        "Analyze source code ONLY. Find vulnerabilities, construct "
+                        "exploit payloads, and determine the flag from static analysis. "
+                        "Do NOT attempt network connections to the target."
+                    )
+                    original_target = challenge.get("_original_target", "")
+                    if original_target:
+                        sub_prompt += f"\nOriginal target (offline): {original_target}"
                 if ch_files:
                     sub_prompt += f"\nChallenge attachments: {', '.join(ch_files)}"
 
@@ -440,7 +477,6 @@ class FanoutTopology:
                 sub_mission.start()
 
                 sub_bb = Blackboard()
-                # Seed sub-blackboard with challenge context
                 if ch_files:
                     from miya.shared.blackboard import ChallengeView
                     sub_bb.challenges.append(ChallengeView(
@@ -456,7 +492,6 @@ class FanoutTopology:
                         reasoning="from enumerate phase",
                     )
 
-                # Select agent subset based on category
                 sub_agents = agents
                 if ch_cat:
                     from miya.topology.ooda import OODATopology as _OT
@@ -467,6 +502,8 @@ class FanoutTopology:
                 ooda = OODATopology(
                     max_iterations=self._max_iter,
                     coordinator=self._coordinator,
+                    challenge_tag=ch_name,
+                    on_progress=_on_progress,
                 )
 
                 try:
@@ -475,21 +512,31 @@ class FanoutTopology:
                             sub_mission, sub_bb, sub_agents, event_store,
                             campaign=campaign,
                         ):
-                            # Filter out sub-mission lifecycle events to avoid
-                            # polluting the parent mission's event stream (BUG-2)
                             if ev.__class__.event_type not in _SUB_MISSION_FILTER:
                                 await event_queue.put(ev)
+                            # Update display on key events
+                            from miya.shared.events import ChallengeSolved
+                            if isinstance(ev, ChallengeSolved):
+                                display.update(ch_name, status="solved",
+                                               flag=ev.flag, phase="DONE")
+                                display.log_event(
+                                    f"✓ {ch_name} SOLVED: {ev.flag[:40]}"
+                                )
 
                     await asyncio.wait_for(
                         _run_ooda(),
                         timeout=self._per_challenge_timeout,
                     )
                 except asyncio.TimeoutError:
+                    display.update(ch_name, status="timeout", phase="TIMEOUT")
+                    display.log_event(f"⏰ {ch_name} timed out")
                     logger.warning(
                         "Challenge %s timed out after %.0fs",
                         ch_name, self._per_challenge_timeout,
                     )
                 except Exception:
+                    display.update(ch_name, status="failed", phase="FAILED")
+                    display.log_event(f"✗ {ch_name} failed")
                     logger.error("Challenge %s failed", ch_name, exc_info=True)
 
         # Launch all challenge solvers
@@ -498,7 +545,6 @@ class FanoutTopology:
             for c in challenges
         ]
 
-        # Use a sentinel to signal completion instead of polling (BUG-1 fix)
         _SENTINEL = None
 
         async def _wait_all() -> None:
@@ -507,13 +553,14 @@ class FanoutTopology:
 
         waiter = asyncio.create_task(_wait_all())
 
-        # Drain events until sentinel received — no race condition
-        while True:
-            ev = await event_queue.get()
-            if ev is None:
-                break
-            yield ev
-            blackboard.apply(ev)
+        # Drain events with display active
+        with display:
+            while True:
+                ev = await event_queue.get()
+                if ev is None:
+                    break
+                yield ev
+                blackboard.apply(ev)
 
         await waiter  # ensure cleanup
 
@@ -626,6 +673,23 @@ class FanoutTopology:
             yield ev
             blackboard.apply(ev)
 
+        # ── Log PREPARE summary ──────────────────────────────────
+        file_map = self._build_file_map(blackboard)
+        total_files = sum(len(v) for v in file_map.values())
+        if general_instructions:
+            logger.info(
+                "  executed %d general instruction(s)", len(general_instructions),
+            )
+        if file_map:
+            logger.info(
+                "  discovered %d attachment(s) across %d challenge(s)",
+                total_files, len(file_map),
+            )
+            for ch_name, paths in file_map.items():
+                logger.info("    %s: %s", ch_name, ", ".join(paths[:5])
+                            + (f" (+{len(paths)-5} more)" if len(paths) > 5 else ""))
+        elif predefined:
+            logger.info("  no attachments discovered for %d challenge(s)", len(predefined))
         logger.info("PREPARE phase complete")
 
     @staticmethod
@@ -638,6 +702,172 @@ class FanoutTopology:
         for ch_view in blackboard.challenges:
             if ch_view.file_paths:
                 result[ch_view.name] = list(ch_view.file_paths)
+        return result
+
+    async def _handle_unreachable(
+        self,
+        all_challenges: list[dict[str, Any]],
+        reachable: list[dict[str, Any]],
+        unreachable: list[dict[str, Any]],
+        operator_queue: asyncio.Queue[str] | None,
+        mission: Mission,
+    ) -> list[dict[str, Any]]:
+        """Block and wait for operator decision on unreachable targets.
+
+        Operator commands (via HITL queue):
+            skip <name>      — remove challenge from solve list
+            skip all         — remove all unreachable challenges
+            url <name> <url> — update target URL, re-probe
+            whitebox <name>  — switch to pure source-code analysis (no network)
+            whitebox all     — whitebox all unreachable challenges
+            continue         — proceed with all challenges (attempt anyway)
+
+        Returns the updated challenge list.
+        """
+        unreachable_names = {c["name"] for c in unreachable}
+
+        logger.warning(
+            "⚠ %d/%d targets unreachable — waiting for operator decision:",
+            len(unreachable), len(all_challenges),
+        )
+        for uc in unreachable:
+            logger.warning(
+                "  ✗ %s → %s", uc["name"], uc.get("target", "(no target)"),
+            )
+        logger.info(
+            "  Commands: skip <name|all> | url <name> <new_url> | "
+            "whitebox <name|all> | continue"
+        )
+
+        if operator_queue is None:
+            logger.warning(
+                "No operator queue — cannot block for input. "
+                "Skipping unreachable challenges."
+            )
+            return reachable
+
+        # Block until we get a valid resolution for all unreachable challenges
+        resolved: set[str] = set()
+        result = list(reachable)
+
+        while resolved != unreachable_names:
+            try:
+                msg = await operator_queue.get()
+            except asyncio.CancelledError:
+                logger.warning("Cancelled while waiting — skipping unreachable")
+                return reachable
+
+            msg = msg.strip()
+            parts = msg.split(None, 2)
+            cmd = parts[0].lower() if parts else ""
+
+            if cmd == "continue":
+                # Proceed with everything, including unreachable
+                logger.info("Operator: continue — proceeding with all challenges")
+                return all_challenges
+
+            elif cmd == "skip":
+                target_name = parts[1] if len(parts) > 1 else ""
+                if target_name.lower() == "all":
+                    logger.info("Operator: skip all unreachable challenges")
+                    resolved = set(unreachable_names)
+                elif target_name in unreachable_names:
+                    logger.info("Operator: skip %s", target_name)
+                    resolved.add(target_name)
+                else:
+                    logger.warning(
+                        "Unknown challenge '%s'. Unreachable: %s",
+                        target_name, ", ".join(unreachable_names - resolved),
+                    )
+                    continue
+
+            elif cmd == "url" and len(parts) >= 3:
+                target_name = parts[1]
+                new_url = parts[2]
+                if target_name in unreachable_names:
+                    # Update the challenge's target URL
+                    for ch in all_challenges:
+                        if ch["name"] == target_name:
+                            old_url = ch.get("target", "")
+                            ch["target"] = new_url
+                            logger.info(
+                                "Operator: url %s → %s (was %s)",
+                                target_name, new_url, old_url,
+                            )
+                            # Re-probe the new URL
+                            probe_ok, probe_fail = await self._probe_targets([ch])
+                            if probe_ok:
+                                logger.info("  ✓ %s now reachable", target_name)
+                                result.append(ch)
+                                resolved.add(target_name)
+                            else:
+                                logger.warning(
+                                    "  ✗ %s still unreachable at %s",
+                                    target_name, new_url,
+                                )
+                            break
+                else:
+                    logger.warning(
+                        "Unknown challenge '%s'. Unreachable: %s",
+                        target_name, ", ".join(unreachable_names - resolved),
+                    )
+
+            elif cmd == "whitebox":
+                target_name = parts[1] if len(parts) > 1 else ""
+                names_to_whitebox: list[str] = []
+                if target_name.lower() == "all":
+                    names_to_whitebox = list(unreachable_names - resolved)
+                elif target_name in unreachable_names:
+                    names_to_whitebox = [target_name]
+                else:
+                    logger.warning(
+                        "Unknown challenge '%s'. Unreachable: %s",
+                        target_name, ", ".join(unreachable_names - resolved),
+                    )
+                    continue
+
+                for name in names_to_whitebox:
+                    for ch in all_challenges:
+                        if ch["name"] == name:
+                            ch_files = ch.get("file_paths", [])
+                            if not ch_files:
+                                logger.warning(
+                                    "  %s has no source files — "
+                                    "whitebox analysis may be limited",
+                                    name,
+                                )
+                            # Mark as whitebox mode: clear network target,
+                            # set target to file paths
+                            ch["_whitebox"] = True
+                            ch["_original_target"] = ch.get("target", "")
+                            if ch_files:
+                                ch["target"] = ch_files[0]
+                            logger.info(
+                                "Operator: whitebox %s — source-only analysis "
+                                "(files: %s)",
+                                name,
+                                ", ".join(ch_files[:3]) or "(none)",
+                            )
+                            result.append(ch)
+                            resolved.add(name)
+                            break
+
+            else:
+                logger.info(
+                    "Unknown command '%s'. Use: skip <name|all> | "
+                    "url <name> <new_url> | whitebox <name|all> | continue",
+                    msg,
+                )
+                continue
+
+            # Show remaining unresolved
+            remaining = unreachable_names - resolved
+            if remaining:
+                logger.info(
+                    "  %d unresolved: %s",
+                    len(remaining), ", ".join(remaining),
+                )
+
         return result
 
     async def _probe_targets(
