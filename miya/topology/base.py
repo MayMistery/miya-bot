@@ -772,10 +772,11 @@ class SDKSession:
                         )
 
             elif isinstance(message, ResultMessage):
+                api_ms = getattr(message, "duration_api_ms", 0) or 0
+                cost = getattr(message, "total_cost_usd", 0) or 0
+                turns = getattr(message, "num_turns", 0) or 0
+                _cost_tracker.add(cost, turns, api_ms)
                 if logger.isEnabledFor(TRACE):
-                    api_ms = getattr(message, "duration_api_ms", 0) or 0
-                    cost = getattr(message, "total_cost_usd", 0) or 0
-                    turns = getattr(message, "num_turns", 0) or 0
                     logger.log(TRACE, "%s⏱ SDK: %dms, %d turns, $%.4f",
                                tag, api_ms, turns, cost)
 

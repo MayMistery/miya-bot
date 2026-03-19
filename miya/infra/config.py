@@ -118,21 +118,28 @@ def save_config(key: str, value: str, *, is_global: bool = False) -> str:
 def apply_config(cfg_dict: dict[str, Any]) -> dict[str, str]:
     """Apply persisted config to the runtime cfg dict.
 
-    Loads saved config and merges into cfg_dict (saved values are
-    defaults that runtime overrides take precedence over).
-
-    Also applies api_key/base_url to environment.
+    Saved values unconditionally override defaults in cfg_dict.
+    Also applies api_key/base_url to environment and sets log level.
 
     Returns the loaded persistent config.
     """
     saved = load_config()
 
     for key in ("model", "topology", "verbose"):
-        if key in saved and key not in cfg_dict:
+        if key in saved:
             cfg_dict[key] = saved[key]
-        elif key in saved:
-            # Only apply if runtime still has the default
-            pass  # runtime cfg wins
+
+    # Apply verbose level
+    if "verbose" in saved:
+        _level_map = {
+            "info": logging.INFO,
+            "debug": logging.DEBUG,
+            "warning": logging.WARNING,
+            "error": logging.ERROR,
+        }
+        level = _level_map.get(saved["verbose"])
+        if level is not None:
+            logging.getLogger("miya").setLevel(level)
 
     # Apply env vars
     if "api_key" in saved and not os.environ.get("ANTHROPIC_API_KEY"):

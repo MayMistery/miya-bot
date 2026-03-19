@@ -461,13 +461,22 @@ class MissionService:
                         logger.warning("Failed to record solved challenge in campaign", exc_info=True)
                     # Auto-generate writeup file
                     if event.flag and mission_type == MissionType.CTF:
-                        # Collect events for this challenge's writeup
+                        # Collect events for this challenge's writeup.
+                        # Include challenge-specific events + general events
+                        # that share the same aggregate_id (sub-mission).
+                        ch_agg_id = event.aggregate_id
                         ch_events = [
                             e for e in collected_events
                             if getattr(e, "challenge_name", "") == event.challenge_name
-                            or type(e).__name__ in (
-                                "PhaseTransition", "ReflectionCompleted",
-                                "OperatorMessage",
+                            or (
+                                e.aggregate_id == ch_agg_id
+                                and ch_agg_id
+                                and type(e).__name__ in (
+                                    "PhaseTransition", "ReflectionCompleted",
+                                    "OperatorMessage", "ExploitAttempted",
+                                    "ExploitSucceeded", "ExploitFailed",
+                                    "VulnerabilityFound", "AssetDiscovered",
+                                )
                             )
                         ]
                         try:
