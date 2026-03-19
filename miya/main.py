@@ -1474,10 +1474,13 @@ async def _interactive_loop(db: str, model: str = "opus", unlimited: bool = Fals
                         try:
                             msg = _hitl_q.get_nowait()
                             _op_q.put_nowait(msg)
-                            console.print(
-                                f"  [yellow]\U0001f4e8 queued:"
-                                f"[/yellow] {msg[:80]}"
-                            )
+                            # Don't show "queued" for display-only HITL commands
+                            _cmd0 = msg.split(None, 1)[0].lower() if msg.strip() else ""
+                            if _cmd0 not in ("status", "logs", "attach", "detach", "help"):
+                                console.print(
+                                    f"  [yellow]\U0001f4e8 queued:"
+                                    f"[/yellow] {msg[:80]}"
+                                )
                         except _aio.QueueEmpty:
                             break
                     if _bg_requested_fg.is_set():
@@ -2174,10 +2177,13 @@ async def _interactive_loop(db: str, model: str = "opus", unlimited: bool = Fals
                         try:
                             msg = hitl_queue.get_nowait()
                             op_queue.put_nowait(msg)
-                            console.print(
-                                f"  [yellow]\U0001f4e8 queued:"
-                                f"[/yellow] {msg[:80]}"
-                            )
+                            # Don't show "queued" for display-only HITL commands
+                            _cmd0 = msg.split(None, 1)[0].lower() if msg.strip() else ""
+                            if _cmd0 not in ("status", "logs", "attach", "detach", "help"):
+                                console.print(
+                                    f"  [yellow]\U0001f4e8 queued:"
+                                    f"[/yellow] {msg[:80]}"
+                                )
                         except _aio.QueueEmpty:
                             break
 
