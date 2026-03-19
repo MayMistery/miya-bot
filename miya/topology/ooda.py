@@ -454,6 +454,11 @@ class OODATopology:
                 session = None
 
         try:
+            _stagnation_count = 0
+            _prev_finding_count = len(blackboard.findings)
+            _prev_exploit_count = len(blackboard.exploit_attempts)
+            _STAGNATION_THRESHOLD = 3  # consecutive iterations with no progress
+
             for iteration in range(1, self._max_iterations + 1):
                 # Compact blackboard between iterations to bound memory growth
                 if iteration > 1:
@@ -722,9 +727,33 @@ class OODATopology:
 
                     decision = self._parse_reflection(reflect_output)
 
+                # ── Stagnation detection ────────────────────────
+                _cur_finding_count = len(blackboard.findings)
+                _cur_exploit_count = len(blackboard.exploit_attempts)
+                if (_cur_finding_count == _prev_finding_count
+                        and _cur_exploit_count == _prev_exploit_count):
+                    _stagnation_count += 1
+                else:
+                    _stagnation_count = 0
+                _prev_finding_count = _cur_finding_count
+                _prev_exploit_count = _cur_exploit_count
+
                 # ── Common: process reflection decision ───────────
                 previous_insights = decision.get("next_focus", "") or decision.get("insights", "")
                 d = decision.get("decision", "continue")
+
+                if d == "continue" and _stagnation_count >= _STAGNATION_THRESHOLD:
+                    self._log(
+                        logging.WARNING,
+                        "⚠ Stagnation detected: %d iterations with no new findings "
+                        "or exploit attempts — ending loop",
+                        _stagnation_count,
+                    )
+                    d = "complete"
+                    decision["decision"] = "complete"
+                    decision["assessment"] = (
+                        f"Auto-complete: no progress in {_stagnation_count} consecutive iterations"
+                    )
                 _DECISION_ICONS = {"complete": "\u2713", "pivot": "\u21bb", "continue": "\u27f3"}
                 self._log(
                     logging.INFO,
@@ -922,14 +951,16 @@ class OODATopology:
                 result[key.lower()] = val
 
         # Heuristic fallback ONLY if no DECISION field was parsed at all.
-        # This prevents false positives from the model discussing outcomes
-        # without actually declaring a decision.
+        # Only trigger on phrases in the LAST 300 chars (conclusion area)
+        # to avoid false positives from the model discussing past outcomes.
         if not decision_parsed:
-            lower = output.lower()
-            if any(phrase in lower for phrase in (
+            tail = output[-300:].lower() if len(output) > 300 else output.lower()
+            _completion_phrases = (
                 "objective achieved", "mission complete", "flag found",
                 "successfully exploited", "root access obtained",
-            )):
+            )
+            matched = sum(1 for phrase in _completion_phrases if phrase in tail)
+            if matched >= 1:
                 result["decision"] = "complete"
                 if not result["assessment"]:
                     result["assessment"] = "Objective achieved (auto-detected)"

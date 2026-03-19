@@ -343,6 +343,46 @@ class OperatorMessage(DomainEvent):
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  Attack Graph Events
+# ═══════════════════════════════════════════════════════════════════
+
+
+@dataclass(frozen=True)
+class GraphNodeAdded(DomainEvent):
+    """A new node was added to the attack graph."""
+    event_type: ClassVar[str] = "graph.node_added"
+    node_id: str = ""
+    label: str = ""
+    node_type: str = ""  # asset, vulnerability, access, objective
+    status: str = "discovered"
+    context: str = "attack_graph"
+
+
+@dataclass(frozen=True)
+class GraphEdgeAdded(DomainEvent):
+    """A new edge (attack path) was added to the attack graph."""
+    event_type: ClassVar[str] = "graph.edge_added"
+    edge_id: str = ""
+    source_label: str = ""
+    target_label: str = ""
+    technique: str = ""
+    cost: float = 1.0
+    probability: float = 0.5
+    context: str = "attack_graph"
+
+
+@dataclass(frozen=True)
+class GraphNodeStatusChanged(DomainEvent):
+    """A node's status was updated in the attack graph."""
+    event_type: ClassVar[str] = "graph.node_status_changed"
+    node_id: str = ""
+    label: str = ""
+    old_status: str = ""
+    new_status: str = ""
+    context: str = "attack_graph"
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  Event Registry
 # ═══════════════════════════════════════════════════════════════════
 

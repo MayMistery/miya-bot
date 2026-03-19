@@ -1,6 +1,26 @@
 # Miya Bot — Bug & 设计问题深度审查（修订版）
 
-经过对代码库的**二次验证 + 业务深度审查**，剔除误报、补充业务设计缺陷。共 **20 个 TODO**。
+经过对代码库的**二次验证 + 业务深度审查 + 深入反思**，最终保留真正影响业务的问题。
+
+## 已修复
+
+- **[已修复] #1** os.environ 污染 → `finally` 块恢复原值 (`service.py`)
+- **[已修复] #2** Campaign 前向兼容 → 过滤未知字段 (`campaign.py`)
+- **[已修复] #6** REFLECT heuristic 误判 → 仅检查输出尾部 300 字符 (`ooda.py`)
+- **[已修复] #17** OODA 无 stagnation detection → 连续 3 次无新 finding 自动终止 (`ooda.py`)
+- **[已修复] AttackGraph** 完善实现：recon→graph_build 阶段、图变更产生事件、事件审计链 (`attack_graph_topo.py`, `events.py`)
+
+## 深入反思后移除/降级的问题
+
+以下 TODO 经过代码走读和实际场景分析，确认为**伪问题或影响极低**：
+- ~~#4 无自动知识共享~~ → 不是 bug，是有意的隔离设计。自动共享可能引入噪音
+- ~~#7 Blackboard context 无界增长~~ → compact() 已有合理上限(200/500)，是正常工作流程
+- ~~#9 EventBus 异常不透明~~ → return_exceptions=True + warning 是 event bus 标准模式
+- ~~#10 Blackboard 静默丢弃事件~~ → MissionStarted 等不需要 blackboard 投射，设计正确
+- ~~#12 ENUMERATE 无 fallback~~ → 代码已有 fallback（line 366-375，把 target 当单 challenge）
+- ~~#13 compaction 丢关键线索~~ → 阈值 200，单 challenge 几乎不可能触发
+- ~~#15 frozen dataclass 被篡改~~ → asdict() 能读到修改后的值，功能正确
+- ~~#18 DB 缺唯一约束~~ → asyncio 单 loop，不存在并发写
 
 标注说明:
 - **[已验证]** = 通过代码走读确认存在
