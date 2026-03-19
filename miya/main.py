@@ -457,16 +457,8 @@ def update(branch: str | None) -> None:
     # Resolve project root from this package's location (works from any cwd)
     project_root = str(Path(__file__).resolve().parent.parent)
 
-    # Auto-detect: explicit flag > env var > current git branch
-    target_branch = branch or os.environ.get("MIYA_BRANCH", "")
-    if not target_branch:
-        try:
-            target_branch = subprocess.check_output(
-                ["git", "-C", project_root, "rev-parse", "--abbrev-ref", "HEAD"],
-                stderr=subprocess.DEVNULL, text=True,
-            ).strip()
-        except Exception:
-            target_branch = "main"
+    # Auto-detect: explicit flag > env var > default branch (main)
+    target_branch = branch or os.environ.get("MIYA_BRANCH", "") or "main"
 
     console.print(f"[cyan]Updating from origin/{target_branch}...[/cyan]")
     console.print(f"[dim]Project: {project_root}[/dim]")
