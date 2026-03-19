@@ -28,6 +28,7 @@ from miya.shared.events import (
     PhaseTransition,
     ReflectionCompleted,
     ChallengeClassified,
+    ChallengeSolved,
 )
 from miya.shared.ports import CoordinatorPort, EventStorePort
 from miya.shared.types import Mission, OODAPhase, MissionType
@@ -482,9 +483,30 @@ class OODATopology:
                         continue_prompt, phase_label=f"CONTINUE-{iteration}",
                     )
 
+                    _solved_in_continue = False
                     for extracted in extract_events_from_output(continue_output, mission):
+                        if isinstance(extracted, ChallengeSolved):
+                            object.__setattr__(
+                                extracted, "phase_output",
+                                continue_output[:8000],
+                            )
+                            _solved_in_continue = True
                         yield extracted
                         blackboard.apply(extracted)
+
+                    # Fast-exit: flag captured in CONTINUE phase
+                    if _solved_in_continue:
+                        self._log(logging.INFO, "✓ Flag captured — done")
+                        self._report(status="solved", phase="DONE")
+                        yield ReflectionCompleted(
+                            decision="complete",
+                            assessment="Flag captured during CONTINUE phase",
+                            insights="",
+                            next_focus="",
+                            aggregate_id=mission.id,
+                            mission=mission.mission_type.value,
+                        )
+                        break
 
                     # Parse reflection from the combined output
                     decision = self._parse_reflection(continue_output)
@@ -626,9 +648,31 @@ class OODATopology:
                         )
                     self._log_output_summary("ACT", act_output)
 
+                    _solved_in_act = False
                     for extracted in extract_events_from_output(act_output, mission):
+                        if isinstance(extracted, ChallengeSolved):
+                            # Attach raw ACT output so writeup has payload detail
+                            object.__setattr__(
+                                extracted, "phase_output",
+                                act_output[:8000],
+                            )
+                            _solved_in_act = True
                         yield extracted
                         blackboard.apply(extracted)
+
+                    # ── Fast-exit: if flag was captured, skip REFLECT ──
+                    if _solved_in_act:
+                        self._log(logging.INFO, "✓ Flag captured — skipping REFLECT")
+                        self._report(status="solved", phase="DONE")
+                        yield ReflectionCompleted(
+                            decision="complete",
+                            assessment="Flag captured during ACT phase",
+                            insights="",
+                            next_focus="",
+                            aggregate_id=mission.id,
+                            mission=mission.mission_type.value,
+                        )
+                        break
 
                     # ── REFLECT ────────────────────────────────────
                     hitl_events, op_suffix = _drain_hitl()

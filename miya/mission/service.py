@@ -168,6 +168,11 @@ def _write_challenge_writeup(
                 sections.append(f"```\n{flag}\n```\n")
                 if approach:
                     sections.append(f"**Method:** {approach}\n")
+                # Include raw phase output for payload detail
+                phase_out = getattr(ev, "phase_output", "")
+                if phase_out:
+                    sections.append("### Detailed Execution Log\n")
+                    sections.append(f"```\n{phase_out[:6000]}\n```\n")
     else:
         sections.append("## Solution\n")
         sections.append(f"{approach or '*(Automated solution by Miya)*'}\n")

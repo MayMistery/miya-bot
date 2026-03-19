@@ -265,6 +265,7 @@ class ChallengeSolved(DomainEvent):
     challenge_name: str = ""
     flag: str = ""
     approach: str = ""
+    phase_output: str = ""   # raw ACT/CONTINUE output for writeup detail
     context: str = "ctf"
     mission: str = "ctf"
 
