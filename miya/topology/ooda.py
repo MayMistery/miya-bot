@@ -398,6 +398,11 @@ class OODATopology:
                     "SDKSession connect failed — falling back to stateless mode",
                 )
                 logger.debug("Session connect error details", exc_info=True)
+                # Clean up partially-connected session to avoid resource leak
+                try:
+                    await session.disconnect()
+                except Exception:
+                    pass
                 session = None
 
         try:

@@ -322,6 +322,14 @@ class LootCollected(DomainEvent):
 
 
 @dataclass(frozen=True)
+class MissionSuspended(DomainEvent):
+    """Emitted when a mission is stopped by the operator for later resume."""
+    event_type: ClassVar[str] = "mission.suspended"
+    reason: str = ""
+    checkpoint: str = ""  # JSON: phase, iteration, solved challenges, etc.
+
+
+@dataclass(frozen=True)
 class OperatorMessage(DomainEvent):
     """Human-in-the-loop message injected by the operator during execution."""
     event_type: ClassVar[str] = "operator.message"

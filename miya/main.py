@@ -1492,8 +1492,35 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
             # Create HITL operator queue
             import asyncio as _aio
             import threading
+            import signal
             op_queue: _aio.Queue[str] = _aio.Queue()
             loop = asyncio.get_event_loop()
+
+            # ── Progressive Ctrl+C state ─────────────────────
+            _cancel_requested = threading.Event()
+            _force_kill = threading.Event()
+            _last_sigint: list[float] = [0.0]
+
+            def _sigint_handler(signum: int, frame: Any) -> None:
+                """Progressive SIGINT handler.
+
+                1st Ctrl+C: graceful stop (cancel mission, persist state)
+                2nd Ctrl+C within 3s: force kill mission task
+                """
+                import time as _t
+                now = _t.monotonic()
+                if _cancel_requested.is_set() and now - _last_sigint[0] < 3.0:
+                    _force_kill.set()
+                    console.print(
+                        "\n[bold red]Force stopping...[/bold red]"
+                    )
+                else:
+                    _cancel_requested.set()
+                    _last_sigint[0] = now
+                    console.print(
+                        "\n[yellow]Stopping mission... "
+                        "(Ctrl+C again to force)[/yellow]"
+                    )
 
             async def _execute_mission() -> MissionReport:
                 return await service.execute(
@@ -1508,16 +1535,12 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                     **options,
                 )
 
-            # Thread-safe HITL input: one dedicated thread reads stdin,
-            # posts to an asyncio.Queue, and exits when stop_event is set.
-            # IMPORTANT: Use a SEPARATE PromptSession — prompt_toolkit's
-            # PromptSession is not thread-safe for concurrent .prompt() calls.
+            # Thread-safe HITL input
             hitl_queue: _aio.Queue[str] = _aio.Queue()
             stop_input = threading.Event()
 
             def _hitl_reader() -> None:
                 """Blocking input reader running in a dedicated thread."""
-                # Separate session avoids concurrent .prompt() on main session
                 from prompt_toolkit import PromptSession as _PS
                 from prompt_toolkit.formatted_text import HTML as _HTML
                 hitl_session: _PS[str] = _PS()
@@ -1530,56 +1553,108 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                             ),
                         )
                         text = text.strip()
-                        if text and not stop_input.is_set():
-                            loop.call_soon_threadsafe(hitl_queue.put_nowait, text)
+                        if not text or stop_input.is_set():
+                            continue
+                        # Handle 'stop' command as graceful cancel
+                        if text.lower() in ("stop", "quit", "exit"):
+                            _cancel_requested.set()
+                            console.print(
+                                "[yellow]Stopping mission...[/yellow]"
+                            )
+                            continue
+                        loop.call_soon_threadsafe(
+                            hitl_queue.put_nowait, text,
+                        )
                     except (EOFError, KeyboardInterrupt):
+                        _cancel_requested.set()
                         break
 
+            # Install signal handler for progressive Ctrl+C
+            prev_handler = signal.signal(signal.SIGINT, _sigint_handler)
+
             try:
-                console.print("[dim]── Events (type to inject HITL, Ctrl+C to cancel) ──[/dim]")
+                console.print(
+                    "[dim]── Events (HITL input | 'stop' to cancel "
+                    "| Ctrl+C to stop) ──[/dim]"
+                )
                 mission_task = _aio.create_task(_execute_mission())
 
-                # Start HITL reader in a daemon thread (exits with process)
                 input_thread = threading.Thread(
                     target=_hitl_reader, daemon=True, name="hitl-reader",
                 )
                 input_thread.start()
 
-                # Main loop: transfer hitl_queue → op_queue, wait for mission
+                # Main loop: transfer hitl_queue → op_queue, check cancel
                 while not mission_task.done():
-                    # Wait a bit, then drain any HITL input
                     await _aio.sleep(0.3)
+
+                    # Drain HITL input
                     while not hitl_queue.empty():
                         try:
                             msg = hitl_queue.get_nowait()
                             op_queue.put_nowait(msg)
-                            console.print(f"  [yellow]📨 queued:[/yellow] {msg[:80]}")
+                            console.print(
+                                f"  [yellow]\U0001f4e8 queued:[/yellow] "
+                                f"{msg[:80]}"
+                            )
                         except _aio.QueueEmpty:
                             break
 
-                # Signal input thread to stop (it will exit on next prompt or EOFError)
+                    # ── Check graceful cancel ─────────────────
+                    if _cancel_requested.is_set():
+                        if not mission_task.done():
+                            mission_task.cancel()
+                            try:
+                                await _aio.wait_for(
+                                    _aio.shield(mission_task), timeout=5.0,
+                                )
+                            except (
+                                _aio.CancelledError,
+                                _aio.TimeoutError,
+                                Exception,
+                            ):
+                                pass
+                        break
+
+                    # ── Check force kill ───────────────────────
+                    if _force_kill.is_set():
+                        if not mission_task.done():
+                            mission_task.cancel()
+                        break
+
                 stop_input.set()
 
-                report = await mission_task
-                console.print(f"[dim]── {len(live_events)} events ──[/dim]")
-                console.print()
-                print_report(report)
-                mission_history.append(report)
-                if report.error:
-                    console.print(f"[yellow]Mission ended with error: {report.error}[/yellow]")
-
-            except KeyboardInterrupt:
-                console.print("\n[yellow]Mission cancelled by user.[/yellow]")
-                stop_input.set()
-                if not mission_task.done():
-                    mission_task.cancel()
+                if mission_task.done() and not mission_task.cancelled():
                     try:
-                        await mission_task
-                    except (asyncio.CancelledError, Exception):
-                        pass
+                        report = mission_task.result()
+                        console.print(
+                            f"[dim]── {len(live_events)} events ──[/dim]"
+                        )
+                        console.print()
+                        print_report(report)
+                        mission_history.append(report)
+                        if report.error:
+                            console.print(
+                                f"[yellow]Mission ended with error: "
+                                f"{report.error}[/yellow]"
+                            )
+                    except Exception as e:
+                        console.print(
+                            f"[bold red]Mission error:[/bold red] {e}"
+                        )
+                elif _cancel_requested.is_set():
+                    console.print(
+                        f"[yellow]Mission stopped "
+                        f"({len(live_events)} events collected). "
+                        f"Use 'resume' to continue.[/yellow]"
+                    )
+
             except Exception as e:
                 console.print(f"[bold red]Error:[/bold red] {e}")
                 stop_input.set()
+            finally:
+                # Restore original signal handler
+                signal.signal(signal.SIGINT, prev_handler)
 
             console.print()
 

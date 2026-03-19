@@ -317,6 +317,10 @@ def _sdk_env() -> dict[str, str]:
     return env
 
 
+class SDKTimeoutError(Exception):
+    """Raised when SDK calls exceed the idle timeout after retries."""
+
+
 def _get_topology_config() -> dict[str, int]:
     """Read topology tunables from environment.
 
@@ -325,7 +329,9 @@ def _get_topology_config() -> dict[str, int]:
         MIYA_AG_MAX_STEPS         — max attack-graph steps  (default 20)
         MIYA_MAX_TURNS            — max SDK turns per coordinator call (default 30)
         MIYA_FANOUT_PARALLEL      — max parallel challenge solvers (default 10)
-        MIYA_FANOUT_TIMEOUT       — per-challenge timeout in seconds (default 1800)
+        MIYA_FANOUT_TIMEOUT       — per-challenge timeout in seconds (default 3600)
+        MIYA_SDK_IDLE_TIMEOUT     — idle timeout between SDK messages (default 20)
+        MIYA_SDK_RETRIES          — retry count on SDK timeout (default 1)
     """
     def _int(key: str, default: int) -> int:
         raw = os.environ.get(key, "")
@@ -340,6 +346,8 @@ def _get_topology_config() -> dict[str, int]:
         "max_turns": _int("MIYA_MAX_TURNS", 30),
         "fanout_parallel": _int("MIYA_FANOUT_PARALLEL", 10),
         "fanout_timeout": _int("MIYA_FANOUT_TIMEOUT", 3600),
+        "sdk_idle_timeout": _int("MIYA_SDK_IDLE_TIMEOUT", 20),
+        "sdk_retries": _int("MIYA_SDK_RETRIES", 1),
     }
 
 
@@ -393,10 +401,52 @@ async def run_sdk_coordinator(
     Each call creates a fresh query() — no conversation context is retained.
     For multi-turn context reuse, use ``SDKSession`` instead.
 
+    Idle timeout: if no message received within MIYA_SDK_IDLE_TIMEOUT (default 20s),
+    retries once, then raises SDKTimeoutError.
+
     Logging behaviour (controlled via ``-v`` / ``-vv``):
         TRACE  — every tool_use call (name + input), tool_result, and text block
         DEBUG  — prompt summary, per-phase summary with timing
     """
+    cfg = _get_topology_config()
+    idle_timeout = cfg["sdk_idle_timeout"]
+    max_retries = cfg["sdk_retries"]
+
+    tag = f"[{phase_label}] " if phase_label else ""
+
+    for attempt in range(1 + max_retries):
+        try:
+            return await _run_sdk_coordinator_once(
+                prompt, agent_defs, mcp_names,
+                phase_label=phase_label, max_turns=max_turns,
+                idle_timeout=idle_timeout,
+            )
+        except (asyncio.TimeoutError, SDKTimeoutError) as exc:
+            if attempt < max_retries:
+                logger.warning(
+                    "%sSDK idle timeout (%ds), retrying (%d/%d)...",
+                    tag, idle_timeout, attempt + 1, max_retries,
+                )
+                continue
+            raise SDKTimeoutError(
+                f"SDK unresponsive after {idle_timeout}s idle timeout "
+                f"({1 + max_retries} attempts). Check API connectivity."
+            ) from exc
+
+    # Unreachable, but satisfies type checker
+    raise SDKTimeoutError("SDK timeout")  # pragma: no cover
+
+
+async def _run_sdk_coordinator_once(
+    prompt: str,
+    agent_defs: dict[str, Any],
+    mcp_names: list[str],
+    *,
+    phase_label: str = "",
+    max_turns: int | None = None,
+    idle_timeout: int = 20,
+) -> str:
+    """Single attempt of stateless coordinator execution with idle timeout."""
     from claude_agent_sdk import query
     from miya.infra.logging_config import TRACE
 
@@ -411,7 +461,20 @@ async def run_sdk_coordinator(
     t0 = time.monotonic()
     current_tool: str | None = None  # track which tool is running
 
-    async for message in query(prompt=prompt, options=options):
+    # Iterate with per-message idle timeout
+    aiter = query(prompt=prompt, options=options).__aiter__()
+    while True:
+        try:
+            message = await asyncio.wait_for(aiter.__anext__(), timeout=idle_timeout)
+        except StopAsyncIteration:
+            break
+        except asyncio.TimeoutError:
+            elapsed = time.monotonic() - t0
+            raise SDKTimeoutError(
+                f"{tag}No SDK message for {idle_timeout}s (elapsed {elapsed:.0f}s, "
+                f"{turn_count} turns, {tool_use_count} tools)"
+            )
+
         turn_count += 1
 
         # ── AssistantMessage: text, thinking, tool_use blocks ──
@@ -574,11 +637,17 @@ class SDKSession:
         Because the session is stateful, the model sees all prior messages.
         This means ``prompt`` only needs the new phase instruction — not the
         full blackboard/history context that stateless calls require.
+
+        Uses idle timeout: raises SDKTimeoutError if no message for
+        MIYA_SDK_IDLE_TIMEOUT seconds. No retry — caller handles.
         """
         from miya.infra.logging_config import TRACE
 
         if self._client is None:
             raise RuntimeError("SDKSession not connected. Call connect() first.")
+
+        cfg = _get_topology_config()
+        idle_timeout = cfg["sdk_idle_timeout"]
 
         tag = f"[{phase_label}] " if phase_label else ""
         logger.debug("%sprompt (%d chars): %s", tag, len(prompt), _truncate_for_log(prompt, 300))
@@ -591,7 +660,19 @@ class SDKSession:
         t0 = time.monotonic()
         current_tool: str | None = None
 
-        async for message in self._client.receive_response():
+        aiter = self._client.receive_response().__aiter__()
+        while True:
+            try:
+                message = await asyncio.wait_for(aiter.__anext__(), timeout=idle_timeout)
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                elapsed = time.monotonic() - t0
+                raise SDKTimeoutError(
+                    f"{tag}No SDK message for {idle_timeout}s "
+                    f"(elapsed {elapsed:.0f}s, {turn_count} turns)"
+                )
+
             turn_count += 1
 
             if isinstance(message, AssistantMessage):
