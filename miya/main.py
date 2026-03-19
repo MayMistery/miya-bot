@@ -964,6 +964,44 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                            "verbose": _level_names.get(_current_level, "info")}
     mission_history: list[MissionReport] = []
 
+    # ── Background job state ──────────────────────────────────────
+    # Holds a running mission that the user sent to the background
+    # via 'bg' during HITL. The task keeps running; 'fg' re-attaches.
+    import asyncio as _aio
+    import threading
+    import time as _time
+
+    class _BackgroundJob:
+        __slots__ = (
+            "task", "op_queue", "hitl_queue", "live_events",
+            "stop_input", "cancel_requested", "force_kill",
+            "description", "started_at",
+        )
+
+        def __init__(
+            self,
+            task: _aio.Task[MissionReport],
+            op_queue: _aio.Queue[str],
+            hitl_queue: _aio.Queue[str],
+            live_events: list[DomainEvent],
+            stop_input: threading.Event,
+            cancel_requested: threading.Event,
+            force_kill: threading.Event,
+            description: str = "",
+            started_at: float = 0.0,
+        ) -> None:
+            self.task = task
+            self.op_queue = op_queue
+            self.hitl_queue = hitl_queue
+            self.live_events = live_events
+            self.stop_input = stop_input
+            self.cancel_requested = cancel_requested
+            self.force_kill = force_kill
+            self.description = description
+            self.started_at = started_at
+
+    bg_job: _BackgroundJob | None = None
+
     # ── Prompt toolkit session with history + completion ──────────
     history_path = Path.home() / ".miya_history"
     completer = WordCompleter(
@@ -972,7 +1010,8 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
             "oneday", "zeroday", "ctf",
             # repl
             "set", "status", "history", "events", "blackboard", "campaign",
-            "report", "export", "replay", "info", "clear", "help",
+            "report", "export", "replay", "resume", "info", "clear", "help",
+            "fg", "bg", "jobs", "kill",
             "exit", "quit",
             # options
             "--topology", "--category", "--language", "--source", "--service", "--prompt",
@@ -1208,14 +1247,228 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                 break
 
             if not raw:
+                # Check if bg job finished while user was idle
+                if bg_job is not None and bg_job.task.done():
+                    try:
+                        report = bg_job.task.result()
+                        console.print(
+                            f"\n[bold green]Background mission "
+                            f"completed![/bold green] "
+                            f"({len(bg_job.live_events)} events)"
+                        )
+                        print_report(report)
+                        mission_history.append(report)
+                    except Exception as e:
+                        console.print(
+                            f"\n[bold red]Background mission "
+                            f"failed:[/bold red] {e}"
+                        )
+                    bg_job = None
                 continue
 
             lower = raw.lower()
             parts = lower.split()
             cmd = parts[0] if parts else ""
 
+            # ── Jobs — show background mission status ──────────
+            if cmd == "jobs":
+                if bg_job is None:
+                    console.print("[dim]No background jobs.[/dim]")
+                elif bg_job.task.done():
+                    try:
+                        report = bg_job.task.result()
+                        console.print(
+                            f"[bold green]Job completed:[/bold green]"
+                            f" {bg_job.description} "
+                            f"({len(bg_job.live_events)} events)"
+                        )
+                        print_report(report)
+                        mission_history.append(report)
+                    except Exception as e:
+                        console.print(
+                            f"[bold red]Job failed:[/bold red] {e}"
+                        )
+                    bg_job = None
+                else:
+                    elapsed = _time.monotonic() - bg_job.started_at
+                    console.print(
+                        f"[cyan]Running:[/cyan] {bg_job.description}"
+                        f" ({len(bg_job.live_events)} events, "
+                        f"{elapsed:.0f}s elapsed)"
+                    )
+                    # Show last 5 events
+                    for ev in bg_job.live_events[-5:]:
+                        name = type(ev).__name__
+                        detail = _event_detail(ev)
+                        console.print(
+                            f"  [dim]{name}: {detail[:60]}[/dim]"
+                        )
+                continue
+
+            # ── fg — re-attach to background mission ───────────
+            if cmd == "fg":
+                if bg_job is None:
+                    console.print(
+                        "[dim]No background job to attach.[/dim]"
+                    )
+                    continue
+                if bg_job.task.done():
+                    try:
+                        report = bg_job.task.result()
+                        console.print(
+                            "[bold green]Job already completed!"
+                            "[/bold green]"
+                        )
+                        print_report(report)
+                        mission_history.append(report)
+                    except Exception as e:
+                        console.print(
+                            f"[bold red]Job failed:[/bold red] {e}"
+                        )
+                    bg_job = None
+                    continue
+
+                # Re-enter HITL loop for the background job
+                console.print(
+                    f"[cyan]Re-attaching to: "
+                    f"{bg_job.description}[/cyan]"
+                )
+                console.print(
+                    "[dim]── HITL resumed ('bg' to background "
+                    "again) ──[/dim]"
+                )
+
+                # Reset bg_requested, set up new HITL reader
+                _bg_requested_fg = threading.Event()
+                _stop_fg = threading.Event()
+                _cancel_fg = bg_job.cancel_requested
+                _force_fg = bg_job.force_kill
+                _hitl_q = bg_job.hitl_queue
+                _op_q = bg_job.op_queue
+                _fg_loop = asyncio.get_event_loop()
+
+                def _hitl_reader_fg() -> None:
+                    from prompt_toolkit import PromptSession as _PS
+                    from prompt_toolkit.formatted_text import HTML as _H
+                    s: _PS[str] = _PS()
+                    while not _stop_fg.is_set():
+                        try:
+                            text = s.prompt(
+                                _H(
+                                    '<ansiyellow><b>hitl</b>'
+                                    '</ansiyellow> '
+                                    '<ansibrightblack>&gt;'
+                                    '</ansibrightblack> '
+                                ),
+                            )
+                            text = text.strip()
+                            if not text or _stop_fg.is_set():
+                                continue
+                            low = text.lower()
+                            if low in ("stop", "quit", "exit"):
+                                _cancel_fg.set()
+                                break
+                            if low == "bg":
+                                _bg_requested_fg.set()
+                                console.print(
+                                    "[cyan]Back to background."
+                                    "[/cyan]"
+                                )
+                                break
+                            _fg_loop.call_soon_threadsafe(
+                                _hitl_q.put_nowait, text,
+                            )
+                        except (EOFError, KeyboardInterrupt):
+                            _cancel_fg.set()
+                            break
+
+                t = threading.Thread(
+                    target=_hitl_reader_fg, daemon=True,
+                    name="hitl-reader-fg",
+                )
+                t.start()
+
+                fg_task = bg_job.task
+                bg_job_ref = bg_job
+                bg_job = None  # clear bg slot
+
+                # Run HITL loop for fg
+                while not fg_task.done():
+                    await _aio.sleep(0.3)
+                    while not _hitl_q.empty():
+                        try:
+                            msg = _hitl_q.get_nowait()
+                            _op_q.put_nowait(msg)
+                            console.print(
+                                f"  [yellow]\U0001f4e8 queued:"
+                                f"[/yellow] {msg[:80]}"
+                            )
+                        except _aio.QueueEmpty:
+                            break
+                    if _bg_requested_fg.is_set():
+                        break
+                    if _cancel_fg.is_set():
+                        if not fg_task.done():
+                            fg_task.cancel()
+                            try:
+                                await _aio.wait_for(
+                                    _aio.shield(fg_task),
+                                    timeout=5.0,
+                                )
+                            except Exception:
+                                pass
+                        break
+
+                _stop_fg.set()
+
+                if fg_task.done():
+                    try:
+                        report = fg_task.result()
+                        console.print(
+                            f"[dim]── "
+                            f"{len(bg_job_ref.live_events)} "
+                            f"events ──[/dim]"
+                        )
+                        print_report(report)
+                        mission_history.append(report)
+                    except (_aio.CancelledError, Exception) as e:
+                        console.print(
+                            f"[yellow]Mission ended: {e}[/yellow]"
+                        )
+                elif _bg_requested_fg.is_set():
+                    bg_job = bg_job_ref
+                    console.print(
+                        f"[cyan]Mission in background "
+                        f"({len(bg_job_ref.live_events)} events). "
+                        f"'fg' to re-attach.[/cyan]"
+                    )
+                continue
+
+            # ── Kill background job ────────────────────────────
+            if cmd == "kill":
+                if bg_job is None:
+                    console.print(
+                        "[dim]No background job to kill.[/dim]"
+                    )
+                else:
+                    bg_job.cancel_requested.set()
+                    if not bg_job.task.done():
+                        bg_job.task.cancel()
+                    console.print(
+                        "[yellow]Background job killed.[/yellow]"
+                    )
+                    bg_job = None
+                continue
+
             # ── Exit ──────────────────────────────────────────────
             if cmd in ("exit", "quit", "q"):
+                if bg_job is not None and not bg_job.task.done():
+                    console.print(
+                        "[yellow]A mission is running in the "
+                        "background. 'kill' it first, or 'fg' "
+                        "to re-attach.[/yellow]"
+                    )
+                    continue
                 console.print("[dim]Goodbye.[/dim]")
                 break
 
@@ -1510,38 +1763,36 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                     border_style="cyan",
                 ))
 
-            # Live event table during execution
+            # ── Launch mission + enter HITL loop ─────────────
+            import signal
+            import time as _time
+
             live_events: list[DomainEvent] = []
+            op_queue: _aio.Queue[str] = _aio.Queue()
+            hitl_queue: _aio.Queue[str] = _aio.Queue()
+            stop_input = threading.Event()
+            _cancel_requested = threading.Event()
+            _force_kill = threading.Event()
+            _bg_requested = threading.Event()
+            loop = asyncio.get_event_loop()
 
             def _on_event(ev: DomainEvent) -> None:
                 live_events.append(ev)
-                name = type(ev).__name__
-                style = _EVENT_STYLES.get(name, "dim")
-                detail = _event_detail(ev)
-                console.print(
-                    f"  [{style}]{name:.<30s}[/{style}] "
-                    f"[dim]{getattr(ev, 'context', ''):>10s}[/dim]  "
-                    f"{detail[:60]}",
-                )
-
-            # Create HITL operator queue
-            import asyncio as _aio
-            import threading
-            import signal
-            op_queue: _aio.Queue[str] = _aio.Queue()
-            loop = asyncio.get_event_loop()
+                # Only print events when in foreground (not bg)
+                if bg_job is None:
+                    name = type(ev).__name__
+                    style = _EVENT_STYLES.get(name, "dim")
+                    detail = _event_detail(ev)
+                    console.print(
+                        f"  [{style}]{name:.<30s}[/{style}] "
+                        f"[dim]{getattr(ev, 'context', ''):>10s}[/dim]  "
+                        f"{detail[:60]}",
+                    )
 
             # ── Progressive Ctrl+C state ─────────────────────
-            _cancel_requested = threading.Event()
-            _force_kill = threading.Event()
             _last_sigint: list[float] = [0.0]
 
             def _sigint_handler(signum: int, frame: Any) -> None:
-                """Progressive SIGINT handler.
-
-                1st Ctrl+C: graceful stop (cancel mission, persist state)
-                2nd Ctrl+C within 3s: force kill mission task
-                """
                 import time as _t
                 now = _t.monotonic()
                 if _cancel_requested.is_set() and now - _last_sigint[0] < 3.0:
@@ -1570,10 +1821,6 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                     **options,
                 )
 
-            # Thread-safe HITL input
-            hitl_queue: _aio.Queue[str] = _aio.Queue()
-            stop_input = threading.Event()
-
             def _hitl_reader() -> None:
                 """Blocking input reader running in a dedicated thread."""
                 from prompt_toolkit import PromptSession as _PS
@@ -1590,13 +1837,21 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                         text = text.strip()
                         if not text or stop_input.is_set():
                             continue
-                        # Handle 'stop' command as graceful cancel
-                        if text.lower() in ("stop", "quit", "exit"):
+                        low = text.lower()
+                        if low in ("stop", "quit", "exit"):
                             _cancel_requested.set()
                             console.print(
                                 "[yellow]Stopping mission...[/yellow]"
                             )
                             continue
+                        if low == "bg":
+                            _bg_requested.set()
+                            console.print(
+                                "[cyan]Sending mission to background... "
+                                "('fg' to re-attach, 'jobs' to check)"
+                                "[/cyan]"
+                            )
+                            break  # exit reader thread
                         loop.call_soon_threadsafe(
                             hitl_queue.put_nowait, text,
                         )
@@ -1604,44 +1859,35 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                         _cancel_requested.set()
                         break
 
-            # Install signal handler for progressive Ctrl+C
-            prev_handler = signal.signal(signal.SIGINT, _sigint_handler)
-
-            try:
-                console.print(
-                    "[dim]── Events (HITL input | 'stop' to cancel "
-                    "| Ctrl+C to stop) ──[/dim]"
-                )
-                mission_task = _aio.create_task(_execute_mission())
-
-                input_thread = threading.Thread(
-                    target=_hitl_reader, daemon=True, name="hitl-reader",
-                )
-                input_thread.start()
-
-                # Main loop: transfer hitl_queue → op_queue, check cancel
+            async def _run_hitl_loop(
+                mission_task: _aio.Task[MissionReport],
+            ) -> str:
+                """HITL main loop. Returns outcome: 'done'|'bg'|'cancel'."""
                 while not mission_task.done():
                     await _aio.sleep(0.3)
 
-                    # Drain HITL input
+                    # Drain HITL input → op_queue
                     while not hitl_queue.empty():
                         try:
                             msg = hitl_queue.get_nowait()
                             op_queue.put_nowait(msg)
                             console.print(
-                                f"  [yellow]\U0001f4e8 queued:[/yellow] "
-                                f"{msg[:80]}"
+                                f"  [yellow]\U0001f4e8 queued:"
+                                f"[/yellow] {msg[:80]}"
                             )
                         except _aio.QueueEmpty:
                             break
 
-                    # ── Check graceful cancel ─────────────────
+                    if _bg_requested.is_set():
+                        return "bg"
+
                     if _cancel_requested.is_set():
                         if not mission_task.done():
                             mission_task.cancel()
                             try:
                                 await _aio.wait_for(
-                                    _aio.shield(mission_task), timeout=5.0,
+                                    _aio.shield(mission_task),
+                                    timeout=5.0,
                                 )
                             except (
                                 _aio.CancelledError,
@@ -1649,46 +1895,90 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                                 Exception,
                             ):
                                 pass
-                        break
+                        return "cancel"
 
-                    # ── Check force kill ───────────────────────
                     if _force_kill.is_set():
                         if not mission_task.done():
                             mission_task.cancel()
-                        break
+                        return "cancel"
+
+                return "done"
+
+            # ── Start mission ─────────────────────────────────
+            prev_handler = signal.signal(signal.SIGINT, _sigint_handler)
+
+            try:
+                console.print(
+                    "[dim]── Events (HITL: 'bg' background | "
+                    "'stop' cancel | Ctrl+C stop) ──[/dim]"
+                )
+                mission_task = _aio.create_task(_execute_mission())
+
+                input_thread = threading.Thread(
+                    target=_hitl_reader, daemon=True,
+                    name="hitl-reader",
+                )
+                input_thread.start()
+
+                outcome = await _run_hitl_loop(mission_task)
 
                 stop_input.set()
 
-                if mission_task.done() and not mission_task.cancelled():
+                if outcome == "done":
                     try:
                         report = mission_task.result()
                         console.print(
-                            f"[dim]── {len(live_events)} events ──[/dim]"
+                            f"[dim]── {len(live_events)} events "
+                            f"──[/dim]"
                         )
                         console.print()
                         print_report(report)
                         mission_history.append(report)
                         if report.error:
                             console.print(
-                                f"[yellow]Mission ended with error: "
-                                f"{report.error}[/yellow]"
+                                f"[yellow]Mission ended with "
+                                f"error: {report.error}[/yellow]"
                             )
                     except Exception as e:
                         console.print(
-                            f"[bold red]Mission error:[/bold red] {e}"
+                            f"[bold red]Mission error:"
+                            f"[/bold red] {e}"
                         )
-                elif _cancel_requested.is_set():
+
+                elif outcome == "bg":
+                    # Store job for fg later. Task keeps running.
+                    bg_job = _BackgroundJob(
+                        task=mission_task,
+                        op_queue=op_queue,
+                        hitl_queue=hitl_queue,
+                        live_events=live_events,
+                        stop_input=stop_input,
+                        cancel_requested=_cancel_requested,
+                        force_kill=_force_kill,
+                        description=(
+                            f"{mission_type} → {target} "
+                            f"[{topology}]"
+                        ),
+                        started_at=_time.monotonic(),
+                    )
+                    console.print(
+                        f"[cyan]Mission running in background "
+                        f"({len(live_events)} events so far). "
+                        f"'fg' to re-attach, 'jobs' to check."
+                        f"[/cyan]"
+                    )
+
+                elif outcome == "cancel":
                     console.print(
                         f"[yellow]Mission stopped "
-                        f"({len(live_events)} events collected). "
-                        f"Use 'resume' to continue.[/yellow]"
+                        f"({len(live_events)} events). "
+                        f"'resume' to continue.[/yellow]"
                     )
 
             except Exception as e:
                 console.print(f"[bold red]Error:[/bold red] {e}")
                 stop_input.set()
             finally:
-                # Restore original signal handler
                 signal.signal(signal.SIGINT, prev_handler)
 
             console.print()
