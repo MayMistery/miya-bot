@@ -544,11 +544,13 @@ _NL_PARSE_PROMPT = (
     "- If a URL is present, extract it as target\n"
     "- If a file path (.zip, .py, .c, etc.) is present, extract it as target\n"
     '- For CTF, add "category" to options if you can determine it (web/pwn/crypto/reverse/misc)\n'
-    "- If the input contains a JSON array of challenges with name/port fields + an IP,\n"
-    '  set topology to "fanout" and add "batch_challenges" to options with the JSON array,\n'
-    '  and set target to "http://<ip>"\n'
+    "- **Multi-challenge CTF**: If the user provides multiple challenges (any format — JSON,\n"
+    "  table, list, natural language), extract each as {name, target_url}. Combine IP+port\n"
+    '  into target URLs like "http://IP:PORT". Set topology to "fanout" and add:\n'
+    '  "challenges": [{"name": "...", "target": "http://ip:port"}, ...] to options.\n'
+    '  Set "target" to the base IP or platform URL.\n'
     "- If you cannot determine mission_type, default to ctf\n"
-    "- If you cannot determine topology, use ooda\n"
+    "- If you cannot determine topology, use ooda (fanout for multiple challenges)\n"
     "\n"
     'Rules for "meta" (runtime directives — set ONLY if user explicitly requests):\n'
     '- "verbose": "trace" | "debug" | "info" — log verbosity level.\n'
@@ -879,7 +881,7 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
 
     from miya.mission.service import MissionService, MissionReport
     from miya.shared.blackboard import Blackboard
-    from miya.shared.events import DomainEvent, ChallengeSolved
+    from miya.shared.events import DomainEvent
     from miya.topology.base import TopologyRegistry
 
     show_banner()
@@ -1378,143 +1380,6 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                 else:
                     console.print("[yellow]Usage: set <key> <value>[/yellow]")
                 continue
-
-            # ── Batch CTF detection ────────────────────────────
-            # If user input contains a JSON array with challenge definitions,
-            # route to the batch CTF workflow instead of single mission.
-            if '[' in raw and '"name"' in raw and '"port"' in raw:
-                try:
-                    from miya.ctf.batch import (
-                        BatchRegistry, probe_all, render_probe_report,
-                        render_task_board, TaskStatus, write_all_writeups,
-                        render_writeup_summary,
-                    )
-
-                    registry = BatchRegistry.from_user_input(raw)
-                    console.print(
-                        f"\n[bold cyan]Batch CTF Mode[/bold cyan] — "
-                        f"Detected {registry.total} challenges @ {registry.ip}"
-                    )
-
-                    # ── Phase 1: Connectivity probe ────────────
-                    console.print("[dim]Probing challenge environments...[/dim]")
-                    await probe_all(registry)
-                    console.print(render_probe_report(registry))
-
-                    if not registry.all_reachable:
-                        unreachable = [
-                            c.name for c in registry.challenges
-                            if c.status == TaskStatus.UNREACHABLE
-                        ]
-                        console.print(
-                            f"[yellow]Warning: {len(unreachable)} unreachable: "
-                            f"{', '.join(unreachable)}[/yellow]"
-                        )
-
-                    # ── Phase 2: User confirmation ─────────────
-                    console.print(render_task_board(registry))
-                    confirm = await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda: session.prompt(
-                            HTML(
-                                '<ansiyellow><b>开始攻克？</b></ansiyellow> '
-                                '<ansibrightblack>(y=开始 / n=取消) &gt; </ansibrightblack>'
-                            ),
-                        ),
-                    )
-                    if confirm.strip().lower() not in ("y", "yes", ""):
-                        console.print("[dim]Cancelled.[/dim]")
-                        continue
-
-                    # ── Phase 3: Solve each challenge ──────────
-                    console.print("\n[bold cyan]Starting batch solve...[/bold cyan]\n")
-
-                    for entry in registry.challenges:
-                        if entry.status == TaskStatus.UNREACHABLE:
-                            console.print(f"  [dim]Skipping unreachable: {entry.name}[/dim]")
-                            continue
-
-                        entry.status = TaskStatus.SOLVING
-                        console.print(render_task_board(registry))
-
-                        live_events: list[DomainEvent] = []
-
-                        def _batch_on_event(ev: DomainEvent) -> None:
-                            live_events.append(ev)
-                            name = type(ev).__name__
-                            style = _EVENT_STYLES.get(name, "dim")
-                            detail = _event_detail(ev)
-                            console.print(
-                                f"    [{style}]{name:.<30s}[/{style}] "
-                                f"[dim]{getattr(ev, 'context', ''):>10s}[/dim]  "
-                                f"{detail[:60]}",
-                            )
-
-                        try:
-                            report = await service.execute(
-                                mission_type="ctf",
-                                target_uri=entry.url,
-                                target_kind="url",
-                                topology="ooda",
-                                model=cfg["model"],
-                                prompt=(
-                                    f"Solve CTF challenge '{entry.name}' at {entry.url}. "
-                                    f"Find the flag."
-                                ),
-                                on_event=_batch_on_event,
-                                challenge_name=entry.name,
-                            )
-                            mission_history.append(report)
-
-                            # Check if flag was found
-                            for ev in live_events:
-                                if isinstance(ev, ChallengeSolved) and ev.flag:
-                                    entry.flag = ev.flag
-                                    entry.approach = ev.approach
-                                    entry.status = TaskStatus.SOLVED
-                                    break
-
-                            if entry.status != TaskStatus.SOLVED:
-                                # Check blackboard solved_flags too
-                                bb = Blackboard()
-                                bb.apply_all(live_events)
-                                for sf in bb.solved_flags:
-                                    if sf.flag:
-                                        entry.flag = sf.flag
-                                        entry.status = TaskStatus.SOLVED
-                                        break
-
-                            if entry.status != TaskStatus.SOLVED:
-                                entry.status = TaskStatus.FAILED
-
-                        except Exception as e:
-                            console.print(f"  [red]Error on {entry.name}: {e}[/red]")
-                            entry.status = TaskStatus.FAILED
-
-                    # ── Phase 4: Final board + Writeups ─────────
-                    console.print(render_task_board(registry))
-
-                    created = write_all_writeups(registry, output_dir=".")
-                    console.print(render_writeup_summary(created))
-
-                    solved = registry.solved_count
-                    total = registry.total
-                    console.print(
-                        f"\n[bold]Result: {solved}/{total} challenges solved[/bold]"
-                    )
-                    for entry in registry.challenges:
-                        if entry.flag:
-                            console.print(
-                                f"  [green]{entry.name}[/green]: "
-                                f"[bold]{entry.flag}[/bold]"
-                            )
-
-                    console.print()
-                    continue
-
-                except ValueError as e:
-                    console.print(f"[red]Batch parse error: {e}[/red]")
-                    # Fall through to normal mission parsing
 
             # ── Mission execution ─────────────────────────────────
             parsed = _parse_mission_args(raw)

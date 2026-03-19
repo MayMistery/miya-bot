@@ -31,6 +31,49 @@ import miya.topology.fanout_topo  # noqa: F401
 logger = logging.getLogger(__name__)
 
 
+def _write_challenge_writeup(
+    challenge_name: str,
+    flag: str,
+    approach: str,
+    target: str,
+    output_dir: Path | str | None = None,
+) -> Path | None:
+    """Auto-generate a writeup markdown file for a solved CTF challenge.
+
+    Args:
+        output_dir: Directory to write into. If None, writeup generation is skipped
+                    (useful for tests or headless execution).
+    """
+    if output_dir is None:
+        return None
+
+    import re
+    safe_name = re.sub(r'[^\w\-]', '_', challenge_name)
+    # Extract inner part of flag{...} for filename
+    m = re.match(r'[A-Za-z0-9_]+\{(.+)\}', flag)
+    flag_part = m.group(1) if m else flag
+    safe_flag = re.sub(r'[^\w\-]', '_', flag_part)
+
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    filepath = out / f"{safe_name}_{safe_flag}.md"
+
+    content = (
+        f"# {challenge_name}\n\n"
+        f"**Target:** `{target}`\n"
+        f"**Flag:** `{flag}`\n\n"
+        f"---\n\n"
+        f"## Solution\n\n"
+        f"{approach or '*(Automated solution by Miya)*'}\n\n"
+        f"---\n\n"
+        f"*Solved by Miya DDD Pentest Agent*\n"
+    )
+
+    filepath.write_text(content, encoding="utf-8")
+    logger.info("Writeup generated: %s", filepath)
+    return filepath
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  Mission Report
 # ═══════════════════════════════════════════════════════════════════
@@ -173,22 +216,28 @@ class MissionService:
         coordinator: CoordinatorPort | None = None,
         db_path: str | Path = "miya_events.db",
         campaign: Campaign | None = None,
+        writeup_dir: Path | str | None = None,
     ) -> None:
         self._event_store = event_store
         self._mcp_registry = mcp_registry or MCPRegistry()
         self._coordinator = coordinator
         self._db_path = db_path
         self._owns_store = event_store is None
+        self._writeup_dir = Path(writeup_dir) if writeup_dir is not None else None
         self.campaign = campaign or Campaign.load(
             Path(str(db_path)).with_suffix(".campaign.json")
         )
 
     @classmethod
-    async def create(cls, db_path: str | Path = "miya_events.db") -> MissionService:
+    async def create(
+        cls,
+        db_path: str | Path = "miya_events.db",
+        writeup_dir: Path | str | None = ".",
+    ) -> MissionService:
         """Factory: create with initialized SQLite store."""
         store = SQLiteEventStore(db_path)
         await store.initialize()
-        service = cls(event_store=store, db_path=db_path)
+        service = cls(event_store=store, db_path=db_path, writeup_dir=writeup_dir)
         service._owns_store = True
         return service
 
@@ -265,7 +314,7 @@ class MissionService:
             ):
                 collected_events.append(event)
                 await self._event_store.append([event])
-                # Record solved challenges in campaign
+                # Record solved challenges in campaign + generate writeup
                 if isinstance(event, ChallengeSolved):
                     try:
                         self.campaign.record_solved(
@@ -276,6 +325,16 @@ class MissionService:
                         )
                     except Exception:
                         logger.debug("Failed to record solved challenge in campaign", exc_info=True)
+                    # Auto-generate writeup file
+                    if event.flag and mission_type == MissionType.CTF:
+                        try:
+                            _write_challenge_writeup(
+                                event.challenge_name, event.flag,
+                                event.approach, target_uri,
+                                output_dir=self._writeup_dir,
+                            )
+                        except Exception:
+                            logger.debug("Failed to generate writeup", exc_info=True)
                 if on_event is not None:
                     try:
                         on_event(event)

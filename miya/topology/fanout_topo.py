@@ -65,25 +65,21 @@ logger = logging.getLogger(__name__)
 #  Prompts — minimal by design
 # ═══════════════════════════════════════════════════════════════════
 
-_ENUMERATE_PROMPT = """Enumerate all CTF challenges on this platform.
+_ENUMERATE_PROMPT = (
+    "Enumerate all CTF challenges on this platform.\n\n"
+    "Target: {target}\n"
+    "{operator_hint}\n\n"
+    "For each challenge, report:\n"
+    '[EVENT:ChallengeIdentified {{"challenge_name": "...", "category": "web|pwn|crypto|reverse|misc", "points": 0, "context": "ctf"}}]\n\n'
+    "List every challenge you can find. Use the platform's API, web interface, or challenge list page.\n"
+)
 
-Target: {target}
-{operator_hint}
-
-For each challenge, report:
-[EVENT:ChallengeIdentified {"challenge_name": "...", "category": "web|pwn|crypto|reverse|misc", "points": 0, "context": "ctf"}]
-
-List every challenge you can find. Use the platform's API, web interface, or challenge list page.
-"""
-
-_CLASSIFY_BATCH_PROMPT = """Classify these CTF challenges by category.
-
-Challenges:
-{challenge_list}
-
-For each, respond with:
-[EVENT:ChallengeClassified {"challenge_name": "...", "category": "web|pwn|crypto|reverse|misc", "confidence": 0.8, "reasoning": "...", "context": "ctf"}]
-"""
+_CLASSIFY_BATCH_PROMPT = (
+    "Classify these CTF challenges by category.\n\n"
+    "Challenges:\n{challenge_list}\n\n"
+    "For each, respond with:\n"
+    '[EVENT:ChallengeClassified {{"challenge_name": "...", "category": "web|pwn|crypto|reverse|misc", "confidence": 0.8, "reasoning": "...", "context": "ctf"}}]\n'
+)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -148,42 +144,88 @@ class FanoutTopology:
 
         operator_hint = f"Operator: {mission.prompt}" if mission.prompt else ""
 
-        # ── Phase 1: ENUMERATE ────────────────────────────────────
-        yield PhaseTransition(
-            to_phase="enumerate",
-            reason="Discovering challenges on the platform",
-            aggregate_id=mission.id,
-            mission=mission.mission_type.value,
-        )
-        logger.info("▶ ENUMERATE — discovering challenges")
-
-        enum_prompt = _ENUMERATE_PROMPT.format(
-            target=mission.target.uri,
-            operator_hint=operator_hint,
-        ) + EVENT_INSTRUCTION
-
-        enum_output = await self._run(enum_prompt, agents, blackboard)
-
+        # ── Phase 1: ENUMERATE (or use pre-defined challenges) ───
+        predefined = mission.options.get("challenges")
         challenges: list[dict[str, Any]] = []
-        for ev in extract_events_from_output(enum_output, mission):
-            yield ev
-            blackboard.apply(ev)
-            if isinstance(ev, ChallengeIdentified):
-                challenges.append({
-                    "name": ev.challenge_name,
-                    "category": ev.category,
-                    "points": ev.points,
-                })
 
-        # If no challenges discovered via events, try a minimal fallback:
-        # treat the single target as one challenge
-        if not challenges:
-            logger.info("No challenges enumerated — treating target as single challenge")
-            challenges = [{
-                "name": "challenge",
-                "category": "",
-                "points": 0,
-            }]
+        if predefined and isinstance(predefined, list):
+            # User provided challenge list — skip enumeration
+            logger.info("▶ ENUMERATE — skipped (user provided %d challenges)", len(predefined))
+            yield PhaseTransition(
+                to_phase="enumerate",
+                reason=f"Using {len(predefined)} user-provided challenge(s)",
+                aggregate_id=mission.id,
+                mission=mission.mission_type.value,
+            )
+            for ch in predefined:
+                ch_name = ch.get("name", "challenge")
+                ch_target = ch.get("target", mission.target.uri)
+                ch_cat = ch.get("category", "")
+                challenges.append({
+                    "name": ch_name,
+                    "target": ch_target,
+                    "category": ch_cat,
+                    "points": ch.get("points", 0),
+                })
+                # Emit ChallengeIdentified so blackboard/events stay consistent
+                ev = ChallengeIdentified(
+                    challenge_name=ch_name,
+                    category=ch_cat,
+                    points=ch.get("points", 0),
+                    context="ctf",
+                    mission="ctf",
+                )
+                yield ev
+                blackboard.apply(ev)
+
+            # ── Pre-flight connectivity probe ──────────────────
+            reachable, unreachable = await self._probe_targets(challenges)
+            if unreachable:
+                logger.warning(
+                    "Unreachable challenges: %s",
+                    ", ".join(f"{c['name']} ({c['target']})" for c in unreachable),
+                )
+            if reachable:
+                logger.info(
+                    "Pre-flight: %d/%d targets reachable",
+                    len(reachable), len(challenges),
+                )
+        else:
+            # No pre-defined list — discover via agent
+            yield PhaseTransition(
+                to_phase="enumerate",
+                reason="Discovering challenges on the platform",
+                aggregate_id=mission.id,
+                mission=mission.mission_type.value,
+            )
+            logger.info("▶ ENUMERATE — discovering challenges")
+
+            enum_prompt = _ENUMERATE_PROMPT.format(
+                target=mission.target.uri,
+                operator_hint=operator_hint,
+            ) + EVENT_INSTRUCTION
+
+            enum_output = await self._run(enum_prompt, agents, blackboard)
+
+            for ev in extract_events_from_output(enum_output, mission):
+                yield ev
+                blackboard.apply(ev)
+                if isinstance(ev, ChallengeIdentified):
+                    challenges.append({
+                        "name": ev.challenge_name,
+                        "category": ev.category,
+                        "points": ev.points,
+                    })
+
+            # If no challenges discovered via events, try a minimal fallback:
+            # treat the single target as one challenge
+            if not challenges:
+                logger.info("No challenges enumerated — treating target as single challenge")
+                challenges = [{
+                    "name": "challenge",
+                    "category": "",
+                    "points": 0,
+                }]
 
         logger.info("Discovered %d challenge(s)", len(challenges))
 
@@ -260,9 +302,11 @@ class FanoutTopology:
                 logger.info("  → Solving: %s (%s)", ch_name, ch_cat or "unknown")
 
                 # Create sub-mission for this challenge
+                # Use per-challenge target URL if available, else fall back to mission target
+                ch_target = challenge.get("target", mission.target.uri)
                 sub_mission = Mission(
                     mission_type=MissionType.CTF,
-                    target=Target(uri=mission.target.uri, kind="challenge"),
+                    target=Target(uri=ch_target, kind="challenge"),
                     topology="ooda",
                     prompt=f"Solve challenge: {ch_name}. " + (mission.prompt or ""),
                     options={"challenge_name": ch_name, "category": ch_cat},
@@ -362,6 +406,42 @@ class FanoutTopology:
             mission=mission.mission_type.value,
         )
 
+    async def _probe_targets(
+        self,
+        challenges: list[dict[str, Any]],
+        timeout: float = 5.0,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Pre-flight connectivity check for challenge targets.
+
+        Returns (reachable, unreachable) lists.
+        """
+        reachable: list[dict[str, Any]] = []
+        unreachable: list[dict[str, Any]] = []
+
+        async def _check(ch: dict[str, Any]) -> None:
+            target = ch.get("target", "")
+            if not target:
+                unreachable.append(ch)
+                return
+            try:
+                # Parse host:port from URL
+                from urllib.parse import urlparse
+                parsed = urlparse(target)
+                host = parsed.hostname or ""
+                port = parsed.port or 80
+                _, writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, port),
+                    timeout=timeout,
+                )
+                writer.close()
+                await writer.wait_closed()
+                reachable.append(ch)
+            except Exception:
+                unreachable.append(ch)
+
+        await asyncio.gather(*(_check(ch) for ch in challenges), return_exceptions=True)
+        return reachable, unreachable
+
     async def _run(
         self,
         prompt: str,
@@ -376,6 +456,9 @@ class FanoutTopology:
             name: handle.to_agent_definition()
             for name, handle in agents.items()
         }
+        # Use injected coordinator (for testing) or SDK
+        if self._coordinator is not None:
+            return await self._coordinator.run(prompt, agent_defs, list(all_mcp_names))
         return await run_sdk_coordinator(prompt, agent_defs, list(all_mcp_names))
 
 
