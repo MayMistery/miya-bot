@@ -1864,9 +1864,17 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                 else:
                     console.print(
                         "[yellow]Usage: set [-g] <key> <value>\n"
-                        "       set show\n"
-                        "  -g = global (~/.config/miya/config.toml)\n"
-                        "  Without -g = project (.miya.toml)[/yellow]"
+                        "       set show[/yellow]\n"
+                        "\n"
+                        "[bold]Available keys:[/bold]\n"
+                        "  [cyan]model[/cyan]      opus | sonnet | haiku\n"
+                        "  [cyan]topology[/cyan]   ooda | attack_graph | fanout\n"
+                        "  [cyan]verbose[/cyan]    info | debug | trace | warning | error\n"
+                        "  [cyan]api_key[/cyan]    <string>  (always saved to global)\n"
+                        "  [cyan]base_url[/cyan]   <url>     (always saved to global)\n"
+                        "\n"
+                        "[dim]  -g = global (~/.config/miya/config.toml)\n"
+                        "  Without -g = project (.miya.toml)[/dim]"
                     )
                 continue
 
