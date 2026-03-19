@@ -657,7 +657,10 @@ async def _nl_parse_mission(
             return None
 
         # ── Build editable fields ────────────────────────────────
-        # Mutable dict so interactive edit can modify in place
+        # Mutable dict so interactive edit can modify in place.
+        # Complex values (lists, dicts) are stored separately to
+        # avoid lossy str() conversion — they are NOT editable via
+        # the interactive field editor but are preserved as-is.
         fields: dict[str, str] = {
             "mission":  mission_type,
             "target":   target,
@@ -666,9 +669,14 @@ async def _nl_parse_mission(
             "verbose":  meta.get("verbose", ""),
             "prompt":   prompt,
         }
-        # Merge non-internal extra_options as editable fields
+        # Complex options (lists/dicts) bypass the string-based editor
+        _complex_options: dict[str, Any] = {}
         for k, v in extra_options.items():
-            if not k.startswith("_"):
+            if k.startswith("_"):
+                continue
+            if isinstance(v, (list, dict)):
+                _complex_options[k] = v
+            else:
                 fields[k] = str(v)
 
         from prompt_toolkit.formatted_text import HTML
@@ -685,6 +693,25 @@ async def _nl_parse_mission(
                 console_obj.print(
                     f"  [dim]{idx:>2}.[/dim] [bold]{key:.<12s}[/bold] [{style}]{display}[/{style}]"
                 )
+                idx += 1
+            # Show complex options as read-only summaries
+            for key, val in _complex_options.items():
+                if key == "challenges" and isinstance(val, list):
+                    console_obj.print(
+                        f"  [dim]{idx:>2}.[/dim] [bold]{key:.<12s}[/bold] "
+                        f"[white]{len(val)} challenge(s)[/white]"
+                    )
+                    for ch in val:
+                        if isinstance(ch, dict):
+                            console_obj.print(
+                                f"       [dim]- {ch.get('name', '?')} → "
+                                f"{ch.get('target', '?')}[/dim]"
+                            )
+                else:
+                    console_obj.print(
+                        f"  [dim]{idx:>2}.[/dim] [bold]{key:.<12s}[/bold] "
+                        f"[white]{val}[/white]"
+                    )
                 idx += 1
 
         _show_fields()
@@ -795,6 +822,8 @@ async def _nl_parse_mission(
         for k, v in fields.items():
             if k not in _core_fields and v:
                 opts[k] = v
+        # Restore complex options (lists/dicts) that bypassed the editor
+        opts.update(_complex_options)
 
         opts["_nl_confirmed"] = True
         return mission_type, target, topology, opts
