@@ -634,12 +634,13 @@ def _build_sdk_options(
         mcp_servers=mcp_configs,  # type: ignore[arg-type]
         allowed_tools=[
             "Read", "Write", "Edit", "Bash", "Grep", "Glob",
-            "WebSearch", "WebFetch", "Agent",
+            "WebSearch", "WebFetch", "Agent", "Skill",
         ] + all_mcp_patterns,
         permission_mode="acceptEdits",
         max_turns=max_turns if max_turns is not None else cfg["max_turns"],
         cwd=os.getcwd(),
         env=_sdk_env(),
+        setting_sources=["user", "project"],
     )
 
 

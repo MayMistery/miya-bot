@@ -497,6 +497,9 @@ def update(branch: str | None) -> None:
         )
     steps.extend([
         ("Pulling", ["git", "-C", project_root, "pull", "origin", target_branch]),
+        ("Updating skills (submodules)", [
+            "git", "-C", project_root, "submodule", "update", "--init", "--recursive",
+        ]),
         ("Syncing deps", ["uv", "sync", "--directory", project_root]),
     ])
 
@@ -1491,6 +1494,90 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                         "[yellow]Background job killed.[/yellow]"
                     )
                     bg_job = None
+                continue
+
+            # ── Skill management ──────────────────────────────────
+            if cmd == "skill":
+                skill_parts = raw.split(None, 2)
+                sub = skill_parts[1].lower() if len(skill_parts) > 1 else "list"
+
+                # Discover skills recursively from .claude/skills/ and ~/.claude/skills/
+                from pathlib import Path as _P
+                skill_dirs: list[tuple[str, _P, _P]] = []
+                seen_names: set[str] = set()
+                for base in [_P.cwd() / ".claude" / "skills", _P.home() / ".claude" / "skills"]:
+                    if not base.is_dir():
+                        continue
+                    for sm in sorted(base.rglob("SKILL.md")):
+                        name = sm.parent.name
+                        if name not in seen_names:
+                            seen_names.add(name)
+                            skill_dirs.append((name, sm, base))
+
+                if sub == "list":
+                    if not skill_dirs:
+                        console.print(
+                            "[dim]No skills found.\n"
+                            "  Project: .claude/skills/<name>/SKILL.md\n"
+                            "  Global:  ~/.claude/skills/<name>/SKILL.md[/dim]"
+                        )
+                    else:
+                        t = Table(
+                            title="Skills", box=box.SIMPLE,
+                            title_style="bold cyan",
+                        )
+                        t.add_column("Name", style="bold green")
+                        t.add_column("Scope", style="dim")
+                        t.add_column("Description")
+                        for name, path, base in skill_dirs:
+                            scope = "project" if ".claude" in str(base)[:len(str(_P.cwd()))+20] else "global"
+                            # Parse description from frontmatter
+                            desc = ""
+                            try:
+                                text = path.read_text(encoding="utf-8")
+                                if text.startswith("---"):
+                                    fm = text.split("---", 2)
+                                    if len(fm) >= 3:
+                                        for line in fm[1].splitlines():
+                                            if line.strip().startswith("description:"):
+                                                desc = line.split(":", 1)[1].strip().strip('"').strip("'")
+                                                break
+                            except Exception:
+                                pass
+                            t.add_row(
+                                name, scope,
+                                desc[:60] + ("..." if len(desc) > 60 else ""),
+                            )
+                        console.print(t)
+
+                elif sub == "info" and len(skill_parts) > 2:
+                    target = skill_parts[2].strip()
+                    found = None
+                    for name, path, base in skill_dirs:
+                        if name == target:
+                            found = path
+                            break
+                    if found:
+                        text = found.read_text(encoding="utf-8")
+                        # Show first 50 lines
+                        lines = text.splitlines()[:50]
+                        console.print(Panel(
+                            "\n".join(lines),
+                            title=f"[bold]{target}[/bold] SKILL.md",
+                            border_style="cyan",
+                        ))
+                        if len(text.splitlines()) > 50:
+                            console.print(
+                                f"[dim]... {len(text.splitlines()) - 50} more lines. "
+                                f"Full path: {found}[/dim]"
+                            )
+                    else:
+                        console.print(f"[red]Skill '{target}' not found.[/red]")
+
+                else:
+                    console.print(
+                        "[yellow]Usage: skill list | skill info <name>[/yellow]"
+                    )
                 continue
 
             # ── Exit ──────────────────────────────────────────────

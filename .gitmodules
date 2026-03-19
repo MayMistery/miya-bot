@@ -1,0 +1,6 @@
+[submodule ".claude/skills/ctf-skills"]
+	path = .claude/skills/ctf-skills
+	url = https://github.com/ljagiello/ctf-skills.git
+[submodule ".claude/skills/trailofbits-skills"]
+	path = .claude/skills/trailofbits-skills
+	url = https://github.com/trailofbits/skills.git
