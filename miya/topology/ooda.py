@@ -739,14 +739,54 @@ class OODATopology:
                 if d == "complete":
                     break
             else:
-                # Loop exhausted without explicit completion
-                self._log(
-                    logging.WARNING,
-                    "OODA loop exhausted after %d iterations "
-                    "without explicit completion",
-                    self._max_iterations,
-                )
-                self._report(status="failed", phase="FAILED")
+                # Loop exhausted — check if a flag was actually found
+                _ch_name = mission.options.get("challenge_name", "")
+                _flag_found = False
+
+                # Check 1: explicit ChallengeSolved already in blackboard
+                if blackboard.solved_flags:
+                    _flag_found = True
+
+                # Check 2: flag pattern in findings (LootCollected with flag)
+                if not _flag_found:
+                    import re as _re
+                    _FLAG_RE = _re.compile(r'flag\{[^}]+\}', _re.IGNORECASE)
+                    for f in blackboard.findings:
+                        if _FLAG_RE.search(f.detail or "") or _FLAG_RE.search(f.evidence or ""):
+                            _flag_found = True
+                            _flag_match = _FLAG_RE.search(f.detail or "") or _FLAG_RE.search(f.evidence or "")
+                            if _flag_match and _ch_name:
+                                self._log(
+                                    logging.INFO,
+                                    "\u2713 Flag found in findings: %s — emitting ChallengeSolved",
+                                    _flag_match.group()[:50],
+                                )
+                                solved_ev = ChallengeSolved(
+                                    aggregate_id=mission.id,
+                                    challenge_name=_ch_name,
+                                    flag=_flag_match.group(),
+                                    approach="extracted from findings after OODA exhaustion",
+                                    mission=mission.mission_type.value,
+                                )
+                                yield solved_ev
+                                blackboard.apply(solved_ev)
+                            break
+
+                if _flag_found:
+                    self._log(
+                        logging.INFO,
+                        "OODA loop exhausted after %d iterations but flag was found",
+                        self._max_iterations,
+                    )
+                    self._report(status="solved", phase="DONE")
+                else:
+                    self._log(
+                        logging.WARNING,
+                        "OODA loop exhausted after %d iterations "
+                        "without explicit completion",
+                        self._max_iterations,
+                    )
+                    self._report(status="failed", phase="FAILED")
         finally:
             # Always clean up the session
             if session is not None:

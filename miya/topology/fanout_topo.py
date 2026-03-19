@@ -398,10 +398,24 @@ class FanoutTopology:
 
         # Skip already-solved challenges (campaign awareness)
         if isinstance(campaign, Campaign):
-            unsolved = [c for c in challenges if not campaign.is_solved(c["name"])]
-            skipped = len(challenges) - len(unsolved)
-            if skipped:
-                logger.info("Skipping %d already-solved challenge(s)", skipped)
+            unsolved = []
+            skipped_solved = 0
+            for c in challenges:
+                if campaign.is_solved(c["name"]):
+                    skipped_solved += 1
+                    continue
+                # Log previously attempted challenges for operator awareness
+                cp = campaign.get_checkpoint(c["name"])
+                if cp:
+                    logger.info(
+                        "Retrying challenge %s (previous: %s — %s)",
+                        c["name"], cp.get("status", "?"), cp.get("reason", ""),
+                    )
+                unsolved.append(c)
+            if skipped_solved:
+                logger.info("Skipping %d already-solved challenge(s)", skipped_solved)
+            # Clear old checkpoints for challenges we're about to retry
+            campaign.clear_checkpoints()
             challenges = unsolved
 
         if not challenges:
@@ -556,6 +570,7 @@ class FanoutTopology:
 
                 async def _run_ooda() -> None:
                     from miya.shared.events import ChallengeSolved
+                    _ch_solved = False
                     async for ev in ooda.execute(
                         sub_mission, sub_bb, sub_agents, event_store,
                         operator_queue=ch_op_queue,
@@ -566,6 +581,7 @@ class FanoutTopology:
                         if ev.__class__.event_type not in _SUB_MISSION_FILTER:
                             await event_queue.put(ev)
                         if isinstance(ev, ChallengeSolved):
+                            _ch_solved = True
                             ch_meta[ch_name]["flag"] = ev.flag
                             ch_meta[ch_name]["approach"] = ev.approach
                             display.update(ch_name, status="solved",
@@ -575,6 +591,13 @@ class FanoutTopology:
                                 f"\u2713 {ch_name} SOLVED: {ev.flag[:40]}"
                                 f"  ({_elapsed})"
                             )
+                    # OODA exhausted without solving — checkpoint for resume
+                    if not _ch_solved and isinstance(campaign, Campaign):
+                        campaign.record_checkpoint(
+                            ch_name, "exhausted",
+                            reason=f"OODA loop exhausted after {ooda._max_iterations} iterations",
+                            mission_id=sub_mission.id,
+                        )
 
                 # ── Run with timeout + renewal ────────────────
                 ooda_task = asyncio.create_task(_run_ooda())
@@ -626,6 +649,13 @@ class FanoutTopology:
                                     "Challenge %s timed out after %.0fs (no extension)",
                                     ch_name, self._per_challenge_timeout,
                                 )
+                                # Save checkpoint so resume skips this
+                                if isinstance(campaign, Campaign):
+                                    campaign.record_checkpoint(
+                                        ch_name, "timeout",
+                                        reason=f"timed out after {self._per_challenge_timeout:.0f}s",
+                                        mission_id=mission.id,
+                                    )
                                 return
 
                         # Warn before timeout
@@ -655,6 +685,12 @@ class FanoutTopology:
                     display.update(ch_name, status="failed", phase="FAILED")
                     _elapsed = display.get_elapsed(ch_name)
                     display.log_event(f"\u274c {ch_name} failed  ({_elapsed})")
+                    if isinstance(campaign, Campaign):
+                        campaign.record_checkpoint(
+                            ch_name, "failed",
+                            reason="exception during OODA execution",
+                            mission_id=mission.id,
+                        )
                     logger.error("Challenge %s failed", ch_name, exc_info=True)
 
         # Launch all challenge solvers
