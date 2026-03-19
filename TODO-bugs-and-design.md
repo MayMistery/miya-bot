@@ -1,6 +1,6 @@
 # Miya Bot — Bug & 设计问题深度审查（修订版）
 
-经过对代码库的**二次验证**，剔除误报、补充业务设计缺陷。共 **15 个 TODO**。
+经过对代码库的**二次验证 + 业务深度审查**，剔除误报、补充业务设计缺陷。共 **20 个 TODO**。
 
 标注说明:
 - **[已验证]** = 通过代码走读确认存在
@@ -255,7 +255,113 @@ if projector:
 
 ---
 
-## TODO 13: [已验证] `events` 表缺少 aggregate_id + version 联合唯一约束
+## TODO 13: [新增·业务] Blackboard compaction 按 severity 丢弃可能导致关键线索丢失
+
+**文件**: `miya/shared/blackboard.py:529-536`
+**严重性**: P2
+
+```python
+sorted_findings = sorted(
+    self.findings,
+    key=lambda f: (-f.severity.score, self.findings.index(f)),
+)
+self.findings[:] = sorted_findings[:max_findings]
+```
+
+验证：compaction 按 severity 降序保留 findings，低 severity 的会被丢弃。但在 CTF 场景中，一个 INFO 级别的 finding（如"Discovered WordPress 5.8 with plugin X"）可能是识别漏洞的**唯一线索**。一旦在后续迭代中因 compaction 被删除，OODA 循环就丢失了这个上下文。
+
+**修复方案**:
+- compaction 不应按 severity 单维度排序，应考虑"信息增益"维度
+- 对与当前 challenge 直接相关的 findings（challenge_name 匹配）永不删除
+- 或对被删除的 findings 保留 one-liner 摘要列表，不完全丢弃
+
+---
+
+## TODO 14: [新增·业务] Whitebox 模式将 file path 作为 target URI — 语义混乱
+
+**文件**: `miya/topology/fanout_topo.py:1342-1345`
+**严重性**: P2
+
+```python
+ch["_whitebox"] = True
+ch["_original_target"] = ch.get("target", "")
+if ch_files:
+    ch["target"] = ch_files[0]  # 文件路径取代了 URL
+```
+
+验证：当目标不可达时，whitebox 模式将 `target` 设为第一个 file path（如 `/home/user/challenges/web/app.py`）。但下游 `_solve_challenge` (line 536) 直接用 `ch_target = challenge.get("target", mission.target.uri)` 构建 mission prompt。`Target(uri=..., kind="challenge")` 现在 URI 变成了文件路径，语义错误。
+
+虽然 whitebox 提示词（line 520-524）告诉 agent 不要发起网络请求，但 agent 可能仍尝试 `curl` 这个"目标"路径。
+
+**修复方案**:
+- whitebox 模式下，`Target.kind` 应改为 `"source"`
+- 保持原始 target 不变，在 sub-mission prompt 中明确标注 `source_files` 列表
+- 不要复用 `target` 字段传递不同语义的数据
+
+---
+
+## TODO 15: [新增·业务] `ChallengeSolved` 通过 `object.__setattr__` 修改 frozen dataclass — 事件溯源契约违反
+
+**文件**: `miya/topology/ooda.py:506-509, 672-675`
+**严重性**: P2
+
+```python
+object.__setattr__(
+    extracted, "phase_output",
+    continue_output[:8000],
+)
+```
+
+验证：`DomainEvent` 和所有子类都是 `frozen=True` 的 dataclass。代码绕过 frozen 保护强行修改 `phase_output`。这个修改发生在事件创建之后、持久化之前，但：
+1. 违反了事件的不可变性契约
+2. 如果 `to_dict()` 先于 `__setattr__` 被调用，序列化的数据不包含 `phase_output`
+3. 事件 replay 时从 JSON 重建的事件不会包含这个字段（除非恰好在 JSON 中）
+
+**修复方案**:
+- 在 `extract_events_from_output` 阶段就将 phase_output 注入事件构造参数
+- 或创建独立事件类型 `PhaseOutputCaptured` 关联到 `ChallengeSolved`
+
+---
+
+## TODO 16: [新增·业务] AttackGraph 的图变更不产生事件 — 审计链断裂
+
+**文件**: `miya/topology/attack_graph_topo.py:388-389, 491-587`
+**严重性**: P2
+
+验证：`_apply_rebuild()` 方法通过正则解析 LLM 输出直接修改内存中的 graph 对象（添加节点、边、更新状态），但**不产生任何 DomainEvent**。这意味着：
+1. EventStore 中没有 attack graph 变更的记录
+2. 如果 mission 需要审计或 replay，attack graph 是空的
+3. 违反了项目的核心设计原则——"Every state change in Miya is captured as a DomainEvent"（events.py 第 1-5 行）
+
+**修复方案**:
+- 添加 `GraphNodeAdded`, `GraphEdgeAdded`, `GraphNodeStatusChanged` 事件类型
+- `_apply_rebuild()` 在修改 graph 前先 yield 对应事件
+- 或将 AttackGraph 的变更通过 Blackboard 的 event projection 机制来驱动
+
+---
+
+## TODO 17: [新增·业务] OODA 无 stagnation detection — 空转消耗 token
+
+**文件**: `miya/topology/ooda.py:457-799`
+**严重性**: P1
+
+验证：OODA 循环从 iteration 1 跑到 max_iterations，每次 REFLECT 只要不返回 "complete" 就继续。但没有检测 **进展是否停滞**：
+- 不追踪 `blackboard.findings` 数量在迭代间是否增长
+- 不检查 REFLECT 的 insights 是否与上次相同（重复 pivot 同一策略）
+- 不比较连续两次 ACT 输出的相似度
+
+如果 agent 在 5 次迭代中都没有新 finding，它仍会继续跑完剩余的 5 次迭代。
+
+**业务影响**: 每次无效迭代消耗 ~$0.10-0.50 的 API 费用。10 个 challenge * 5 次空转 = $5-25 浪费。
+
+**修复方案**:
+- 记录每次迭代前后的 `len(blackboard.findings)` 和 `len(blackboard.exploit_attempts)`
+- 连续 N 次（如 3 次）无新 finding 时，自动降级为 "complete"
+- 在 REFLECT prompt 中注入 stagnation 警告："WARNING: No new findings in last 3 iterations. Consider COMPLETE if stuck."
+
+---
+
+## TODO 18: [已验证] `events` 表缺少 aggregate_id + version 联合唯一约束
 
 **文件**: `miya/infra/event_store.py:19-38`
 **严重性**: P2
@@ -266,7 +372,7 @@ if projector:
 
 ---
 
-## TODO 14: [已验证] CostTracker docstring 误导
+## TODO 19: [已验证] CostTracker docstring 误导
 
 **文件**: `miya/topology/base.py:45`
 **严重性**: P3（文档）
@@ -277,7 +383,7 @@ if projector:
 
 ---
 
-## TODO 15: [已验证] `events` 命令序号显示为负数
+## TODO 20: [已验证] `events` 命令序号显示为负数
 
 **文件**: `miya/main.py:1705`
 **严重性**: P3（UI）
@@ -292,18 +398,23 @@ if projector:
 
 | 优先级 | TODO | 类型 | 风险 | 工作量 |
 |--------|------|------|------|--------|
-| P0 | #1 os.environ 污染 | Bug | REPL 下 mission 行为异常 | 小 |
-| P1 | #2 Campaign 前向兼容 | Bug | 升级后数据丢失 | 小 |
-| P1 | #3 fanout 异常吞没 | Bug | 调试困难/资源泄漏 | 小 |
-| P1 | #4 无自动知识共享 | 业务设计 | 多 challenge 效率低下 | 大 |
-| P1 | #5 Mission 状态机不完整 | 业务设计 | resume/中断功能缺失 | 中 |
-| P1 | #6 REFLECT heuristic 误判 | 业务设计 | Mission 提前终止 | 中 |
-| P1 | #11 事件解析无校验 | 业务设计 | 虚假 flag / 幻觉事件 | 中 |
-| P2 | #7 Blackboard context 无界增长 | 业务设计 | Token 浪费 / 成本增长 | 中 |
-| P2 | #8 AttackGraph 半成品 | 业务设计 | 用户体验差 | 大 |
-| P2 | #9 EventBus 异常不透明 | 设计 | 状态不一致 | 小 |
-| P2 | #10 Blackboard 静默丢弃事件 | 设计 | 调试困难 | 小 |
-| P2 | #12 ENUMERATE 无 fallback | 业务设计 | 空列表直接放弃 | 中 |
-| P2 | #13 DB 缺唯一约束 | 设计 | 数据完整性 | 小 |
-| P3 | #14 CostTracker docstring | 文档 | 误导 | 极小 |
-| P3 | #15 events 命令负数序号 | UI | 用户困惑 | 极小 |
+| **P0** | #1 os.environ 污染 | Bug | REPL 下 mission 行为异常 | 小 |
+| **P1** | #2 Campaign 前向兼容 | Bug | 升级后数据丢失 | 小 |
+| **P1** | #3 fanout 异常吞没 | Bug | 调试困难/资源泄漏 | 小 |
+| **P1** | #4 无自动知识共享 | 业务设计 | 多 challenge 效率低下 | 大 |
+| **P1** | #5 Mission 状态机不完整 | 业务设计 | resume/中断功能缺失 | 中 |
+| **P1** | #6 REFLECT heuristic 误判 | 业务设计 | Mission 提前终止 | 中 |
+| **P1** | #11 事件解析无校验 | 业务设计 | 虚假 flag / 幻觉事件 | 中 |
+| **P1** | #17 OODA 无 stagnation detection | 业务设计 | 空转烧钱 | 中 |
+| **P2** | #7 Blackboard context 无界增长 | 业务设计 | Token 浪费 / 成本增长 | 中 |
+| **P2** | #8 AttackGraph 半成品 | 业务设计 | 用户体验差 | 大 |
+| **P2** | #9 EventBus 异常不透明 | 设计 | 状态不一致 | 小 |
+| **P2** | #10 Blackboard 静默丢弃事件 | 设计 | 调试困难 | 小 |
+| **P2** | #12 ENUMERATE 无 fallback | 业务设计 | 空列表直接放弃 | 中 |
+| **P2** | #13 compaction 丢关键线索 | 业务设计 | CTF 上下文丢失 | 中 |
+| **P2** | #14 whitebox 语义混乱 | 业务设计 | agent 误解目标 | 小 |
+| **P2** | #15 frozen dataclass 被篡改 | 设计 | 事件溯源契约违反 | 小 |
+| **P2** | #16 AttackGraph 无事件 | 设计 | 审计链断裂 | 中 |
+| **P2** | #18 DB 缺唯一约束 | 设计 | 数据完整性 | 小 |
+| **P3** | #19 CostTracker docstring | 文档 | 误导 | 极小 |
+| **P3** | #20 events 命令负数序号 | UI | 用户困惑 | 极小 |
