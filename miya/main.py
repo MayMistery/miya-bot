@@ -162,20 +162,27 @@ def print_report(report: Any) -> None:
     """Print a MissionReport with rich formatting."""
     # Header
     status_color = "green" if report.status == "completed" else "red"
-    cost_str = ""
     cost_usd = getattr(report, "cost_usd", 0) or 0
     api_turns = getattr(report, "api_turns", 0) or 0
     api_calls = getattr(report, "api_calls", 0) or 0
-    if cost_usd > 0:
-        cost_str = f"\nCost: [yellow]${cost_usd:.4f}[/yellow]  |  Turns: {api_turns}  |  API calls: {api_calls}"
+
+    # Format duration nicely
+    dur = report.duration_seconds
+    if dur >= 3600:
+        dur_str = f"{dur / 3600:.1f}h"
+    elif dur >= 60:
+        dur_str = f"{dur / 60:.1f}m"
+    else:
+        dur_str = f"{dur:.1f}s"
 
     console.print(Panel(
         f"[bold]{report.mission_type.upper()}[/bold] → {report.target}\n"
         f"Topology: [yellow]{report.topology}[/yellow]  |  "
         f"Status: [{status_color}]{report.status}[/{status_color}]  |  "
-        f"Duration: {report.duration_seconds:.1f}s  |  "
-        f"Events: {report.events_count}"
-        + cost_str,
+        f"Duration: {dur_str}  |  "
+        f"Events: {report.events_count}\n"
+        f"Cost: [yellow]${cost_usd:.4f}[/yellow]  |  "
+        f"Turns: {api_turns}  |  API calls: {api_calls}",
         title="[bold red]Mission Report[/bold red]",
         border_style="red",
         box=box.DOUBLE,
@@ -249,10 +256,12 @@ def cli(ctx: click.Context, verbose: int) -> None:
 
 
 def _common_options(f: Any) -> Any:
-    """Shared --model, --api-key, --base-url options."""
+    """Shared --model, --api-key, --base-url, --unlimited options."""
     f = click.option("--model", "-m", default=None, help=_MODEL_HELP)(f)
     f = click.option("--api-key", default=None, help=_KEY_HELP)(f)
     f = click.option("--base-url", default=None, help=_BASE_URL_HELP)(f)
+    f = click.option("--unlimited", is_flag=True, default=False,
+                     help="Unlimited mode: no timeouts, no iteration limits")(f)
     return f
 
 
@@ -263,10 +272,12 @@ def _common_options(f: Any) -> Any:
 @click.option("--topology", "-T", default="ooda", type=click.Choice(["ooda", "attack_graph", "fanout"]))
 @click.option("--db", default="miya_events.db", help="SQLite database path")
 @_common_options
-def oneday(target: str, prompt: str, source: str | None, topology: str, db: str, model: str | None, api_key: str | None, base_url: str | None) -> None:
+def oneday(target: str, prompt: str, source: str | None, topology: str, db: str, model: str | None, api_key: str | None, base_url: str | None, unlimited: bool) -> None:
     """Exploit known CVEs (1-day vulnerabilities)"""
     _apply_api_env(api_key, base_url)
     opts: dict[str, Any] = {}
+    if unlimited:
+        opts["unlimited"] = True
     target_kind = "service"
     if source:
         opts["source_path"] = source
@@ -282,10 +293,12 @@ def oneday(target: str, prompt: str, source: str | None, topology: str, db: str,
 @click.option("--topology", "-T", default="ooda", type=click.Choice(["ooda", "attack_graph", "fanout"]))
 @click.option("--db", default="miya_events.db", help="SQLite database path")
 @_common_options
-def zeroday(target: str, prompt: str, service: str | None, language: str, topology: str, db: str, model: str | None, api_key: str | None, base_url: str | None) -> None:
+def zeroday(target: str, prompt: str, service: str | None, language: str, topology: str, db: str, model: str | None, api_key: str | None, base_url: str | None, unlimited: bool) -> None:
     """Discover unknown vulnerabilities (0-day)"""
     _apply_api_env(api_key, base_url)
     opts: dict[str, Any] = {"language": language}
+    if unlimited:
+        opts["unlimited"] = True
     if service:
         opts["service_url"] = service
     asyncio.run(_run_mission("zeroday", target, "source", topology, db, model=model or DEFAULT_MODEL, prompt=prompt, **opts))
@@ -309,11 +322,16 @@ def _detect_target_kind(target: str) -> str:
 @click.option("--topology", "-T", default="ooda", type=click.Choice(["ooda", "attack_graph", "fanout"]))
 @click.option("--db", default="miya_events.db", help="SQLite database path")
 @_common_options
-def ctf(target: str, prompt: str, category: str, topology: str, db: str, model: str | None, api_key: str | None, base_url: str | None) -> None:
+def ctf(target: str, prompt: str, category: str, topology: str, db: str, model: str | None, api_key: str | None, base_url: str | None, unlimited: bool) -> None:
     """Solve CTF challenges"""
     _apply_api_env(api_key, base_url)
     kind = _detect_target_kind(target)
-    asyncio.run(_run_mission("ctf", target, kind, topology, db, model=model or DEFAULT_MODEL, prompt=prompt, category=category))
+    opts: dict[str, Any] = {}
+    if category:
+        opts["category"] = category
+    if unlimited:
+        opts["unlimited"] = True
+    asyncio.run(_run_mission("ctf", target, kind, topology, db, model=model or DEFAULT_MODEL, prompt=prompt, **opts))
 
 
 @cli.command()
@@ -532,10 +550,10 @@ def update(branch: str | None) -> None:
 @click.option("--db", default="miya_events.db", help="SQLite database path")
 @_common_options
 @click.pass_context
-def interactive(ctx: click.Context, db: str, model: str | None, api_key: str | None, base_url: str | None) -> None:
+def interactive(ctx: click.Context, db: str, model: str | None, api_key: str | None, base_url: str | None, unlimited: bool) -> None:
     """Interactive REPL mode"""
     _apply_api_env(api_key, base_url)
-    asyncio.run(_interactive_loop(db, model=model or DEFAULT_MODEL))
+    asyncio.run(_interactive_loop(db, model=model or DEFAULT_MODEL, unlimited=unlimited))
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -894,16 +912,21 @@ async def _run_mission(
 
     show_banner()
 
+    is_unlimited = options.get("unlimited", False)
+
     panel_lines = [
         f"[bold]Mission:[/bold] {mission_type.upper()}",
         f"[bold]Target:[/bold]  {target}",
         f"[bold]Topology:[/bold] {topology}",
         f"[bold]Model:[/bold]   {model}",
     ]
+    if is_unlimited:
+        panel_lines.append("[bold yellow]Mode:[/bold yellow]    [bold yellow]UNLIMITED[/bold yellow] (no timeouts)")
     if prompt:
         panel_lines.append(f"[bold]Prompt:[/bold]  {prompt[:80]}")
-    if options:
-        panel_lines.append(f"[bold]Options:[/bold] {options}")
+    display_opts = {k: v for k, v in options.items() if k != "unlimited"}
+    if display_opts:
+        panel_lines.append(f"[bold]Options:[/bold] {display_opts}")
     console.print(Panel(
         "\n".join(panel_lines),
         title="[bold cyan]Mission Configuration[/bold cyan]",
@@ -942,7 +965,7 @@ async def _run_mission(
         await service.close()
 
 
-async def _interactive_loop(db: str, model: str = "opus") -> None:
+async def _interactive_loop(db: str, model: str = "opus", unlimited: bool = False) -> None:
     from prompt_toolkit import PromptSession
     from prompt_toolkit.completion import WordCompleter
     from prompt_toolkit.history import FileHistory
@@ -1101,6 +1124,7 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
         t.add_row("  --language/-l <lang>", "Language hint (zeroday)")
         t.add_row("  --source/-s <path>", "Source code path (oneday white-box)")
         t.add_row('  --service <url>', "Live service URL (zeroday PoC)")
+        t.add_row("  --unlimited", "No timeouts, no iteration limits")
         t.add_row("", "")
         t.add_row("[dim]Session:[/dim]", "")
         t.add_row("set <key> <value>", "Set config (saved to .miya.toml)")
@@ -1197,11 +1221,14 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
             "--topology", "-T", "--category", "-c", "--language", "-l",
             "--source", "-s", "--service", "--prompt", "-p", "--model", "-m",
         }
+        _KNOWN_BOOL_FLAGS = {"--unlimited"}
         i = 2
         while i < len(parts):
             tok = parts[i]
             if tok in _KNOWN_FLAGS:
                 i += 2  # skip flag + value
+            elif tok in _KNOWN_BOOL_FLAGS:
+                i += 1  # boolean flag, no value
             else:
                 # Found free-text after target — fall through to NL parser
                 return None
@@ -1229,6 +1256,9 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
             elif parts[i] in ("--model", "-m") and i + 1 < len(parts):
                 options["_model_override"] = parts[i + 1]
                 i += 2
+            elif parts[i] == "--unlimited":
+                options["unlimited"] = True
+                i += 1
             else:
                 i += 1
 
@@ -1893,6 +1923,8 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
             mission_model = options.pop("_model_override", cfg["model"])
             mission_prompt = options.pop("_prompt", "")
             nl_confirmed = options.pop("_nl_confirmed", False)
+            if unlimited:
+                options["unlimited"] = True
 
             kind_map = {"oneday": "service", "zeroday": "source"}
             target_kind = kind_map.get(mission_type, _detect_target_kind(target))
@@ -1905,10 +1937,13 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                     f"[bold]Topology:[/bold] {topology}",
                     f"[bold]Model:[/bold]    {mission_model}",
                 ]
+                if unlimited:
+                    panel_lines.append("[bold yellow]Mode:[/bold yellow]    [bold yellow]UNLIMITED[/bold yellow] (no timeouts)")
                 if mission_prompt:
                     panel_lines.append(f"[bold]Prompt:[/bold]  {mission_prompt[:80]}")
-                if options:
-                    panel_lines.append(f"[bold]Options:[/bold]  {options}")
+                display_opts = {k: v for k, v in options.items() if k != "unlimited"}
+                if display_opts:
+                    panel_lines.append(f"[bold]Options:[/bold]  {display_opts}")
                 console.print(Panel(
                     "\n".join(panel_lines),
                     title="[bold cyan]Launching Mission[/bold cyan]",

@@ -429,6 +429,16 @@ class MissionService:
             if ok:
                 logger.debug("MCP servers OK: %s", ", ".join(ok))
 
+        # ── Unlimited mode: disable all timeouts / iteration limits ──
+        is_unlimited = options.pop("unlimited", False)
+        if is_unlimited:
+            import os
+            os.environ["MIYA_OODA_MAX_ITERATIONS"] = "999"
+            os.environ["MIYA_MAX_TURNS"] = "999"
+            os.environ["MIYA_FANOUT_TIMEOUT"] = "999999"
+            os.environ["MIYA_SDK_IDLE_TIMEOUT"] = "99999"
+            logger.info("Unlimited mode: timeouts and iteration limits disabled")
+
         # Get topology (pass coordinator for testability + runtime tunables)
         topo_kwargs: dict[str, Any] = {"coordinator": self._coordinator}
         if topology == "fanout":
@@ -436,6 +446,8 @@ class MissionService:
                 topo_kwargs["max_parallel"] = int(options.pop("max_parallel"))
             if "per_challenge_timeout" in options:
                 topo_kwargs["per_challenge_timeout"] = float(options.pop("per_challenge_timeout"))
+            if is_unlimited:
+                topo_kwargs["per_challenge_timeout"] = 999999.0
         topo = TopologyRegistry.get(topology, **topo_kwargs)
 
         # Execute — reset cost tracker for this mission

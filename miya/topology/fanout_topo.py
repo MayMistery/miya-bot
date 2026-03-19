@@ -562,8 +562,10 @@ class FanoutTopology:
                             ch_meta[ch_name]["approach"] = ev.approach
                             display.update(ch_name, status="solved",
                                            flag=ev.flag, phase="DONE")
+                            _elapsed = display.get_elapsed(ch_name)
                             display.log_event(
                                 f"\u2713 {ch_name} SOLVED: {ev.flag[:40]}"
+                                f"  ({_elapsed})"
                             )
 
                 # ── Run with timeout + renewal ────────────────
@@ -607,8 +609,10 @@ class FanoutTopology:
                                     await ooda_task
                                 except (asyncio.CancelledError, Exception):
                                     pass
+                                _elapsed = display.get_elapsed(ch_name)
                                 display.log_event(
                                     f"\u274c {ch_name}: timed out (no extension)"
+                                    f"  ({_elapsed})"
                                 )
                                 logger.warning(
                                     "Challenge %s timed out after %.0fs (no extension)",
@@ -641,7 +645,8 @@ class FanoutTopology:
                     raise
                 except Exception:
                     display.update(ch_name, status="failed", phase="FAILED")
-                    display.log_event(f"\u274c {ch_name} failed")
+                    _elapsed = display.get_elapsed(ch_name)
+                    display.log_event(f"\u274c {ch_name} failed  ({_elapsed})")
                     logger.error("Challenge %s failed", ch_name, exc_info=True)
 
         # Launch all challenge solvers

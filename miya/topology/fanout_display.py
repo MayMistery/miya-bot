@@ -92,7 +92,7 @@ class ChallengeState:
     @property
     def remaining_str(self) -> str:
         r = self.remaining
-        if r == float("inf"):
+        if r == float("inf") or r > 86400:  # >24h = unlimited
             return ""
         if r < 0:
             return "expired"
@@ -257,6 +257,13 @@ class FanoutDisplay:
         if not state:
             return [f"Unknown challenge: {challenge_name}"]
         return state.log_buffer.tail(n)
+
+    def get_elapsed(self, challenge_name: str) -> str:
+        """Get the formatted elapsed time for a challenge."""
+        state = self._states.get(challenge_name)
+        if not state:
+            return ""
+        return state.elapsed
 
     @property
     def challenge_names(self) -> list[str]:
@@ -429,8 +436,44 @@ class FanoutDisplay:
         if self._console and self._active:
             # Print final state
             self._console.print(self._render())
+            # Print per-challenge summary table
+            self._print_summary_table()
         self._active = False
         return False
+
+    def _print_summary_table(self) -> None:
+        """Print a per-challenge results table on exit."""
+        if not self._console or not self._states:
+            return
+        from rich.table import Table
+        from rich import box
+        table = Table(
+            title="Challenge Results",
+            box=box.SIMPLE_HEAVY,
+            title_style="bold",
+        )
+        table.add_column("Challenge", style="bold")
+        table.add_column("Category", style="dim")
+        table.add_column("Status", width=8)
+        table.add_column("Time", width=8, justify="right")
+        table.add_column("Flag", style="green", max_width=40)
+
+        for s in self._states.values():
+            status_map = {
+                "solved": "[bold green]SOLVED[/bold green]",
+                "failed": "[bold red]FAILED[/bold red]",
+                "timeout": "[bold yellow]TIMEOUT[/bold yellow]",
+            }
+            status_str = status_map.get(s.status, s.status)
+            flag_str = s.flag if len(s.flag) <= 40 else s.flag[:37] + "..."
+            table.add_row(
+                s.name,
+                s.category or "?",
+                status_str,
+                s.elapsed,
+                flag_str,
+            )
+        self._console.print(table)
 
     @property
     def is_active(self) -> bool:
