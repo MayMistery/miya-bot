@@ -94,6 +94,11 @@ class MissionReport:
     status: str = "completed"
     error: str = ""
 
+    # ── Cost tracking ──────────────────────────────────────────────
+    cost_usd: float = 0.0
+    api_turns: int = 0
+    api_calls: int = 0
+
     # ── Original parameters for replay ─────────────────────────────
     target_kind: str = ""
     model: str = ""
@@ -308,7 +313,10 @@ class MissionService:
                 topo_kwargs["per_challenge_timeout"] = float(options.pop("per_challenge_timeout"))
         topo = TopologyRegistry.get(topology, **topo_kwargs)
 
-        # Execute
+        # Execute — reset cost tracker for this mission
+        from miya.topology.base import _cost_tracker
+        _cost_tracker.reset()
+
         start_time = datetime.now(timezone.utc)
         collected_events: list[DomainEvent] = []
 
@@ -330,7 +338,7 @@ class MissionService:
                             mission_id=mission.id,
                         )
                     except Exception:
-                        logger.debug("Failed to record solved challenge in campaign", exc_info=True)
+                        logger.warning("Failed to record solved challenge in campaign", exc_info=True)
                     # Auto-generate writeup file
                     if event.flag and mission_type == MissionType.CTF:
                         try:
@@ -340,12 +348,12 @@ class MissionService:
                                 output_dir=self._writeup_dir,
                             )
                         except Exception:
-                            logger.debug("Failed to generate writeup", exc_info=True)
+                            logger.warning("Failed to generate writeup", exc_info=True)
                 if on_event is not None:
                     try:
                         on_event(event)
                     except Exception:
-                        logger.debug("on_event callback error", exc_info=True)
+                        logger.warning("on_event callback error", exc_info=True)
 
             mission.complete()
         except Exception as e:
@@ -361,9 +369,9 @@ class MissionService:
             try:
                 await self._event_store.append([fail_event])
             except Exception:
-                logger.debug("Could not persist MissionFailed event", exc_info=True)
+                logger.warning("Could not persist MissionFailed event", exc_info=True)
             duration = (datetime.now(timezone.utc) - start_time).total_seconds()
-            # Return partial report with findings collected so far
+            cost_snap = _cost_tracker.snapshot()
             return MissionReport(
                 mission_id=mission.id,
                 mission_type=mission_type.value,
@@ -375,6 +383,9 @@ class MissionService:
                 blackboard_summary=blackboard.summary(),
                 status="failed",
                 error=str(e),
+                cost_usd=cost_snap["cost_usd"],
+                api_turns=cost_snap["turns"],
+                api_calls=cost_snap["calls"],
                 target_kind=target_kind,
                 model=model,
                 prompt=prompt,
@@ -382,6 +393,7 @@ class MissionService:
             )
 
         duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+        cost_snap = _cost_tracker.snapshot()
 
         return MissionReport(
             mission_id=mission.id,
@@ -393,6 +405,9 @@ class MissionService:
             duration_seconds=duration,
             blackboard_summary=blackboard.summary(),
             status=mission.status,
+            cost_usd=cost_snap["cost_usd"],
+            api_turns=cost_snap["turns"],
+            api_calls=cost_snap["calls"],
             target_kind=target_kind,
             model=model,
             prompt=prompt,

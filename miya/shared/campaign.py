@@ -57,7 +57,7 @@ class Campaign:
                 c._path = p
                 return c
             except Exception:
-                logger.debug("Failed to load campaign from %s", p, exc_info=True)
+                logger.warning("Failed to load campaign from %s — starting fresh", p, exc_info=True)
         c = cls()
         c._path = p
         return c

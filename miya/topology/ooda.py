@@ -731,24 +731,25 @@ class OODATopology:
             re.IGNORECASE | re.DOTALL,
         )
 
+        decision_parsed = False
         for match in pattern.finditer(output):
             key = match.group(1).upper().strip()
             val = match.group(2).strip()
             if key == "DECISION":
-                # Extract first valid decision word
-                val_lower = val.lower()
+                # Strict: only accept first word as decision value
+                first_word = val.split()[0].lower().rstrip(".,;:!") if val.split() else ""
                 for d in ("complete", "pivot", "continue"):
-                    if d in val_lower:
+                    if first_word == d:
                         result["decision"] = d
+                        decision_parsed = True
                         break
             else:
                 result[key.lower()] = val
 
-        # Heuristic fallback: if output mentions "objective achieved" / "flag found"
-        # but no DECISION field was parsed, treat as complete.
-        # NOTE: "flag{" removed — it triggers false positives when the model
-        # discusses CTF flags without having actually captured one.
-        if result["decision"] == "continue":
+        # Heuristic fallback ONLY if no DECISION field was parsed at all.
+        # This prevents false positives from the model discussing outcomes
+        # without actually declaring a decision.
+        if not decision_parsed:
             lower = output.lower()
             if any(phrase in lower for phrase in (
                 "objective achieved", "mission complete", "flag found",
@@ -796,7 +797,7 @@ class OODATopology:
                 max_turns=5,  # slightly more turns to allow actual exploration
             )
         except Exception:
-            logger.debug("Auto-classify failed, skipping", exc_info=True)
+            logger.warning("Auto-classify failed, skipping", exc_info=True)
             return "", ""
 
         # Extract any events emitted during classification exploration

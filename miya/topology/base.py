@@ -37,6 +37,48 @@ logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  Cost Tracker — accumulates API usage across coordinator calls
+# ═══════════════════════════════════════════════════════════════════
+
+
+class CostTracker:
+    """Thread-safe accumulator for API usage metrics."""
+
+    def __init__(self) -> None:
+        self.total_cost_usd: float = 0.0
+        self.total_turns: int = 0
+        self.total_api_ms: int = 0
+        self.call_count: int = 0
+
+    def add(self, cost: float, turns: int, api_ms: int) -> None:
+        self.total_cost_usd += cost
+        self.total_turns += turns
+        self.total_api_ms += api_ms
+        self.call_count += 1
+
+    def reset(self) -> dict[str, float | int]:
+        """Return snapshot and reset counters."""
+        snap = self.snapshot()
+        self.total_cost_usd = 0.0
+        self.total_turns = 0
+        self.total_api_ms = 0
+        self.call_count = 0
+        return snap
+
+    def snapshot(self) -> dict[str, float | int]:
+        return {
+            "cost_usd": round(self.total_cost_usd, 4),
+            "turns": self.total_turns,
+            "api_ms": self.total_api_ms,
+            "calls": self.call_count,
+        }
+
+
+# Global cost tracker — reset per mission
+_cost_tracker = CostTracker()
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  Agent Handle
 # ═══════════════════════════════════════════════════════════════════
 
@@ -521,10 +563,11 @@ async def _run_sdk_coordinator_once(
 
         # ── ResultMessage: final stats from SDK ──
         elif isinstance(message, ResultMessage):
+            api_ms = getattr(message, "duration_api_ms", 0) or 0
+            cost = getattr(message, "total_cost_usd", 0) or 0
+            turns = getattr(message, "num_turns", 0) or 0
+            _cost_tracker.add(cost, turns, api_ms)
             if logger.isEnabledFor(TRACE):
-                api_ms = getattr(message, "duration_api_ms", 0) or 0
-                cost = getattr(message, "total_cost_usd", 0) or 0
-                turns = getattr(message, "num_turns", 0) or 0
                 logger.log(TRACE, "%s⏱ SDK: %dms, %d turns, $%.4f",
                            tag, api_ms, turns, cost)
 

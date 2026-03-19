@@ -162,12 +162,20 @@ def print_report(report: Any) -> None:
     """Print a MissionReport with rich formatting."""
     # Header
     status_color = "green" if report.status == "completed" else "red"
+    cost_str = ""
+    cost_usd = getattr(report, "cost_usd", 0) or 0
+    api_turns = getattr(report, "api_turns", 0) or 0
+    api_calls = getattr(report, "api_calls", 0) or 0
+    if cost_usd > 0:
+        cost_str = f"\nCost: [yellow]${cost_usd:.4f}[/yellow]  |  Turns: {api_turns}  |  API calls: {api_calls}"
+
     console.print(Panel(
         f"[bold]{report.mission_type.upper()}[/bold] → {report.target}\n"
         f"Topology: [yellow]{report.topology}[/yellow]  |  "
         f"Status: [{status_color}]{report.status}[/{status_color}]  |  "
         f"Duration: {report.duration_seconds:.1f}s  |  "
-        f"Events: {report.events_count}",
+        f"Events: {report.events_count}"
+        + cost_str,
         title="[bold red]Mission Report[/bold red]",
         border_style="red",
         box=box.DOUBLE,
