@@ -70,8 +70,25 @@ BANNER = r"""[bold red]
 [/bold red]"""
 
 
+def _get_git_commit() -> str:
+    """Return short git commit hash, or '' on failure."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=3,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
 def show_banner() -> None:
     console.print(BANNER)
+    commit = _get_git_commit()
+    if commit:
+        console.print(f"    [dim]version: {commit}[/dim]")
+        console.print()
 
 
 def make_mission_table() -> Table:
