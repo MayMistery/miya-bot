@@ -46,6 +46,130 @@ def _parse_severity(raw: str) -> Severity:
         return Severity.MEDIUM
 
 
+# ═══════════════════════════════════════════════════════════════════
+#  Projection Value Objects — typed alternatives to dict[str, Any]
+# ═══════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class CVEMatchView:
+    """Projected CVE match for blackboard display."""
+
+    cve_id: str = ""
+    cvss: float = 0.0
+    affected: str = ""
+    exploit_available: bool = False
+
+
+@dataclass(frozen=True)
+class EntryPointView:
+    """Projected entry point for blackboard display."""
+
+    endpoint: str = ""
+    input_vectors: tuple[str, ...] = ()
+    framework: str = ""
+
+
+@dataclass(frozen=True)
+class TaintPathView:
+    """Projected taint path for blackboard display."""
+
+    source: str = ""
+    sink: str = ""
+    path: tuple[str, ...] = ()
+    sanitized: bool = False
+
+
+@dataclass(frozen=True)
+class SinkView:
+    """Projected confirmed sink for blackboard display."""
+
+    sink_type: str = ""
+    cwe_id: str = ""
+    exploitability: str = ""
+
+
+@dataclass(frozen=True)
+class PoCView:
+    """Projected PoC for blackboard display."""
+
+    vuln_type: str = ""
+    poc_code: str = ""
+    result: str = ""
+
+
+@dataclass(frozen=True)
+class ChallengeView:
+    """Projected CTF challenge for blackboard display."""
+
+    name: str = ""
+    category: str = ""
+    points: int = 0
+    difficulty: str = ""
+    technology_stack: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SolvedFlagView:
+    """Projected solved flag for blackboard display."""
+
+    challenge: str = ""
+    flag: str = ""
+    approach: str = ""
+
+
+@dataclass(frozen=True)
+class ClassificationView:
+    """Projected challenge classification for blackboard display."""
+
+    category: str = ""
+    confidence: float = 0.0
+    reasoning: str = ""
+
+
+@dataclass(frozen=True)
+class FlagSubmissionView:
+    """Projected flag submission result for blackboard display."""
+
+    challenge: str = ""
+    flag: str = ""
+    accepted: bool = False
+    response: str = ""
+
+
+@dataclass(frozen=True)
+class PhaseRecord:
+    """Projected phase transition for blackboard display."""
+
+    from_phase: str = ""
+    to_phase: str = ""
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class ReflectionRecord:
+    """Projected reflection result for blackboard display."""
+
+    assessment: str = ""
+    decision: str = ""
+    insights: str = ""
+
+
+@dataclass
+class ExploitAttemptView:
+    """Projected exploit attempt for blackboard display."""
+
+    cve_id: str = ""
+    technique: str = ""
+    payload: str = ""
+    status: str = "attempted"  # "attempted", "succeeded", "failed"
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Blackboard
+# ═══════════════════════════════════════════════════════════════════
+
+
 @dataclass
 class Blackboard:
     """Cross-agent shared knowledge base.
@@ -58,29 +182,29 @@ class Blackboard:
     assets: dict[str, Asset] = field(default_factory=dict)
     findings: list[Finding] = field(default_factory=list)
     credentials: list[Credential] = field(default_factory=list)
-    cve_matches: list[dict[str, Any]] = field(default_factory=list)
+    cve_matches: list[CVEMatchView] = field(default_factory=list)
 
     # ── Attack state ──────────────────────────────────────────────
     attack_graph: AttackGraph = field(default_factory=AttackGraph)
     current_access_level: str = "none"  # "none", "user", "root", "system"
 
     # ── 0-day specific ────────────────────────────────────────────
-    entry_points: list[dict[str, Any]] = field(default_factory=list)
-    taint_paths: list[dict[str, Any]] = field(default_factory=list)
-    confirmed_sinks: list[dict[str, Any]] = field(default_factory=list)
-    validated_pocs: list[dict[str, Any]] = field(default_factory=list)
+    entry_points: list[EntryPointView] = field(default_factory=list)
+    taint_paths: list[TaintPathView] = field(default_factory=list)
+    confirmed_sinks: list[SinkView] = field(default_factory=list)
+    validated_pocs: list[PoCView] = field(default_factory=list)
 
     # ── CTF specific ──────────────────────────────────────────────
-    challenges: list[dict[str, Any]] = field(default_factory=list)
-    solved_flags: list[dict[str, Any]] = field(default_factory=list)
-    classification: dict[str, Any] = field(default_factory=dict)  # auto-classified category
-    flag_submissions: list[dict[str, Any]] = field(default_factory=list)
+    challenges: list[ChallengeView] = field(default_factory=list)
+    solved_flags: list[SolvedFlagView] = field(default_factory=list)
+    classification: ClassificationView | None = None
+    flag_submissions: list[FlagSubmissionView] = field(default_factory=list)
 
     # ── Execution trace ───────────────────────────────────────────
     events: list[DomainEvent] = field(default_factory=list)
-    phase_history: list[dict[str, str]] = field(default_factory=list)
-    reflections: list[dict[str, str]] = field(default_factory=list)
-    exploit_attempts: list[dict[str, Any]] = field(default_factory=list)
+    phase_history: list[PhaseRecord] = field(default_factory=list)
+    reflections: list[ReflectionRecord] = field(default_factory=list)
+    exploit_attempts: list[ExploitAttemptView] = field(default_factory=list)
 
     # ── Operator (HITL) ───────────────────────────────────────────
     operator_messages: list[str] = field(default_factory=list)
@@ -129,6 +253,7 @@ class Blackboard:
             fp = dict(old.fingerprint)
             fp["software"] = e.software
             fp["version"] = e.version
+            fp["technology_stack"] = list(e.technology_stack)
             self.assets[e.asset_id] = Asset(
                 id=old.id, host=old.host, ip=old.ip,
                 ports=old.ports, services=old.services, os=old.os,
@@ -159,18 +284,18 @@ class Blackboard:
     def _on_CVEMatched(self, e: CVEMatched) -> None:
         # Deduplicate by CVE ID — update if higher CVSS or new exploit info
         for existing in self.cve_matches:
-            if existing["cve_id"] == e.cve_id:
-                if e.cvss > existing.get("cvss", 0):
-                    existing["cvss"] = e.cvss
+            if existing.cve_id == e.cve_id:
+                if e.cvss > existing.cvss:
+                    existing.cvss = e.cvss
                 if e.exploit_available:
-                    existing["exploit_available"] = True
+                    existing.exploit_available = True
                 return
-        self.cve_matches.append({
-            "cve_id": e.cve_id,
-            "cvss": e.cvss,
-            "affected": e.affected_software,
-            "exploit_available": e.exploit_available,
-        })
+        self.cve_matches.append(CVEMatchView(
+            cve_id=e.cve_id,
+            cvss=e.cvss,
+            affected=e.affected_software,
+            exploit_available=e.exploit_available,
+        ))
 
     def _on_ScanCompleted(self, e: ScanCompleted) -> None:
         self.findings.append(Finding(
@@ -183,12 +308,12 @@ class Blackboard:
         ))
 
     def _on_ExploitAttempted(self, e: ExploitAttempted) -> None:
-        self.exploit_attempts.append({
-            "cve_id": e.cve_id,
-            "technique": e.technique,
-            "payload": e.payload_summary,
-            "status": "attempted",
-        })
+        self.exploit_attempts.append(ExploitAttemptView(
+            cve_id=e.cve_id,
+            technique=e.technique,
+            payload=e.payload_summary,
+            status="attempted",
+        ))
 
     # Access level ordering for monotonic escalation
     _ACCESS_RANK: ClassVar[dict[str, int]] = {
@@ -212,8 +337,8 @@ class Blackboard:
         ))
         # Update matching attempt status
         for attempt in reversed(self.exploit_attempts):
-            if attempt.get("cve_id") == e.cve_id and attempt.get("status") == "attempted":
-                attempt["status"] = "succeeded"
+            if attempt.cve_id == e.cve_id and attempt.status == "attempted":
+                attempt.status = "succeeded"
                 break
 
     def _on_ExploitFailed(self, e: ExploitFailed) -> None:
@@ -227,71 +352,73 @@ class Blackboard:
         ))
         # Update matching attempt status
         for attempt in reversed(self.exploit_attempts):
-            if attempt.get("cve_id") == e.cve_id and attempt.get("status") == "attempted":
-                attempt["status"] = "failed"
+            if attempt.cve_id == e.cve_id and attempt.status == "attempted":
+                attempt.status = "failed"
                 break
 
     def _on_EntryPointDiscovered(self, e: EntryPointDiscovered) -> None:
-        ep = {
-            "endpoint": e.endpoint,
-            "input_vectors": list(e.input_vectors),
-            "framework": e.framework,
-        }
+        ep = EntryPointView(
+            endpoint=e.endpoint,
+            input_vectors=e.input_vectors,
+            framework=e.framework,
+        )
         if not self._is_duplicate_entry_point(ep):
             self.entry_points.append(ep)
 
     def _on_TaintPathTraced(self, e: TaintPathTraced) -> None:
-        tp = {
-            "source": e.source,
-            "sink": e.sink,
-            "path": list(e.path),
-            "sanitized": e.sanitized,
-        }
+        tp = TaintPathView(
+            source=e.source,
+            sink=e.sink,
+            path=e.path,
+            sanitized=e.sanitized,
+        )
         if not self._is_duplicate_taint_path(tp):
             self.taint_paths.append(tp)
 
     def _on_SinkConfirmed(self, e: SinkConfirmed) -> None:
-        self.confirmed_sinks.append({
-            "sink_type": e.sink_type,
-            "cwe_id": e.cwe_id,
-            "exploitability": e.exploitability,
-        })
+        self.confirmed_sinks.append(SinkView(
+            sink_type=e.sink_type,
+            cwe_id=e.cwe_id,
+            exploitability=e.exploitability,
+        ))
 
     def _on_PoCValidated(self, e: PoCValidated) -> None:
-        self.validated_pocs.append({
-            "vuln_type": e.vuln_type,
-            "poc_code": e.poc_code,
-            "result": e.result,
-        })
+        self.validated_pocs.append(PoCView(
+            vuln_type=e.vuln_type,
+            poc_code=e.poc_code,
+            result=e.result,
+        ))
 
     def _on_ChallengeIdentified(self, e: ChallengeIdentified) -> None:
-        self.challenges.append({
-            "name": e.challenge_name,
-            "category": e.category,
-            "points": e.points,
-        })
+        self.challenges.append(ChallengeView(
+            name=e.challenge_name,
+            category=e.category,
+            points=e.points,
+            difficulty=e.difficulty,
+            technology_stack=e.technology_stack,
+        ))
 
     def _on_ChallengeSolved(self, e: ChallengeSolved) -> None:
-        self.solved_flags.append({
-            "challenge": e.challenge_name,
-            "flag": e.flag,
-            "approach": e.approach,
-        })
+        self.solved_flags.append(SolvedFlagView(
+            challenge=e.challenge_name,
+            flag=e.flag,
+            approach=e.approach,
+        ))
 
     def _on_ChallengeClassified(self, e: ChallengeClassified) -> None:
-        self.classification = {
-            "category": e.category,
-            "confidence": e.confidence,
-            "reasoning": e.reasoning,
-        }
+        self.classification = ClassificationView(
+            category=e.category,
+            confidence=e.confidence,
+            reasoning=e.reasoning,
+        )
 
     def _on_FlagSubmitted(self, e: FlagSubmitted) -> None:
-        self.flag_submissions.append({
-            "challenge": e.challenge_name,
-            "flag": e.flag,
-            "accepted": e.accepted,
-            "response": e.response,
-        })
+        self.flag_submissions.append(FlagSubmissionView(
+            challenge=e.challenge_name,
+            flag=e.flag,
+            accepted=e.accepted,
+            response=e.response,
+        ))
 
     def _on_PrivilegeEscalated(self, e: PrivilegeEscalated) -> None:
         new_rank = self._ACCESS_RANK.get(e.to_level.lower(), 1)
@@ -317,18 +444,18 @@ class Blackboard:
         ))
 
     def _on_PhaseTransition(self, e: PhaseTransition) -> None:
-        self.phase_history.append({
-            "from": e.from_phase,
-            "to": e.to_phase,
-            "reason": e.reason,
-        })
+        self.phase_history.append(PhaseRecord(
+            from_phase=e.from_phase,
+            to_phase=e.to_phase,
+            reason=e.reason,
+        ))
 
     def _on_ReflectionCompleted(self, e: ReflectionCompleted) -> None:
-        self.reflections.append({
-            "assessment": e.assessment,
-            "decision": e.decision,
-            "insights": e.insights,
-        })
+        self.reflections.append(ReflectionRecord(
+            assessment=e.assessment,
+            decision=e.decision,
+            insights=e.insights,
+        ))
 
     def _on_OperatorMessage(self, e: OperatorMessage) -> None:
         self.operator_messages.append(e.content)
@@ -336,21 +463,25 @@ class Blackboard:
     # ── Deduplication helpers ─────────────────────────────────────
 
     def _is_duplicate_finding(self, finding: Finding) -> bool:
-        """Check if a finding is a duplicate based on title + context."""
+        """Check if a finding is a duplicate based on title + context + severity."""
         for existing in self.findings:
-            if existing.title == finding.title and existing.context == finding.context:
+            if (
+                existing.title == finding.title
+                and existing.context == finding.context
+                and existing.severity == finding.severity
+            ):
                 return True
         return False
 
-    def _is_duplicate_entry_point(self, ep: dict[str, Any]) -> bool:
+    def _is_duplicate_entry_point(self, ep: EntryPointView) -> bool:
         for existing in self.entry_points:
-            if existing["endpoint"] == ep["endpoint"]:
+            if existing.endpoint == ep.endpoint:
                 return True
         return False
 
-    def _is_duplicate_taint_path(self, tp: dict[str, Any]) -> bool:
+    def _is_duplicate_taint_path(self, tp: TaintPathView) -> bool:
         for existing in self.taint_paths:
-            if existing["source"] == tp["source"] and existing["sink"] == tp["sink"]:
+            if existing.source == tp.source and existing.sink == tp.sink:
                 return True
         return False
 
@@ -480,53 +611,53 @@ class Blackboard:
         if self.cve_matches:
             lines.append(f"\n### CVEs ({len(self.cve_matches)})")
             for c in self.cve_matches:
-                exploit_tag = " [EXPLOIT]" if c.get("exploit_available") else ""
-                lines.append(f"- {c['cve_id']} CVSS={c['cvss']}{exploit_tag}")
+                exploit_tag = " [EXPLOIT]" if c.exploit_available else ""
+                lines.append(f"- {c.cve_id} CVSS={c.cvss}{exploit_tag}")
 
         if self.entry_points:
             lines.append(f"\n### Entry Points ({len(self.entry_points)})")
             for ep in self.entry_points[:10]:
-                lines.append(f"- {ep['endpoint']}: {ep['input_vectors']}")
+                lines.append(f"- {ep.endpoint}: {list(ep.input_vectors)}")
             if len(self.entry_points) > 10:
                 lines.append(f"  ... +{len(self.entry_points) - 10} more")
 
         if self.taint_paths:
-            unsanitized = [t for t in self.taint_paths if not t["sanitized"]]
+            unsanitized = [t for t in self.taint_paths if not t.sanitized]
             if unsanitized:
                 lines.append(f"\n### Unsanitized Taint Paths ({len(unsanitized)})")
                 for t in unsanitized[:5]:
-                    lines.append(f"- {t['source']} → {t['sink']}")
+                    lines.append(f"- {t.source} → {t.sink}")
 
         if self.confirmed_sinks:
             lines.append(f"\n### Sinks ({len(self.confirmed_sinks)})")
             for s in self.confirmed_sinks[:5]:
-                lines.append(f"- {s['sink_type']} {s.get('cwe_id', '')}")
+                lines.append(f"- {s.sink_type} {s.cwe_id}")
 
         if self.validated_pocs:
             lines.append(f"\n### PoCs ({len(self.validated_pocs)})")
             for p in self.validated_pocs:
-                lines.append(f"- {p['vuln_type']}: {p['result'][:60]}")
+                lines.append(f"- {p.vuln_type}: {p.result[:60]}")
 
         if self.challenges:
-            solved_names = {s["challenge"] for s in self.solved_flags}
-            unsolved = [c for c in self.challenges if c["name"] not in solved_names]
-            solved = [c for c in self.challenges if c["name"] in solved_names]
+            solved_names = {s.challenge for s in self.solved_flags}
+            unsolved = [c for c in self.challenges if c.name not in solved_names]
+            solved = [c for c in self.challenges if c.name in solved_names]
             lines.append(f"\n### Challenges ({len(self.challenges)}, {len(solved)} solved)")
             for c in unsolved:
-                lines.append(f"- [TODO] {c['name']} ({c['category']})")
+                lines.append(f"- [TODO] {c.name} ({c.category})")
             for c in solved:
-                lines.append(f"- [DONE] {c['name']} ({c['category']})")
+                lines.append(f"- [DONE] {c.name} ({c.category})")
 
         if self.solved_flags:
             lines.append(f"\n### Flags ({len(self.solved_flags)})")
             for sf in self.solved_flags:
-                lines.append(f"- {sf['challenge']}: {sf['flag']}")
+                lines.append(f"- {sf.challenge}: {sf.flag}")
 
         if self.exploit_attempts:
             recent = self.exploit_attempts[-5:]
             lines.append(f"\n### Recent Exploits ({len(self.exploit_attempts)} total)")
             for ea in recent:
-                lines.append(f"- {ea.get('cve_id','?')}: {ea['technique']} [{ea.get('status', '?')}]")
+                lines.append(f"- {ea.cve_id or '?'}: {ea.technique} [{ea.status}]")
 
         if self.operator_messages:
             lines.append(f"\n### Operator ({len(self.operator_messages)})")

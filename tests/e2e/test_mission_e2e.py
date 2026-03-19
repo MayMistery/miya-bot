@@ -140,7 +140,7 @@ class TestOnedayE2E:
         critical = [f for f in bb.findings if f.severity == Severity.CRITICAL]
         assert len(critical) == 1
         assert len(bb.cve_matches) == 1
-        assert bb.cve_matches[0]["exploit_available"] is True
+        assert bb.cve_matches[0].exploit_available is True
 
         # ── DECIDE + ACT: Exploit ────────────────────────────────
         events = [
@@ -270,7 +270,7 @@ class TestOnedayE2E:
 
         assert bb.current_access_level == "user"
         assert len(bb.cve_matches) == 1
-        assert bb.cve_matches[0]["cve_id"] == "CVE-2022-22965"
+        assert bb.cve_matches[0].cve_id == "CVE-2022-22965"
 
         # Verify attack graph was built from events
         assert bb.attack_graph.node_count >= 2  # asset + vuln nodes
@@ -360,19 +360,19 @@ class TestZerodayE2E:
         assert len(bb.taint_paths) == 2
 
         # Only 1 unsanitized path
-        unsanitized = [t for t in bb.taint_paths if not t["sanitized"]]
+        unsanitized = [t for t in bb.taint_paths if not t.sanitized]
         assert len(unsanitized) == 1
-        assert "jinja2" in unsanitized[0]["sink"]
+        assert "jinja2" in unsanitized[0].sink
 
         assert len(bb.confirmed_sinks) == 1
-        assert bb.confirmed_sinks[0]["cwe_id"] == "CWE-1336"
+        assert bb.confirmed_sinks[0].cwe_id == "CWE-1336"
 
         assert len(bb.validated_pocs) == 1
 
         # Verify context prompt contains all info
         prompt = bb.to_context_prompt()
         assert "/api/v1/admin/export" in prompt
-        assert "UNSANITIZED" in prompt
+        assert "Unsanitized" in prompt
 
         # Verify event store
         all_events = await store.load_all()
@@ -422,11 +422,11 @@ class TestCTFE2E:
 
         assert len(bb.challenges) == 1
         assert len(bb.solved_flags) == 1
-        assert bb.solved_flags[0]["flag"] == scenario.flag
+        assert bb.solved_flags[0].flag == scenario.flag
 
         # Verify context prompt shows solved status
         prompt = bb.to_context_prompt()
-        assert "SOLVED" in prompt
+        assert "DONE" in prompt
         assert scenario.name in prompt
 
     @pytest.mark.asyncio
@@ -470,7 +470,7 @@ class TestCTFE2E:
         assert len(bb.challenges) == 3
         assert len(bb.solved_flags) == 3
 
-        total_points = sum(c["points"] for c in bb.challenges)
+        total_points = sum(c.points for c in bb.challenges)
         assert total_points == 450  # 100 + 200 + 150
 
 
@@ -519,10 +519,10 @@ class TestBlackboardContextPrompt:
         # Verify all sections present
         assert "Assets" in prompt
         assert "10.0.0.5" in prompt
-        assert "CVE Matches" in prompt
+        assert "CVEs" in prompt
         assert "CVE-2021-44228" in prompt
-        assert "EXPLOIT AVAILABLE" in prompt
+        assert "[EXPLOIT]" in prompt
         assert "Findings" in prompt
         assert "CRITICAL" in prompt
-        assert "Exploit Attempts" in prompt
-        assert "Current Access: user" in prompt
+        assert "Recent Exploits" in prompt
+        assert "Access: user" in prompt

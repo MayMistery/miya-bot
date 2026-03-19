@@ -113,7 +113,7 @@ When you identify a cryptographic weakness:
 [EVENT:VulnerabilityFound {"vuln_type": "weak RSA parameters", "cwe_id": "CWE-326", "severity": "high", "location": "pubkey.pem", "description": "...", "context": "ctf"}]
 
 When you find the flag:
-[EVENT:ChallengeSolved {"challenge_name": "...", "flag": "flag{...}", "technique": "...", "context": "ctf"}]
+[EVENT:ChallengeSolved {"challenge_name": "...", "flag": "flag{...}", "approach": "...", "context": "ctf"}]
 """
 
 

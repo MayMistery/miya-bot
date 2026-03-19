@@ -102,7 +102,7 @@ class FeedbackTrackingCoordinator:
 
     def _detect_phase(self, prompt: str) -> str | None:
         for phase in ("OBSERVE", "ORIENT", "DECIDE", "ACT", "REFLECT"):
-            if f"Phase: {phase}" in prompt:
+            if f"## {phase}" in prompt or f"Phase: {phase}" in prompt:
                 return phase
         return None
 
@@ -890,7 +890,7 @@ class TestAdvancedZerodayDiscovery:
 
         # Context prompt should show all vuln types
         prompt = bb.to_context_prompt()
-        assert "UNSANITIZED" in prompt
+        assert "Unsanitized" in prompt
         assert "/api/v2/render" in prompt
         assert "/api/v2/files/download" in prompt
 
@@ -982,7 +982,7 @@ class TestDeepenedPipelineAssertions:
         assert len(bb.solved_flags) >= 1
 
         prompt = bb.to_context_prompt()
-        assert "SOLVED" in prompt
+        assert "DONE" in prompt
         assert "Baby SQLi" in prompt
 
     @pytest.mark.asyncio

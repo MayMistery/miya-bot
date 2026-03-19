@@ -99,7 +99,7 @@ When you identify a vulnerability or key finding:
 [EVENT:VulnerabilityFound {"vuln_type": "obfuscated algorithm", "severity": "medium", "location": "check_flag()", "description": "...", "context": "ctf"}]
 
 When you find the flag:
-[EVENT:ChallengeSolved {"challenge_name": "...", "flag": "flag{...}", "technique": "...", "context": "ctf"}]
+[EVENT:ChallengeSolved {"challenge_name": "...", "flag": "flag{...}", "approach": "...", "context": "ctf"}]
 """
 
 

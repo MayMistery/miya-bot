@@ -409,7 +409,7 @@ class ScanAwareCoordinator:
 
         phase = None
         for p in ("OBSERVE", "ORIENT", "DECIDE", "ACT", "REFLECT"):
-            if f"Phase: {p}" in prompt:
+            if f"## {p}" in prompt or f"Phase: {p}" in prompt:
                 phase = p
                 break
 

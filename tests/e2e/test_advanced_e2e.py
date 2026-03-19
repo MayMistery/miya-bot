@@ -130,7 +130,7 @@ class MultiStageCoordinator:
 
     def _detect_phase(self, prompt: str) -> str | None:
         for phase in ("OBSERVE", "ORIENT", "DECIDE", "ACT", "REFLECT"):
-            if f"Phase: {phase}" in prompt:
+            if f"## {phase}" in prompt or f"Phase: {phase}" in prompt:
                 return phase
         # AttackGraph prompts
         if "Strategic Planner" in prompt:
@@ -552,7 +552,7 @@ class TestDirtyPipeChain:
         assert "CVE-2021-44228" in prompt, "Log4Shell CVE should be in context"
         assert "CVE-2022-0847" in prompt, "Dirty Pipe CVE should be in context"
         assert "root" in prompt.lower(), "Root access should appear in context"
-        assert "EXPLOIT AVAILABLE" in prompt
+        assert "[EXPLOIT]" in prompt
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -849,10 +849,10 @@ class TestHeapMazeCTF:
 
         assert len(bb.challenges) >= 1
         assert len(bb.solved_flags) >= 1
-        assert bb.solved_flags[0]["flag"] == scenario.flag
+        assert bb.solved_flags[0].flag == scenario.flag
 
         prompt = bb.to_context_prompt()
-        assert "SOLVED" in prompt
+        assert "DONE" in prompt
         assert "Heap Maze" in prompt
 
 
@@ -945,9 +945,9 @@ class TestECCInvalidCurveCTF:
             topology="ooda",
         )
 
-        # 4 iterations × 5 phases = 20 calls
-        assert len(mock.calls) >= 20, (
-            f"Expected ≥20 calls for 4 iterations, got {len(mock.calls)}"
+        # 4 iterations × 3 phases (observe, act, reflect) + 1 classify = 13 calls
+        assert len(mock.calls) >= 13, (
+            f"Expected ≥13 calls for 4 iterations, got {len(mock.calls)}"
         )
 
 
@@ -987,8 +987,8 @@ class TestKernelROPCTF:
 
         # Verify OODA iterations tracked in phase history
         phase_events = [e for e in all_events if isinstance(e, PhaseTransition)]
-        # 4 iterations × 5 phase transitions = 20 transitions + start phases
-        assert len(phase_events) >= 20
+        # 4 iterations × 3 phase transitions (observe→act→reflect) = 12
+        assert len(phase_events) >= 12
 
         # Report should list the challenge
         text = report.as_text()

@@ -65,6 +65,11 @@ def _uuid() -> str:
     return str(uuid4())
 
 
+# Public aliases for cross-module reuse
+utc_now = _now
+new_id = _uuid
+
+
 @dataclass(frozen=True)
 class Target:
     """What we're pointing Miya at."""

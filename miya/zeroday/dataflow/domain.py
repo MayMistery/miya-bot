@@ -9,13 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Literal
-from uuid import uuid4
-
 from miya.shared.events import DomainEvent, TaintPathTraced
-
-
-def _uuid() -> str:
-    return str(uuid4())
+from miya.shared.types import new_id as _uuid
 
 
 # ═══════════════════════════════════════════════════════════════════

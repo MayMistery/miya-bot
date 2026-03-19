@@ -9,11 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Iterator
-from uuid import uuid4
 
-
-def _uuid() -> str:
-    return str(uuid4())
+from miya.shared.types import new_id as _uuid
 
 
 # ═══════════════════════════════════════════════════════════════════

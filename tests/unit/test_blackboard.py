@@ -98,8 +98,8 @@ class TestBlackboardProjection:
         bb.apply(event)
 
         assert len(bb.cve_matches) == 1
-        assert bb.cve_matches[0]["cve_id"] == "CVE-2021-44228"
-        assert bb.cve_matches[0]["exploit_available"] is True
+        assert bb.cve_matches[0].cve_id == "CVE-2021-44228"
+        assert bb.cve_matches[0].exploit_available is True
 
     def test_exploit_lifecycle(self, bb):
         bb.apply(ExploitAttempted(cve_id="CVE-2021-44228", technique="log4shell"))
@@ -133,7 +133,7 @@ class TestBlackboardProjection:
             sanitized=False,
         ))
         assert len(bb.taint_paths) == 1
-        assert bb.taint_paths[0]["sanitized"] is False
+        assert bb.taint_paths[0].sanitized is False
 
         bb.apply(SinkConfirmed(
             sink_type="command_injection",
@@ -163,7 +163,7 @@ class TestBlackboardProjection:
             approach="Union-based SQL injection",
         ))
         assert len(bb.solved_flags) == 1
-        assert bb.solved_flags[0]["flag"] == "flag{sql_1nj3ct10n}"
+        assert bb.solved_flags[0].flag == "flag{sql_1nj3ct10n}"
 
     def test_post_exploitation(self, bb):
         bb.apply(PrivilegeEscalated(
@@ -191,7 +191,7 @@ class TestBlackboardProjection:
             insights="Found SQL injection",
         ))
         assert len(bb.reflections) == 1
-        assert bb.reflections[0]["decision"] == "continue"
+        assert bb.reflections[0].decision == "continue"
 
 
 class TestBlackboardQueries:

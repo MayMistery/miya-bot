@@ -71,13 +71,13 @@ class TestExploitFailedProjection:
             cve_id="CVE-2023-1234",
             technique="RCE",
         ))
-        assert bb.exploit_attempts[0]["status"] == "attempted"
+        assert bb.exploit_attempts[0].status == "attempted"
 
         bb.apply(ExploitFailed(
             cve_id="CVE-2023-1234",
             reason="Patched",
         ))
-        assert bb.exploit_attempts[0]["status"] == "failed"
+        assert bb.exploit_attempts[0].status == "failed"
 
     def test_exploit_success_status_tracking(self, bb):
         bb.apply(ExploitAttempted(
@@ -89,7 +89,7 @@ class TestExploitFailedProjection:
             access_gained="user",
             evidence="uid=1000",
         ))
-        assert bb.exploit_attempts[0]["status"] == "succeeded"
+        assert bb.exploit_attempts[0].status == "succeeded"
 
 
 class TestCVEDeduplication:
@@ -108,7 +108,7 @@ class TestCVEDeduplication:
         ))
         assert len(bb.cve_matches) == 1
         # exploit_available should be updated to True
-        assert bb.cve_matches[0]["exploit_available"] is True
+        assert bb.cve_matches[0].exploit_available is True
 
     def test_different_cves_both_kept(self, bb):
         bb.apply(CVEMatched(cve_id="CVE-2021-44228", cvss=10.0))
@@ -118,7 +118,7 @@ class TestCVEDeduplication:
     def test_higher_cvss_updates(self, bb):
         bb.apply(CVEMatched(cve_id="CVE-2021-44228", cvss=7.5))
         bb.apply(CVEMatched(cve_id="CVE-2021-44228", cvss=10.0))
-        assert bb.cve_matches[0]["cvss"] == 10.0
+        assert bb.cve_matches[0].cvss == 10.0
 
 
 class TestLootProjection:

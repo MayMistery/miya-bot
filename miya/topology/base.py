@@ -295,7 +295,7 @@ Available event types:
 **CTF:**
   [EVENT:ChallengeIdentified {"challenge_name": "...", "category": "web", "difficulty": "medium", "technology_stack": ["PHP"], "context": "ctf"}]
   [EVENT:ChallengeClassified {"challenge_name": "...", "category": "web", "confidence": 0.9, "reasoning": "...", "context": "ctf"}]
-  [EVENT:ChallengeSolved {"challenge_name": "...", "flag": "flag{...}", "technique": "...", "context": "ctf"}]
+  [EVENT:ChallengeSolved {"challenge_name": "...", "flag": "flag{...}", "approach": "...", "context": "ctf"}]
   [EVENT:FlagSubmitted {"challenge_name": "...", "flag": "flag{...}", "accepted": true, "response": "Correct!", "context": "ctf"}]
 
 Emit events inline in your response as you discover things. Every finding MUST have an EVENT marker.

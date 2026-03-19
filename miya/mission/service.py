@@ -16,7 +16,7 @@ from typing import Any
 
 from miya.shared.blackboard import Blackboard
 from miya.shared.campaign import Campaign
-from miya.shared.events import DomainEvent, MissionFailed
+from miya.shared.events import DomainEvent, MissionFailed, ChallengeSolved
 from miya.shared.ports import CoordinatorPort, EventStorePort
 from miya.shared.types import Finding, Mission, MissionType, Target
 from miya.infra.event_store import SQLiteEventStore
@@ -266,17 +266,12 @@ class MissionService:
                 collected_events.append(event)
                 await self._event_store.append([event])
                 # Record solved challenges in campaign
-                # Only record ChallengeSolved events (not FlagSubmitted with accepted=False)
-                if (
-                    hasattr(event, "flag")
-                    and hasattr(event, "challenge_name")
-                    and hasattr(event, "approach")  # distinguishes ChallengeSolved from FlagSubmitted
-                ):
+                if isinstance(event, ChallengeSolved):
                     try:
                         self.campaign.record_solved(
-                            event.challenge_name,  # type: ignore[attr-defined]
-                            event.flag,  # type: ignore[attr-defined]
-                            event.approach,  # type: ignore[attr-defined]
+                            event.challenge_name,
+                            event.flag,
+                            event.approach,
                             mission_id=mission.id,
                         )
                     except Exception:

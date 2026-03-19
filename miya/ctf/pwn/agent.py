@@ -106,7 +106,7 @@ When you identify a vulnerability:
 [EVENT:VulnerabilityFound {"vuln_type": "buffer overflow", "cwe_id": "CWE-787", "severity": "critical", "location": "main+0x42", "description": "...", "context": "ctf"}]
 
 When you find the flag:
-[EVENT:ChallengeSolved {"challenge_name": "...", "flag": "flag{...}", "technique": "...", "context": "ctf"}]
+[EVENT:ChallengeSolved {"challenge_name": "...", "flag": "flag{...}", "approach": "...", "context": "ctf"}]
 """
 
 

@@ -10,15 +10,8 @@ import json
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any, ClassVar
-from uuid import uuid4
 
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _uuid() -> str:
-    return str(uuid4())
+from miya.shared.types import new_id as _uuid, utc_now as _now
 
 
 # ═══════════════════════════════════════════════════════════════════

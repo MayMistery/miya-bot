@@ -272,11 +272,12 @@ class FanoutTopology:
                 sub_bb = Blackboard()
                 # Seed with classification if available
                 if ch_cat:
-                    sub_bb.classification = {
-                        "category": ch_cat,
-                        "confidence": 0.8,
-                        "reasoning": "from enumerate phase",
-                    }
+                    from miya.shared.blackboard import ClassificationView
+                    sub_bb.classification = ClassificationView(
+                        category=ch_cat,
+                        confidence=0.8,
+                        reasoning="from enumerate phase",
+                    )
 
                 # Select agent subset based on category
                 sub_agents = agents
