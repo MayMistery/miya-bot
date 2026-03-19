@@ -440,6 +440,20 @@ class FanoutTopology:
             ch["name"]: asyncio.Queue() for ch in challenges
         }
 
+        # ── Per-challenge event storage (for writeup regeneration) ──
+        ch_events: dict[str, list[DomainEvent]] = {
+            ch["name"]: [] for ch in challenges
+        }
+        # Per-challenge metadata (target, approach) for writeup
+        ch_meta: dict[str, dict[str, str]] = {
+            ch["name"]: {
+                "target": ch.get("target", mission.target.uri),
+                "approach": "",
+                "flag": "",
+            }
+            for ch in challenges
+        }
+
         # ── Per-challenge timeout extension events ────────────
         # Maps challenge_name → asyncio.Event that's set to cancel timeout
         timeout_extensions: dict[str, asyncio.Event] = {
@@ -539,9 +553,13 @@ class FanoutTopology:
                         operator_queue=ch_op_queue,
                         campaign=campaign,
                     ):
+                        # Store per-challenge events for writeup regeneration
+                        ch_events[ch_name].append(ev)
                         if ev.__class__.event_type not in _SUB_MISSION_FILTER:
                             await event_queue.put(ev)
                         if isinstance(ev, ChallengeSolved):
+                            ch_meta[ch_name]["flag"] = ev.flag
+                            ch_meta[ch_name]["approach"] = ev.approach
                             display.update(ch_name, status="solved",
                                            flag=ev.flag, phase="DONE")
                             display.log_event(
@@ -668,15 +686,18 @@ class FanoutTopology:
 
                 if cmd == "help":
                     display.log_event("── HITL Commands ──")
-                    display.log_event("  @<name> <msg>     send message to specific challenge")
-                    display.log_event("  <msg>             broadcast to all running challenges")
-                    display.log_event("  logs <name> [n]   show last n (default 30) log lines")
-                    display.log_event("  attach <name>     live-follow a challenge's logs")
-                    display.log_event("  detach            return to grid view")
-                    display.log_event("  status <name>     show detailed status of a challenge")
-                    display.log_event("  extend <name|all> extend timeout +30m")
-                    display.log_event("  ref <src> @<dst>  inject src's knowledge into dst")
-                    display.log_event("  stop              cancel entire mission")
+                    display.log_event("  status              reprint panel grid")
+                    display.log_event("  status <name>       detailed challenge info")
+                    display.log_event("  logs <name> [n]     show last n log lines (default 30)")
+                    display.log_event("  attach <name>       live-follow a challenge's logs")
+                    display.log_event("  detach              return to grid view")
+                    display.log_event("  writeup <name>      regenerate writeup (solved only)")
+                    display.log_event("  ask <name> <msg>    follow-up question to a finished challenge")
+                    display.log_event("  extend <name|all>   extend timeout +30m")
+                    display.log_event("  ref <src> @<dst>    inject src's knowledge into dst")
+                    display.log_event("  @<name> <msg>       send message to specific challenge")
+                    display.log_event("  <msg>               broadcast to all running")
+                    display.log_event("  stop                cancel entire mission")
                     continue
 
                 if cmd == "status" and len(parts) == 1:
@@ -722,6 +743,23 @@ class FanoutTopology:
                     display.detach()
                     continue
 
+                if cmd == "logs" and len(parts) == 1:
+                    # No args: list all challenges with status
+                    display.log_event("── All Challenges ──")
+                    for n, s in display._states.items():
+                        line = (
+                            f"  {s.status_icon} {n:20s} "
+                            f"[{s.status:10s}] {s.phase:10s}"
+                        )
+                        if s.flag:
+                            line += f"  flag={s.flag[:25]}"
+                        if s.elapsed:
+                            line += f"  {s.elapsed}"
+                        log_count = len(s.log_buffer)
+                        line += f"  ({log_count} log lines)"
+                        display.log_event(line)
+                    continue
+
                 if cmd == "logs" and len(parts) > 1:
                     log_args = parts[1].strip().split()
                     name = log_args[0]
@@ -731,12 +769,22 @@ class FanoutTopology:
                             n = int(log_args[1])
                         except ValueError:
                             pass
+                    state = display._states.get(name)
+                    if state:
+                        # Show status header for any state
+                        hdr = f"── {state.status_icon} {name}"
+                        hdr += f" [{state.status.upper()}]"
+                        if state.flag:
+                            hdr += f"  flag={state.flag[:30]}"
+                        hdr += f"  {state.elapsed} ──"
+                        display.log_event(hdr)
                     lines = display.get_logs(name, n=n)
-                    display.log_event(
-                        f"── logs {name} (last {len(lines)}) ──"
-                    )
-                    for line in lines:
-                        display.log_event(line)
+                    if lines:
+                        for line in lines:
+                            display.log_event(line)
+                    else:
+                        display.log_event("  (no logs)")
+                    display.log_event(f"  ({len(lines)} lines shown)")
                     continue
 
                 if cmd == "extend":
@@ -753,6 +801,109 @@ class FanoutTopology:
                         timeout_extensions[name].set()
                     else:
                         display.log_event(f"Unknown challenge: {name}")
+                    continue
+
+                # ── Writeup regeneration ──────────────────────
+                if cmd == "writeup" and len(parts) > 1:
+                    name = parts[1].strip()
+                    state = display._states.get(name)
+                    if not state:
+                        display.log_event(
+                            f"Unknown: {name}. "
+                            f"Available: {', '.join(display.challenge_names)}"
+                        )
+                        continue
+                    if state.status != "solved" or not state.flag:
+                        display.log_event(
+                            f"{name} is not solved yet "
+                            f"(status: {state.status}). "
+                            "Writeup requires a solved challenge."
+                        )
+                        continue
+                    meta = ch_meta.get(name, {})
+                    evts = ch_events.get(name, [])
+                    try:
+                        from miya.mission.service import _write_challenge_writeup
+                        path = _write_challenge_writeup(
+                            name, state.flag,
+                            meta.get("approach", ""),
+                            meta.get("target", mission.target.uri),
+                            output_dir=".",
+                            events=evts,
+                        )
+                        if path:
+                            display.log_event(f"Writeup regenerated: {path}")
+                        else:
+                            display.log_event("Writeup generation returned None")
+                    except Exception as exc:
+                        display.log_event(f"Writeup failed: {exc}")
+                    continue
+
+                # ── Follow-up question to a finished challenge ───
+                if cmd == "ask" and len(parts) > 1:
+                    ask_parts = parts[1].strip().split(None, 1)
+                    name = ask_parts[0]
+                    question = ask_parts[1] if len(ask_parts) > 1 else ""
+                    if not question:
+                        display.log_event("Usage: ask <name> <question>")
+                        continue
+                    state = display._states.get(name)
+                    if not state:
+                        display.log_event(
+                            f"Unknown: {name}. "
+                            f"Available: {', '.join(display.challenge_names)}"
+                        )
+                        continue
+                    if state.status not in ("solved", "failed", "timeout"):
+                        # For running challenges, use @name instead
+                        display.log_event(
+                            f"{name} is still running. "
+                            f"Use '@{name} <msg>' to send HITL message."
+                        )
+                        continue
+                    # Build context from logs + events
+                    logs = display.get_logs(name, n=100)
+                    meta = ch_meta.get(name, {})
+                    context = (
+                        f"You are reviewing a CTF challenge that has been "
+                        f"{'solved' if state.status == 'solved' else 'attempted'}.\n\n"
+                        f"Challenge: {name}\n"
+                        f"Category: {state.category or '?'}\n"
+                        f"Status: {state.status}\n"
+                    )
+                    if state.flag:
+                        context += f"Flag: {state.flag}\n"
+                    if meta.get("approach"):
+                        context += f"Approach: {meta['approach']}\n"
+                    context += (
+                        f"\n## Log (last {len(logs)} lines)\n"
+                        + "\n".join(logs)
+                        + f"\n\n## Question\n{question}"
+                    )
+                    display.log_event(f"Asking {name}: {question[:50]}...")
+                    # Run a one-shot SDK query with the context
+                    try:
+                        from miya.topology.base import run_sdk_coordinator
+                        all_mcp: set[str] = set()
+                        for h in agents.values():
+                            all_mcp.update(h.mcp_servers)
+                        agent_defs = {
+                            n: h.to_agent_definition()
+                            for n, h in agents.items()
+                        }
+                        answer = await run_sdk_coordinator(
+                            context, agent_defs, list(all_mcp),
+                            phase_label="ask",
+                        )
+                        # Show answer in log
+                        for line in answer.splitlines():
+                            display.log_event(f"  {name}> {line[:120]}")
+                        # Also capture into log buffer
+                        display.capture_log(name, f"[ask] Q: {question}")
+                        for line in answer.splitlines():
+                            display.capture_log(name, f"[ask] A: {line}")
+                    except Exception as exc:
+                        display.log_event(f"Ask failed: {exc}")
                     continue
 
                 # ── Cross-challenge knowledge: ref <source> @<target> ──

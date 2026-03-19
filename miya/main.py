@@ -1125,6 +1125,8 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
         t.add_row("logs <name> [n]", "Show challenge logs (last n lines)")
         t.add_row("attach/detach <name>", "Live-follow / return to grid")
         t.add_row("status <name>", "Detailed challenge status")
+        t.add_row("writeup <name>", "Regenerate writeup (solved only)")
+        t.add_row("ask <name> <question>", "Follow-up question to finished challenge")
         t.add_row("extend <name|all>", "Extend timeout +30m")
         t.add_row("ref <src> @<dst>", "Inject src's knowledge into dst")
         t.add_row("", "")
@@ -2022,31 +2024,39 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                             console.print(
                                 "[dim]── HITL Commands ──[/dim]\n"
                                 "  [yellow]bg[/yellow]"
-                                "                  → background, "
+                                "                     → background, "
                                 "return to REPL\n"
                                 "  [yellow]stop[/yellow]"
-                                "                → cancel mission\n"
+                                "                   → cancel mission\n"
                                 "  [yellow]status[/yellow]"
-                                "              → reprint panel grid\n"
+                                "                 → reprint panel grid\n"
                                 "  [yellow]status <name>[/yellow]"
-                                "        → detailed challenge info\n"
+                                "           → detailed challenge info\n"
                                 "  [yellow]logs <name> [n][/yellow]"
-                                "      → show last n log lines "
+                                "         → show last n log lines "
                                 "(default 30)\n"
                                 "  [yellow]attach <name>[/yellow]"
-                                "        → live-follow challenge logs\n"
+                                "           → live-follow challenge logs\n"
                                 "  [yellow]detach[/yellow]"
-                                "              → return to grid view\n"
+                                "                 → return to grid view\n"
+                                "  [yellow]writeup <name>[/yellow]"
+                                "          → regenerate writeup "
+                                "(solved only)\n"
+                                "  [yellow]ask <name> <msg>[/yellow]"
+                                "        → follow-up question to "
+                                "finished challenge\n"
                                 "  [yellow]extend <name|all>[/yellow]"
-                                "    → extend timeout +30m\n"
+                                "       → extend timeout +30m\n"
                                 "  [yellow]ref <src> @<dst>[/yellow]"
-                                "     → inject src knowledge into dst\n"
+                                "        → inject src knowledge "
+                                "into dst\n"
                                 "  [yellow]@<name> <msg>[/yellow]"
-                                "        → send to specific challenge\n"
+                                "           → send to specific "
+                                "challenge\n"
                                 "  [yellow]<msg>[/yellow]"
-                                "                → broadcast to all\n"
+                                "                   → broadcast to all\n"
                                 "  [yellow]help[/yellow]"
-                                "                → this message"
+                                "                   → this message"
                             )
                             continue
                         loop.call_soon_threadsafe(
