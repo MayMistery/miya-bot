@@ -221,3 +221,26 @@ class MCPRegistry:
             {"name": c.name, "description": c.description}
             for c in self._servers.values()
         ]
+
+    def probe(self, server_names: list[str]) -> tuple[list[str], list[str]]:
+        """Check which MCP servers are available (command exists on PATH).
+
+        Returns (available, unavailable) name lists.
+        Only probes stdio servers (checks if command is on PATH).
+        """
+        import shutil
+        available: list[str] = []
+        unavailable: list[str] = []
+        for name in server_names:
+            config = self._servers.get(name)
+            if not config:
+                unavailable.append(name)
+                continue
+            if config.server_type != "stdio":
+                available.append(name)  # SSE servers probed differently
+                continue
+            if shutil.which(config.command):
+                available.append(name)
+            else:
+                unavailable.append(name)
+        return available, unavailable

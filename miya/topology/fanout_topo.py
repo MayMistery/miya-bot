@@ -697,6 +697,47 @@ class FanoutTopology:
                         display.log_event(f"Unknown challenge: {name}")
                     continue
 
+                # ── Cross-challenge knowledge: ref <source> @<target> ──
+                if cmd == "ref" and len(parts) > 1:
+                    ref_parts = parts[1].strip().split()
+                    source_name = ref_parts[0]
+                    # Optional: ref source @target (default: broadcast)
+                    target_name = ref_parts[1].lstrip("@") if len(ref_parts) > 1 else ""
+
+                    # Pull knowledge from source challenge's sub-blackboard
+                    source_logs = display.get_logs(source_name, n=50)
+                    if not source_logs:
+                        display.log_event(
+                            f"No logs for '{source_name}'. "
+                            f"Available: {', '.join(display.challenge_names)}"
+                        )
+                        continue
+
+                    # Build knowledge injection message
+                    knowledge = (
+                        f"## Reference from challenge '{source_name}'\n"
+                        f"The following is the progress log from another "
+                        f"challenge. Use relevant findings to help solve "
+                        f"the current challenge.\n\n"
+                        + "\n".join(source_logs[-30:])
+                    )
+                    if target_name and target_name in ch_queues:
+                        ch_queues[target_name].put_nowait(knowledge)
+                        display.log_event(
+                            f"\U0001f4d6 ref {source_name} → @{target_name}"
+                        )
+                    else:
+                        # Broadcast to all running
+                        for n in display.challenge_names:
+                            if n != source_name and n in ch_queues:
+                                state = display._states.get(n)
+                                if state and state.status in ("running", "classifying"):
+                                    ch_queues[n].put_nowait(knowledge)
+                        display.log_event(
+                            f"\U0001f4d6 ref {source_name} → all running"
+                        )
+                    continue
+
                 # ── Per-challenge HITL: @name message ─────
                 if msg.startswith("@"):
                     at_parts = msg[1:].split(None, 1)

@@ -1409,6 +1409,27 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                 else:
                     continue
 
+            # ── Resume ────────────────────────────────────────────
+            if cmd == "resume":
+                last = await service.get_last_mission()
+                if last and last.mission_type:
+                    console.print(
+                        f"[cyan]Resuming: {last.mission_type} → {last.target} "
+                        f"({last.events_count} events, "
+                        f"{last.blackboard_summary.get('challenges_solved', 0)} solved)"
+                        f"[/cyan]"
+                    )
+                    replay_parts = [last.mission_type, last.target]
+                    if last.topology and last.topology != "ooda":
+                        replay_parts.extend(["--topology", last.topology])
+                    raw = " ".join(replay_parts)
+                    lower = raw.lower()
+                    cmd = lower.split()[0]
+                    # Fall through to mission execution
+                else:
+                    console.print("[dim]No mission to resume.[/dim]")
+                    continue
+
             # ── Set ───────────────────────────────────────────────
             if cmd == "set":
                 set_parts = raw.split(None, 2)

@@ -304,6 +304,20 @@ class MissionService:
         if not agents:
             raise ValueError(f"Failed to build agents for: {mission_type}")
 
+        # ── MCP server health check ──────────────────────────
+        all_mcp: set[str] = set()
+        for handle in agents.values():
+            all_mcp.update(handle.mcp_servers)
+        if all_mcp:
+            ok, missing = self._mcp_registry.probe(list(all_mcp))
+            if missing:
+                logger.warning(
+                    "MCP servers unavailable (command not on PATH): %s",
+                    ", ".join(missing),
+                )
+            if ok:
+                logger.debug("MCP servers OK: %s", ", ".join(ok))
+
         # Get topology (pass coordinator for testability + runtime tunables)
         topo_kwargs: dict[str, Any] = {"coordinator": self._coordinator}
         if topology == "fanout":
@@ -412,6 +426,47 @@ class MissionService:
             model=model,
             prompt=prompt,
             options=dict(options),
+        )
+
+    async def get_last_mission(self) -> MissionReport | None:
+        """Retrieve the last mission's parameters from the event store.
+
+        Scans for the most recent MissionStarted event and reconstructs
+        enough info to allow resume.
+        """
+        if not self._event_store:
+            return None
+        all_events = await self._event_store.load_all()
+        if not all_events:
+            return None
+
+        # Find last MissionStarted
+        from miya.shared.events import MissionStarted as _MS
+        last_start = None
+        for ev in reversed(all_events):
+            if isinstance(ev, _MS):
+                last_start = ev
+                break
+        if not last_start:
+            return None
+
+        # Rebuild blackboard from all events after this mission start
+        bb = Blackboard()
+        mission_events = [
+            e for e in all_events
+            if e.aggregate_id == last_start.aggregate_id
+        ]
+        bb.apply_all(mission_events)
+
+        return MissionReport(
+            mission_id=last_start.aggregate_id,
+            mission_type=last_start.mission_type,
+            target=last_start.target_uri,
+            topology=last_start.topology,
+            findings=list(bb.findings),
+            events_count=len(mission_events),
+            blackboard_summary=bb.summary(),
+            status="suspended",
         )
 
     async def list_topologies(self) -> list[dict[str, str]]:

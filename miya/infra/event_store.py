@@ -111,26 +111,31 @@ class SQLiteEventStore(EventStorePort):
         await db.execute("BEGIN IMMEDIATE")
         try:
             for event in events:
-                payload = event.to_dict()
-                metadata = json.dumps({
-                    "correlation_id": event.correlation_id,
-                    "causation_id": event.causation_id,
-                    "timestamp": event.timestamp.isoformat(),
-                })
-
-                # Optimistic concurrency check (now atomic under write lock)
-                if expected_version >= 0 and event.aggregate_id:
+                # Auto-increment version per aggregate
+                actual_version = event.version
+                if event.aggregate_id:
                     async with db.execute(
                         "SELECT MAX(version) FROM events WHERE aggregate_id = ?",
                         (event.aggregate_id,),
                     ) as cursor:
                         row = await cursor.fetchone()
                         current = row[0] if row and row[0] is not None else -1
-                        if current != expected_version:
-                            raise ConcurrencyError(
-                                f"Expected version {expected_version}, got {current} "
-                                f"for aggregate {event.aggregate_id}"
-                            )
+                        actual_version = current + 1
+
+                    # Optimistic concurrency check
+                    if expected_version >= 0 and current != expected_version:
+                        raise ConcurrencyError(
+                            f"Expected version {expected_version}, got {current} "
+                            f"for aggregate {event.aggregate_id}"
+                        )
+
+                payload = event.to_dict()
+                payload["version"] = actual_version  # override with auto-incremented
+                metadata = json.dumps({
+                    "correlation_id": event.correlation_id,
+                    "causation_id": event.causation_id,
+                    "timestamp": event.timestamp.isoformat(),
+                })
 
                 await db.execute(
                     """INSERT INTO events
@@ -146,7 +151,7 @@ class SQLiteEventStore(EventStorePort):
                         event.mission,
                         json.dumps(payload),
                         metadata,
-                        event.version,
+                        actual_version,
                     ),
                 )
             await db.execute("COMMIT")
