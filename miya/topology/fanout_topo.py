@@ -281,8 +281,8 @@ class FanoutTopology:
                 ch_name = ch.get("name", "challenge")
                 ch_target = ch.get("target", mission.target.uri)
                 ch_cat = ch.get("category", "")
-                # Merge file_paths from PREPARE discovery
-                ch_files = prepare_file_map.get(ch_name, [])
+                # Merge file_paths from PREPARE discovery (or historical data)
+                ch_files = prepare_file_map.get(ch_name, []) or ch.get("file_paths", [])
                 challenges.append({
                     "name": ch_name,
                     "target": ch_target,
@@ -296,6 +296,7 @@ class FanoutTopology:
                         challenge_name=ch_name,
                         category=ch_cat,
                         points=ch.get("points", 0),
+                        file_paths=tuple(ch_files) if ch_files else (),
                         context="ctf",
                         mission="ctf",
                     )
