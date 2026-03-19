@@ -36,7 +36,7 @@ from rich.text import Text
 class ChallengeLogBuffer:
     """Ring buffer capturing log lines for a single challenge."""
 
-    def __init__(self, maxlen: int = 200) -> None:
+    def __init__(self, maxlen: int = 500) -> None:
         self._lines: deque[str] = deque(maxlen=maxlen)
 
     def append(self, line: str) -> None:

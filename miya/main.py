@@ -2073,15 +2073,12 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                 while not mission_task.done():
                     await _aio.sleep(0.3)
 
-                    # Drain HITL input → op_queue
+                    # Drain HITL input → op_queue (silently;
+                    # _hitl_router prints its own confirmations)
                     while not hitl_queue.empty():
                         try:
                             msg = hitl_queue.get_nowait()
                             op_queue.put_nowait(msg)
-                            console.print(
-                                f"  [yellow]\U0001f4e8 queued:"
-                                f"[/yellow] {msg[:80]}"
-                            )
                         except _aio.QueueEmpty:
                             break
 

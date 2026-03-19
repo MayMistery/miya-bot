@@ -273,6 +273,36 @@ class OODATopology:
         if self._on_progress and self._challenge_tag:
             self._on_progress(self._challenge_tag, **kwargs)
 
+    def _log_output_summary(self, phase: str, output: str) -> None:
+        """Log a truncated summary of SDK phase output to the log buffer.
+
+        Captures the first meaningful lines of the agent's response so that
+        ``logs <name>`` shows useful detail, not just phase transitions.
+        """
+        if not output or not self._on_log or not self._challenge_tag:
+            return
+        # Take first non-empty lines, skip JSON event blocks
+        lines = []
+        for raw_line in output.splitlines():
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            # Skip structured event JSON emitted for extract_events_from_output
+            if stripped.startswith(("{", "[")) and any(
+                k in stripped for k in ('"event_type"', '"events"')
+            ):
+                continue
+            lines.append(stripped)
+            if len(lines) >= 8:
+                break
+        if lines:
+            self._on_log(
+                self._challenge_tag,
+                f"  [{phase}] " + lines[0][:120],
+            )
+            for line in lines[1:]:
+                self._on_log(self._challenge_tag, f"    {line[:120]}")
+
     @property
     def name(self) -> str:
         return "ooda"
@@ -497,6 +527,7 @@ class OODATopology:
                         observe_output = await self._run_coordinator(
                             observe_prompt, mission, session_agents, blackboard, phase_label="OBSERVE"
                         )
+                    self._log_output_summary("OBSERVE", observe_output)
 
                     for extracted in extract_events_from_output(
                         observe_output, mission, causation_id=phase_event.event_id,
@@ -531,6 +562,7 @@ class OODATopology:
                         orient_output = await self._run_coordinator(
                             orient_prompt, mission, agents, blackboard, phase_label="ORIENT"
                         )
+                        self._log_output_summary("ORIENT", orient_output)
                         for extracted in extract_events_from_output(orient_output, mission):
                             yield extracted
                             blackboard.apply(extracted)
@@ -556,6 +588,7 @@ class OODATopology:
                         decide_output = await self._run_coordinator(
                             decide_prompt, mission, agents, blackboard, phase_label="DECIDE"
                         )
+                        self._log_output_summary("DECIDE", decide_output)
 
                     # ── ACT ────────────────────────────────────────
                     hitl_events, op_suffix = _drain_hitl()
@@ -591,6 +624,7 @@ class OODATopology:
                         act_output = await self._run_coordinator(
                             act_prompt, mission, act_agents, blackboard, phase_label="ACT"
                         )
+                    self._log_output_summary("ACT", act_output)
 
                     for extracted in extract_events_from_output(act_output, mission):
                         yield extracted
@@ -623,6 +657,7 @@ class OODATopology:
                         reflect_output = await self._run_coordinator(
                             reflect_prompt, mission, agents, blackboard, phase_label="REFLECT"
                         )
+                    self._log_output_summary("REFLECT", reflect_output)
 
                     decision = self._parse_reflection(reflect_output)
 
