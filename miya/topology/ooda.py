@@ -37,6 +37,7 @@ from miya.topology.base import (
     Topology, TopologyRegistry, AgentHandle,
     extract_events_from_output, _sdk_env, EVENT_INSTRUCTION,
     run_sdk_coordinator, _get_topology_config, drain_hitl_queue,
+    SDKSession,
 )
 
 logger = logging.getLogger(__name__)
@@ -132,6 +133,41 @@ Results: {act_output}
 Previous insights: {previous_insights}
 
 Did we get the flag? Decide: CONTINUE / PIVOT / COMPLETE.
+DECISION: <continue|pivot|complete>
+ASSESSMENT: <what happened>
+INSIGHTS: <what we learned>
+NEXT_FOCUS: <what to do next>
+"""
+
+# ── Autonomous continuation prompt (subsequent OODA iterations) ──
+
+_CONTINUE_CTF = """\
+## CONTINUE (Iteration {iteration})
+Previous focus: {previous_insights}
+
+You have all prior context from this session. Continue the OODA cycle autonomously:
+1. **OBSERVE**: Check what changed, gather new intelligence based on the previous focus.
+2. **ACT**: Execute the next exploitation step.
+3. **REFLECT**: Evaluate results. Did we get the flag?
+
+When done, output your reflection:
+DECISION: <continue|pivot|complete>
+ASSESSMENT: <what happened>
+INSIGHTS: <what we learned>
+NEXT_FOCUS: <what to do next>
+"""
+
+_CONTINUE_GENERIC = """\
+## CONTINUE (Iteration {iteration})
+Previous focus: {previous_insights}
+
+You have all prior context from this session. Continue the OODA cycle autonomously:
+1. **OBSERVE**: Gather new intelligence based on the previous focus.
+2. **ORIENT**: Analyze new findings.
+3. **ACT**: Execute the next action.
+4. **REFLECT**: Evaluate results.
+
+When done, output your reflection:
 DECISION: <continue|pivot|complete>
 ASSESSMENT: <what happened>
 INSIGHTS: <what we learned>
@@ -240,7 +276,16 @@ class OODATopology:
         operator_queue: asyncio.Queue[str] | None = None,
         campaign: Any | None = None,
     ) -> AsyncIterator[DomainEvent]:
-        """Run the OODA loop until completion or max iterations."""
+        """Run the OODA loop until completion or max iterations.
+
+        Hybrid session mode (CTF only):
+        - First iteration: 3 separate query() calls on a shared session
+          (OBSERVE → ACT → REFLECT), building rich context.
+        - Subsequent iterations: 1 query() per iteration (CONTINUE),
+          leveraging session context to avoid re-sending everything.
+
+        Non-CTF missions use stateless calls (no session reuse).
+        """
         from miya.shared.campaign import Campaign as _Campaign
 
         # ── Mission Start ─────────────────────────────────────────
@@ -279,6 +324,7 @@ class OODATopology:
         act_output = ""
         previous_insights = ""
         classified_category = ""  # populated by auto-classify for CTF
+        mission_key = mission.mission_type.value
 
         def _drain_hitl() -> tuple[list[OperatorMessage], str]:
             return drain_hitl_queue(
@@ -305,215 +351,274 @@ class OODATopology:
                 if recon_summary:
                     logger.info("  recon summary: %s", recon_summary[:120])
 
-        for iteration in range(1, self._max_iterations + 1):
-            # Compact blackboard between iterations to bound memory growth
-            if iteration > 1:
-                removed = blackboard.compact()
-                if removed:
-                    logger.debug("Blackboard compacted: %s", removed)
+        # ── Determine agents for session ──────────────────────────
+        # For CTF with known category, use specialist agent
+        session_agents = agents
+        if classified_category and mission_key == "ctf":
+            direct = self._pick_direct_agent(classified_category, agents)
+            if direct:
+                session_agents = direct
 
-            logger.info(
-                "━━━━ OODA #%d/%d ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-                iteration, self._max_iterations,
-            )
-            if previous_insights:
-                logger.info("  focus: %s", previous_insights[:120])
+        # ── Create session for CTF (hybrid mode) ──────────────────
+        use_session = mission_key == "ctf" and self._coordinator is None
+        session: SDKSession | None = None
 
-            # ── OBSERVE ───────────────────────────────────────────
-            hitl_events, op_suffix = _drain_hitl()
-            for ev in hitl_events:
-                yield ev
-                blackboard.apply(ev)
+        if use_session:
+            all_mcp_names: set[str] = set()
+            for handle in session_agents.values():
+                all_mcp_names.update(handle.mcp_servers)
+            agent_defs = {
+                name: handle.to_agent_definition()
+                for name, handle in session_agents.items()
+            }
+            session = SDKSession(agent_defs, list(all_mcp_names))
+            await session.connect()
 
-            phase_event = PhaseTransition(
-                from_phase=OODAPhase.REFLECT.value if iteration > 1 else "",
-                to_phase=OODAPhase.OBSERVE.value,
-                reason=(f"Iteration {iteration}"
-                        + (f" — Focus: {previous_insights}" if previous_insights else "")),
-                aggregate_id=mission.id,
-                mission=mission.mission_type.value,
-            )
-            yield phase_event
-            blackboard.apply(phase_event)
+        try:
+            for iteration in range(1, self._max_iterations + 1):
+                # Compact blackboard between iterations to bound memory growth
+                if iteration > 1:
+                    removed = blackboard.compact()
+                    if removed:
+                        logger.debug("Blackboard compacted: %s", removed)
 
-            logger.info("▶ OBSERVE — %s", self._PHASE_DESC["OBSERVE"])
-            mission_key = mission.mission_type.value
-            focus_hint = ""
-            if previous_insights:
-                focus_hint = (
-                    f"\nFocus from last REFLECT: {previous_insights}\n"
+                logger.info(
+                    "━━━━ OODA #%d/%d ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                    iteration, self._max_iterations,
                 )
-            # Inject recon summary from CLASSIFY into first OBSERVE iteration
-            recon_hint = ""
-            if recon_summary and iteration == 1:
-                recon_hint = (
-                    f"\n## Initial Reconnaissance (from CLASSIFY phase)\n"
-                    f"{recon_summary}\n"
+                if previous_insights:
+                    logger.info("  focus: %s", previous_insights[:120])
+
+                # ── Drain HITL ────────────────────────────────────
+                hitl_events, op_suffix = _drain_hitl()
+                for ev in hitl_events:
+                    yield ev
+                    blackboard.apply(ev)
+
+                # ── HYBRID: subsequent iterations use single CONTINUE query ──
+                if iteration > 1 and session is not None:
+                    yield PhaseTransition(
+                        from_phase=OODAPhase.REFLECT.value,
+                        to_phase="continue",
+                        reason=f"Iteration {iteration} — Focus: {previous_insights}",
+                        aggregate_id=mission.id,
+                        mission=mission.mission_type.value,
+                    )
+
+                    logger.info("▶ CONTINUE (autonomous iteration)")
+                    continue_tmpl = _CONTINUE_CTF if mission_key == "ctf" else _CONTINUE_GENERIC
+                    continue_prompt = continue_tmpl.format(
+                        iteration=iteration,
+                        previous_insights=previous_insights or "(none)",
+                    ) + op_suffix + EVENT_INSTRUCTION + (
+                        _FLAG_SUBMIT_INSTRUCTION if mission_key == "ctf" else ""
+                    )
+
+                    continue_output = await session.query(
+                        continue_prompt, phase_label=f"CONTINUE-{iteration}",
+                    )
+
+                    for extracted in extract_events_from_output(continue_output, mission):
+                        yield extracted
+                        blackboard.apply(extracted)
+
+                    # Parse reflection from the combined output
+                    decision = self._parse_reflection(continue_output)
+
+                else:
+                    # ── FIRST ITERATION (or non-session): full phase separation ──
+
+                    # ── OBSERVE ────────────────────────────────────
+                    phase_event = PhaseTransition(
+                        from_phase=OODAPhase.REFLECT.value if iteration > 1 else "",
+                        to_phase=OODAPhase.OBSERVE.value,
+                        reason=(f"Iteration {iteration}"
+                                + (f" — Focus: {previous_insights}" if previous_insights else "")),
+                        aggregate_id=mission.id,
+                        mission=mission.mission_type.value,
+                    )
+                    yield phase_event
+                    blackboard.apply(phase_event)
+
+                    logger.info("▶ OBSERVE — %s", self._PHASE_DESC["OBSERVE"])
+                    focus_hint = ""
+                    if previous_insights:
+                        focus_hint = f"\nFocus from last REFLECT: {previous_insights}\n"
+                    recon_hint = ""
+                    if recon_summary and iteration == 1:
+                        recon_hint = (
+                            f"\n## Initial Reconnaissance (from CLASSIFY phase)\n"
+                            f"{recon_summary}\n"
+                        )
+                    observe_prompt = _get_phase_prompt(mission_key, "OBSERVE").format(
+                        blackboard_context=blackboard.to_context_prompt(),
+                        mission_description=mission_desc,
+                        agent_descriptions=agent_desc,
+                    ) + campaign_context + focus_hint + recon_hint + op_suffix + EVENT_INSTRUCTION
+
+                    if session is not None:
+                        observe_output = await session.query(observe_prompt, phase_label="OBSERVE")
+                    else:
+                        observe_output = await self._run_coordinator(
+                            observe_prompt, mission, session_agents, blackboard, phase_label="OBSERVE"
+                        )
+
+                    for extracted in extract_events_from_output(
+                        observe_output, mission, causation_id=phase_event.event_id,
+                    ):
+                        yield extracted
+                        blackboard.apply(extracted)
+
+                    # ── CTF fast-path: skip ORIENT+DECIDE ─────────
+                    if mission_key == "ctf":
+                        orient_output = ""
+                        decide_output = observe_output
+                    else:
+                        # ── ORIENT ────────────────────────────────
+                        hitl_events, op_suffix = _drain_hitl()
+                        for ev in hitl_events:
+                            yield ev
+                            blackboard.apply(ev)
+
+                        yield PhaseTransition(
+                            from_phase=OODAPhase.OBSERVE.value,
+                            to_phase=OODAPhase.ORIENT.value,
+                            aggregate_id=mission.id,
+                            mission=mission.mission_type.value,
+                        )
+                        logger.info("▶ ORIENT — %s", self._PHASE_DESC["ORIENT"])
+                        orient_prompt = _get_phase_prompt(mission_key, "ORIENT").format(
+                            blackboard_context=blackboard.to_context_prompt(),
+                            mission_description=mission_desc,
+                            observe_output=observe_output[:4000],
+                        ) + op_suffix + EVENT_INSTRUCTION
+                        orient_output = await self._run_coordinator(
+                            orient_prompt, mission, agents, blackboard, phase_label="ORIENT"
+                        )
+                        for extracted in extract_events_from_output(orient_output, mission):
+                            yield extracted
+                            blackboard.apply(extracted)
+
+                        # ── DECIDE ────────────────────────────────
+                        hitl_events, op_suffix = _drain_hitl()
+                        for ev in hitl_events:
+                            yield ev
+                            blackboard.apply(ev)
+                        yield PhaseTransition(
+                            from_phase=OODAPhase.ORIENT.value,
+                            to_phase=OODAPhase.DECIDE.value,
+                            aggregate_id=mission.id,
+                            mission=mission.mission_type.value,
+                        )
+                        logger.info("▶ DECIDE — %s", self._PHASE_DESC["DECIDE"])
+                        decide_prompt = _get_phase_prompt(mission_key, "DECIDE").format(
+                            blackboard_context=blackboard.to_context_prompt(),
+                            mission_description=mission_desc,
+                            orient_output=orient_output[:4000],
+                        ) + op_suffix + EVENT_INSTRUCTION
+                        decide_output = await self._run_coordinator(
+                            decide_prompt, mission, agents, blackboard, phase_label="DECIDE"
+                        )
+
+                    # ── ACT ────────────────────────────────────────
+                    hitl_events, op_suffix = _drain_hitl()
+                    for ev in hitl_events:
+                        yield ev
+                        blackboard.apply(ev)
+
+                    yield PhaseTransition(
+                        from_phase=(OODAPhase.OBSERVE.value if mission_key == "ctf"
+                                    else OODAPhase.DECIDE.value),
+                        to_phase=OODAPhase.ACT.value,
+                        aggregate_id=mission.id,
+                        mission=mission.mission_type.value,
+                    )
+                    logger.info("▶ ACT — %s", self._PHASE_DESC["ACT"])
+                    flag_hint = _FLAG_SUBMIT_INSTRUCTION if mission_key == "ctf" else ""
+                    act_prompt = _get_phase_prompt(mission_key, "ACT").format(
+                        blackboard_context=blackboard.to_context_prompt(),
+                        mission_description=mission_desc,
+                        decide_output=decide_output[:4000],
+                        agent_descriptions=agent_desc,
+                    ) + op_suffix + EVENT_INSTRUCTION + flag_hint
+
+                    if session is not None:
+                        act_output = await session.query(act_prompt, phase_label="ACT")
+                    else:
+                        act_agents = agents
+                        if classified_category and mission_key == "ctf":
+                            direct = self._pick_direct_agent(classified_category, agents)
+                            if direct:
+                                act_agents = direct
+                        act_output = await self._run_coordinator(
+                            act_prompt, mission, act_agents, blackboard, phase_label="ACT"
+                        )
+
+                    for extracted in extract_events_from_output(act_output, mission):
+                        yield extracted
+                        blackboard.apply(extracted)
+
+                    # ── REFLECT ────────────────────────────────────
+                    hitl_events, op_suffix = _drain_hitl()
+                    for ev in hitl_events:
+                        yield ev
+                        blackboard.apply(ev)
+
+                    yield PhaseTransition(
+                        from_phase=OODAPhase.ACT.value,
+                        to_phase=OODAPhase.REFLECT.value,
+                        aggregate_id=mission.id,
+                        mission=mission.mission_type.value,
+                    )
+                    logger.info("▶ REFLECT — %s", self._PHASE_DESC["REFLECT"])
+                    reflect_prompt = _get_phase_prompt(mission_key, "REFLECT").format(
+                        blackboard_context=blackboard.to_context_prompt(),
+                        mission_description=mission_desc,
+                        act_output=act_output[:4000],
+                        previous_insights=previous_insights or "(first iteration)",
+                    ) + op_suffix
+
+                    if session is not None:
+                        reflect_output = await session.query(reflect_prompt, phase_label="REFLECT")
+                    else:
+                        reflect_output = await self._run_coordinator(
+                            reflect_prompt, mission, agents, blackboard, phase_label="REFLECT"
+                        )
+
+                    decision = self._parse_reflection(reflect_output)
+
+                # ── Common: process reflection decision ───────────
+                previous_insights = decision.get("next_focus", "") or decision.get("insights", "")
+                d = decision.get("decision", "continue")
+                _DECISION_ICONS = {"complete": "✓", "pivot": "↻", "continue": "⟳"}
+                logger.info(
+                    "%s %s — %s",
+                    _DECISION_ICONS.get(d, "?"), d.upper(),
+                    (decision.get("assessment", "") or decision.get("insights", ""))[:120],
                 )
-            observe_prompt = _get_phase_prompt(mission_key, "OBSERVE").format(
-                blackboard_context=blackboard.to_context_prompt(),
-                mission_description=mission_desc,
-                agent_descriptions=agent_desc,
-            ) + campaign_context + focus_hint + recon_hint + op_suffix + EVENT_INSTRUCTION
 
-            observe_output = await self._run_coordinator(
-                observe_prompt, mission, agents, blackboard, phase_label="OBSERVE"
-            )
+                reflection_event = ReflectionCompleted(
+                    aggregate_id=mission.id,
+                    assessment=decision.get("assessment", ""),
+                    decision=d,
+                    insights=decision.get("insights", ""),
+                    mission=mission.mission_type.value,
+                )
+                yield reflection_event
+                blackboard.apply(reflection_event)
 
-            for extracted in extract_events_from_output(
-                observe_output, mission, causation_id=phase_event.event_id,
-            ):
-                yield extracted
-                blackboard.apply(extracted)
-
-            # ── CTF fast-path: skip ORIENT+DECIDE, go straight to ACT ──
-            # For CTF, the model already knows what to do after OBSERVE.
-            # Splitting analysis/planning into separate SDK calls wastes tokens.
-            if mission_key == "ctf":
-                orient_output = ""
-                decide_output = observe_output  # feed observations directly to ACT
+                if d == "complete":
+                    break
             else:
-                # ── ORIENT ────────────────────────────────────────
-                hitl_events, op_suffix = _drain_hitl()
-                for ev in hitl_events:
-                    yield ev
-                    blackboard.apply(ev)
-
-                yield PhaseTransition(
-                    from_phase=OODAPhase.OBSERVE.value,
-                    to_phase=OODAPhase.ORIENT.value,
-                    aggregate_id=mission.id,
-                    mission=mission.mission_type.value,
+                # Loop exhausted without explicit completion
+                logger.warning(
+                    f"OODA loop exhausted after {self._max_iterations} iterations "
+                    f"without explicit completion"
                 )
-
-                logger.info("▶ ORIENT — %s", self._PHASE_DESC["ORIENT"])
-                orient_prompt = _get_phase_prompt(mission_key, "ORIENT").format(
-                    blackboard_context=blackboard.to_context_prompt(),
-                    mission_description=mission_desc,
-                    observe_output=observe_output[:4000],
-                ) + op_suffix + EVENT_INSTRUCTION
-                orient_output = await self._run_coordinator(
-                    orient_prompt, mission, agents, blackboard, phase_label="ORIENT"
-                )
-
-                for extracted in extract_events_from_output(orient_output, mission):
-                    yield extracted
-                    blackboard.apply(extracted)
-
-                # ── DECIDE ────────────────────────────────────────
-                hitl_events, op_suffix = _drain_hitl()
-                for ev in hitl_events:
-                    yield ev
-                    blackboard.apply(ev)
-
-                yield PhaseTransition(
-                    from_phase=OODAPhase.ORIENT.value,
-                    to_phase=OODAPhase.DECIDE.value,
-                    aggregate_id=mission.id,
-                    mission=mission.mission_type.value,
-                )
-
-                logger.info("▶ DECIDE — %s", self._PHASE_DESC["DECIDE"])
-                decide_prompt = _get_phase_prompt(mission_key, "DECIDE").format(
-                    blackboard_context=blackboard.to_context_prompt(),
-                    mission_description=mission_desc,
-                    orient_output=orient_output[:4000],
-                ) + op_suffix + EVENT_INSTRUCTION
-                decide_output = await self._run_coordinator(
-                    decide_prompt, mission, agents, blackboard, phase_label="DECIDE"
-                )
-
-            # ── ACT ───────────────────────────────────────────────
-            hitl_events, op_suffix = _drain_hitl()
-            for ev in hitl_events:
-                yield ev
-                blackboard.apply(ev)
-
-            yield PhaseTransition(
-                from_phase=(OODAPhase.OBSERVE.value if mission_key == "ctf"
-                            else OODAPhase.DECIDE.value),
-                to_phase=OODAPhase.ACT.value,
-                aggregate_id=mission.id,
-                mission=mission.mission_type.value,
-            )
-
-            logger.info("▶ ACT — %s", self._PHASE_DESC["ACT"])
-            flag_hint = _FLAG_SUBMIT_INSTRUCTION if mission_key == "ctf" else ""
-            act_prompt = _get_phase_prompt(mission_key, "ACT").format(
-                blackboard_context=blackboard.to_context_prompt(),
-                mission_description=mission_desc,
-                decide_output=decide_output[:4000],
-                agent_descriptions=agent_desc,
-            ) + op_suffix + EVENT_INSTRUCTION + flag_hint
-
-            # Direct agent invocation: if classification is known, only pass the
-            # relevant specialist agent to reduce coordinator overhead.
-            act_agents = agents
-            if classified_category and mission_key == "ctf":
-                direct = self._pick_direct_agent(classified_category, agents)
-                if direct:
-                    act_agents = direct
-
-            act_output = await self._run_coordinator(
-                act_prompt, mission, act_agents, blackboard, phase_label="ACT"
-            )
-
-            for extracted in extract_events_from_output(act_output, mission):
-                yield extracted
-                blackboard.apply(extracted)
-
-            # ── REFLECT ───────────────────────────────────────────
-            hitl_events, op_suffix = _drain_hitl()
-            for ev in hitl_events:
-                yield ev
-                blackboard.apply(ev)
-
-            yield PhaseTransition(
-                from_phase=OODAPhase.ACT.value,
-                to_phase=OODAPhase.REFLECT.value,
-                aggregate_id=mission.id,
-                mission=mission.mission_type.value,
-            )
-
-            logger.info("▶ REFLECT — %s", self._PHASE_DESC["REFLECT"])
-            reflect_prompt = _get_phase_prompt(mission_key, "REFLECT").format(
-                blackboard_context=blackboard.to_context_prompt(),
-                mission_description=mission_desc,
-                act_output=act_output[:4000],
-                previous_insights=previous_insights or "(first iteration)",
-            ) + op_suffix
-            reflect_output = await self._run_coordinator(
-                reflect_prompt, mission, agents, blackboard, phase_label="REFLECT"
-            )
-
-            decision = self._parse_reflection(reflect_output)
-            previous_insights = decision.get("next_focus", "") or decision.get("insights", "")
-            d = decision.get("decision", "continue")
-            _DECISION_ICONS = {"complete": "✓", "pivot": "↻", "continue": "⟳"}
-            logger.info(
-                "%s %s — %s",
-                _DECISION_ICONS.get(d, "?"), d.upper(),
-                (decision.get("assessment", "") or decision.get("insights", ""))[:120],
-            )
-
-            reflection_event = ReflectionCompleted(
-                aggregate_id=mission.id,
-                assessment=decision.get("assessment", ""),
-                decision=d,
-                insights=decision.get("insights", ""),
-                mission=mission.mission_type.value,
-            )
-            yield reflection_event
-            blackboard.apply(reflection_event)
-
-            if d == "complete":
-                break
-        else:
-            # Loop exhausted without explicit completion
-            logger.warning(
-                f"OODA loop exhausted after {self._max_iterations} iterations "
-                f"without explicit completion"
-            )
+        finally:
+            # Always clean up the session
+            if session is not None:
+                await session.disconnect()
 
         # ── Mission Complete ──────────────────────────────────────
         complete_event = MissionCompleted(

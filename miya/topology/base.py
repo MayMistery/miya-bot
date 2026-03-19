@@ -224,7 +224,7 @@ def extract_events_from_output(
         data.setdefault("correlation_id", mission.id)
 
         # Handle tuple fields
-        for f_name in ("ports", "services", "input_vectors", "path", "technology_stack", "target_ports"):
+        for f_name in ("ports", "services", "input_vectors", "path", "technology_stack", "target_ports", "file_paths"):
             if f_name in data and isinstance(data[f_name], list):
                 data[f_name] = tuple(data[f_name])
 
@@ -384,51 +384,19 @@ async def run_sdk_coordinator(
     phase_label: str = "",
     max_turns: int | None = None,
 ) -> str:
-    """Shared coordinator execution via Claude Agent SDK.
+    """Shared stateless coordinator execution via Claude Agent SDK.
 
-    Centralises the SDK call so both OODA and AttackGraph topologies
-    use the same code path, reducing duplication.
+    Each call creates a fresh query() — no conversation context is retained.
+    For multi-turn context reuse, use ``SDKSession`` instead.
 
     Logging behaviour (controlled via ``-v`` / ``-vv``):
         TRACE  — every tool_use call (name + input), tool_result, and text block
         DEBUG  — prompt summary, per-phase summary with timing
     """
-    from claude_agent_sdk import query, ClaudeAgentOptions, AgentDefinition
-    from miya.infra.mcp_registry import MCPRegistry
+    from claude_agent_sdk import query
     from miya.infra.logging_config import TRACE
 
-    # Cache the registry singleton to avoid rebuilding configs every call
-    if not hasattr(run_sdk_coordinator, "_registry"):
-        run_sdk_coordinator._registry = MCPRegistry()  # type: ignore[attr-defined]
-    registry: MCPRegistry = run_sdk_coordinator._registry  # type: ignore[attr-defined]
-    sdk_agents = {
-        name: AgentDefinition(**defn)
-        for name, defn in agent_defs.items()
-    }
-    mcp_configs = registry.get_configs_for_agent(mcp_names)
-    cfg = _get_topology_config()
-
-    # Always include the event_bus MCP server for structured event emission
-    if "event_bus" not in mcp_configs:
-        event_bus_config = registry.get("event_bus")
-        if event_bus_config:
-            mcp_configs["event_bus"] = event_bus_config.to_sdk_config()
-    all_mcp_patterns = [f"mcp__{name}__*" for name in mcp_names]
-    if "mcp__event_bus__*" not in all_mcp_patterns:
-        all_mcp_patterns.append("mcp__event_bus__*")
-
-    options = ClaudeAgentOptions(
-        agents=sdk_agents,
-        mcp_servers=mcp_configs,
-        allowed_tools=[
-            "Read", "Write", "Edit", "Bash", "Grep", "Glob",
-            "WebSearch", "WebFetch", "Agent",
-        ] + all_mcp_patterns,
-        permission_mode="acceptEdits",
-        max_turns=max_turns if max_turns is not None else cfg["max_turns"],
-        cwd=os.getcwd(),
-        env=_sdk_env(),
-    )
+    options = _build_sdk_options(agent_defs, mcp_names, max_turns=max_turns)
 
     tag = f"[{phase_label}] " if phase_label else ""
     logger.debug("%sprompt (%d chars): %s", tag, len(prompt), _truncate_for_log(prompt, 300))
@@ -500,6 +468,190 @@ async def run_sdk_coordinator(
     )
 
     return "\n".join(output_parts)
+
+
+def _build_sdk_options(
+    agent_defs: dict[str, Any],
+    mcp_names: list[str],
+    *,
+    max_turns: int | None = None,
+) -> "ClaudeAgentOptions":
+    """Build ClaudeAgentOptions from agent definitions and MCP names.
+
+    Shared between stateless ``run_sdk_coordinator`` and session-based
+    ``SDKSession`` to avoid code duplication.
+    """
+    from claude_agent_sdk import ClaudeAgentOptions, AgentDefinition
+    from miya.infra.mcp_registry import MCPRegistry
+
+    if not hasattr(_build_sdk_options, "_registry"):
+        _build_sdk_options._registry = MCPRegistry()  # type: ignore[attr-defined]
+    registry: MCPRegistry = _build_sdk_options._registry  # type: ignore[attr-defined]
+
+    sdk_agents = {
+        name: AgentDefinition(**defn)
+        for name, defn in agent_defs.items()
+    }
+    mcp_configs = registry.get_configs_for_agent(mcp_names)
+    cfg = _get_topology_config()
+
+    if "event_bus" not in mcp_configs:
+        event_bus_config = registry.get("event_bus")
+        if event_bus_config:
+            mcp_configs["event_bus"] = event_bus_config.to_sdk_config()
+    all_mcp_patterns = [f"mcp__{name}__*" for name in mcp_names]
+    if "mcp__event_bus__*" not in all_mcp_patterns:
+        all_mcp_patterns.append("mcp__event_bus__*")
+
+    return ClaudeAgentOptions(
+        agents=sdk_agents,
+        mcp_servers=mcp_configs,
+        allowed_tools=[
+            "Read", "Write", "Edit", "Bash", "Grep", "Glob",
+            "WebSearch", "WebFetch", "Agent",
+        ] + all_mcp_patterns,
+        permission_mode="acceptEdits",
+        max_turns=max_turns if max_turns is not None else cfg["max_turns"],
+        cwd=os.getcwd(),
+        env=_sdk_env(),
+    )
+
+
+class SDKSession:
+    """Stateful session wrapping ClaudeSDKClient for multi-turn context reuse.
+
+    Each ``query()`` call reuses the same CLI process and conversation context,
+    so subsequent prompts automatically carry forward prior context without
+    re-sending it. This saves tokens significantly in multi-phase flows like OODA.
+
+    Usage::
+
+        session = SDKSession(agent_defs, mcp_names)
+        await session.connect()
+        observe_out = await session.query("OBSERVE: ...", phase_label="OBSERVE")
+        act_out = await session.query("ACT: ...", phase_label="ACT")  # has OBSERVE context
+        await session.disconnect()
+
+    Or as async context manager::
+
+        async with SDKSession(agent_defs, mcp_names) as session:
+            out = await session.query("...", phase_label="PHASE")
+    """
+
+    def __init__(
+        self,
+        agent_defs: dict[str, Any],
+        mcp_names: list[str],
+        *,
+        max_turns: int | None = None,
+    ) -> None:
+        self._agent_defs = agent_defs
+        self._mcp_names = mcp_names
+        self._max_turns = max_turns
+        self._client: Any | None = None  # ClaudeSDKClient instance
+
+    async def connect(self, initial_prompt: str | None = None) -> None:
+        """Open the session. Optionally send an initial prompt."""
+        from claude_agent_sdk import ClaudeSDKClient
+
+        options = _build_sdk_options(
+            self._agent_defs, self._mcp_names, max_turns=self._max_turns,
+        )
+        self._client = ClaudeSDKClient(options)
+        await self._client.connect(initial_prompt)
+
+    async def query(self, prompt: str, *, phase_label: str = "") -> str:
+        """Send a prompt and collect the text response.
+
+        Because the session is stateful, the model sees all prior messages.
+        This means ``prompt`` only needs the new phase instruction — not the
+        full blackboard/history context that stateless calls require.
+        """
+        from miya.infra.logging_config import TRACE
+
+        if self._client is None:
+            raise RuntimeError("SDKSession not connected. Call connect() first.")
+
+        tag = f"[{phase_label}] " if phase_label else ""
+        logger.debug("%sprompt (%d chars): %s", tag, len(prompt), _truncate_for_log(prompt, 300))
+
+        await self._client.query(prompt)
+
+        output_parts: list[str] = []
+        turn_count = 0
+        tool_use_count = 0
+        t0 = time.monotonic()
+        current_tool: str | None = None
+
+        async for message in self._client.receive_response():
+            turn_count += 1
+
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock):
+                        output_parts.append(block.text)
+                        if logger.isEnabledFor(TRACE):
+                            logger.log(TRACE, "%s▍ %s", tag, _truncate_for_log(block.text, 500))
+                    elif isinstance(block, ThinkingBlock):
+                        if logger.isEnabledFor(TRACE):
+                            logger.log(TRACE, "%s💭 %s", tag, _truncate_for_log(block.thinking, 300))
+                    elif isinstance(block, ToolUseBlock):
+                        tool_use_count += 1
+                        current_tool = block.name
+                        if logger.isEnabledFor(TRACE):
+                            logger.log(
+                                TRACE, "%s→ #%d %s: %s",
+                                tag, tool_use_count, block.name,
+                                _format_tool_input(block.input),
+                            )
+                    elif isinstance(block, ToolResultBlock):
+                        if logger.isEnabledFor(TRACE):
+                            result_text = _format_tool_result_content(block)
+                            error_mark = " ✗" if block.is_error else ""
+                            logger.log(
+                                TRACE, "%s← %s%s (%d chars)",
+                                tag, current_tool or "result", error_mark, len(result_text),
+                            )
+
+            elif isinstance(message, UserMessage) and isinstance(message.content, list):
+                for block in message.content:
+                    if isinstance(block, ToolResultBlock) and logger.isEnabledFor(TRACE):
+                        result_text = _format_tool_result_content(block)
+                        error_mark = " ✗" if block.is_error else ""
+                        logger.log(
+                            TRACE, "%s← %s%s (%d chars)",
+                            tag, current_tool or "result", error_mark, len(result_text),
+                        )
+
+            elif isinstance(message, ResultMessage):
+                if logger.isEnabledFor(TRACE):
+                    api_ms = getattr(message, "duration_api_ms", 0) or 0
+                    cost = getattr(message, "total_cost_usd", 0) or 0
+                    turns = getattr(message, "num_turns", 0) or 0
+                    logger.log(TRACE, "%s⏱ SDK: %dms, %d turns, $%.4f",
+                               tag, api_ms, turns, cost)
+
+        elapsed = time.monotonic() - t0
+        logger.debug(
+            "%s✓ done: %d turns, %d tools, %d chars, %.1fs",
+            tag, turn_count, tool_use_count, sum(len(p) for p in output_parts), elapsed,
+        )
+
+        return "\n".join(output_parts)
+
+    async def disconnect(self) -> None:
+        """Close the session."""
+        if self._client is not None:
+            await self._client.disconnect()
+            self._client = None
+
+    async def __aenter__(self) -> "SDKSession":
+        await self.connect()
+        return self
+
+    async def __aexit__(self, *exc: Any) -> bool:
+        await self.disconnect()
+        return False
 
 
 def drain_hitl_queue(

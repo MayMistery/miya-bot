@@ -535,12 +535,12 @@ _NL_PARSE_PROMPT = (
     'Respond EXACTLY in this format (JSON on a single line):\n'
     '{"mission_type": "ctf|oneday|zeroday", "target": "<url_or_path>", '
     '"topology": "ooda|attack_graph|fanout", "prompt": "<task description for the agent>", '
-    '"options": {}, "meta": {}}\n'
+    '"options": {}, "meta": {}, "general_instructions": []}\n'
     "\n"
     "Rules for mission parameters:\n"
     '- "target" should be a URL, IP, file path, or network range extracted from the input\n'
-    '- "prompt" should include the full task context (challenge description, hints, etc.)\n'
-    '  but NOT runtime directives (verbose, model, etc.) — those go in "meta"\n'
+    '- "prompt" should include ONLY challenge-specific context (challenge description, hints, etc.)\n'
+    '  Do NOT include general setup commands or runtime directives in "prompt"\n'
     "- If a URL is present, extract it as target\n"
     "- If a file path (.zip, .py, .c, etc.) is present, extract it as target\n"
     '- For CTF, add "category" to options if you can determine it (web/pwn/crypto/reverse/misc)\n'
@@ -551,6 +551,15 @@ _NL_PARSE_PROMPT = (
     '  Set "target" to the base IP or platform URL.\n'
     "- If you cannot determine mission_type, default to ctf\n"
     "- If you cannot determine topology, use ooda (fanout for multiple challenges)\n"
+    "\n"
+    'Rules for "general_instructions" (IMPORTANT — separating concerns):\n'
+    "- Extract ALL non-CTF commands the user wants executed BEFORE solving challenges.\n"
+    "  Examples: git checkout, git reset, branch switching, file cleanup, environment setup,\n"
+    "  dependency installation, directory changes, etc.\n"
+    '- Each instruction should be a string describing the action, e.g.:\n'
+    '  ["switch to bench branch", "discard all uncommitted changes"]\n'
+    "- These are executed in a PREPARE phase before any challenge solving begins.\n"
+    "- If no general instructions are found, use an empty array [].\n"
     "\n"
     'Rules for "meta" (runtime directives — set ONLY if user explicitly requests):\n'
     '- "verbose": "trace" | "debug" | "info" — log verbosity level.\n'
@@ -637,6 +646,11 @@ async def _nl_parse_mission(
         prompt = data.get("prompt", raw)
         extra_options = data.get("options", {})
         meta = data.get("meta", {})
+        general_instructions = data.get("general_instructions", [])
+
+        # Carry general_instructions into options for PREPARE phase
+        if general_instructions:
+            extra_options["general_instructions"] = general_instructions
 
         # Validate mission_type — LLM may hallucinate
         if mission_type not in ("oneday", "zeroday", "ctf"):

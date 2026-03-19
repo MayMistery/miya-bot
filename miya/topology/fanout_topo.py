@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from typing import Any, AsyncIterator
 
@@ -80,6 +81,44 @@ _CLASSIFY_BATCH_PROMPT = (
     "For each, respond with:\n"
     '[EVENT:ChallengeClassified {{"challenge_name": "...", "category": "web|pwn|crypto|reverse|misc", "confidence": 0.8, "reasoning": "...", "context": "ctf"}}]\n'
 )
+
+_PREPARE_PROMPT = """\
+You are a CTF competition preparation assistant. Your job is to set up the \
+environment before challenge solving begins.
+
+## Working Directory
+{cwd}
+
+## Challenges to Solve
+{challenge_list}
+
+{general_instructions_section}
+
+## Phase 1: Execute General Instructions
+{general_instructions_detail}
+
+## Phase 2: Discover Challenge Attachments
+Explore the working directory and subdirectories to find attachment files \
+(source code, binaries, archives, docker-compose, Dockerfiles, etc.) for \
+each challenge listed above. Use Glob, Read, Bash (ls, find, file) as needed.
+
+**Matching strategies** (try in order):
+1. Directories named after challenges (exact or fuzzy match)
+2. Archive files (.zip, .tar.gz) containing challenge names
+3. Files with challenge-related names in common CTF directory structures
+4. Docker/container files that reference challenge names or ports
+
+## Output Format
+For EACH challenge, emit an event with the discovered file paths:
+[EVENT:ChallengeIdentified {{"challenge_name": "...", "category": "...", \
+"file_paths": ["/absolute/path/to/file1", "/absolute/path/to/dir/"], "context": "ctf"}}]
+
+If no attachments are found for a challenge, still emit the event with an \
+empty file_paths array.
+
+IMPORTANT: Use absolute paths. Include directories (with trailing /) if the \
+entire directory is relevant to the challenge.
+"""
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -144,12 +183,25 @@ class FanoutTopology:
 
         operator_hint = f"Operator: {mission.prompt}" if mission.prompt else ""
 
-        # ── Phase 1: ENUMERATE (or use pre-defined challenges) ───
+        # ── Phase 0: PREPARE (general setup + attachment discovery) ──
+        general_instructions = mission.options.get("general_instructions", [])
         predefined = mission.options.get("challenges")
+
+        # Run PREPARE phase when there are general instructions OR
+        # pre-defined challenges that need attachment discovery
+        if general_instructions or predefined:
+            async for ev in self._run_prepare(
+                mission, agents, blackboard, general_instructions, predefined,
+            ):
+                yield ev
+
+        # ── Phase 1: ENUMERATE (or use pre-defined challenges) ───
         challenges: list[dict[str, Any]] = []
 
         if predefined and isinstance(predefined, list):
-            # User provided challenge list — skip enumeration
+            # Challenges enriched by PREPARE phase (file_paths from blackboard)
+            prepare_file_map = self._build_file_map(blackboard)
+
             logger.info("▶ ENUMERATE — skipped (user provided %d challenges)", len(predefined))
             yield PhaseTransition(
                 to_phase="enumerate",
@@ -161,22 +213,26 @@ class FanoutTopology:
                 ch_name = ch.get("name", "challenge")
                 ch_target = ch.get("target", mission.target.uri)
                 ch_cat = ch.get("category", "")
+                # Merge file_paths from PREPARE discovery
+                ch_files = prepare_file_map.get(ch_name, [])
                 challenges.append({
                     "name": ch_name,
                     "target": ch_target,
                     "category": ch_cat,
                     "points": ch.get("points", 0),
+                    "file_paths": ch_files,
                 })
-                # Emit ChallengeIdentified so blackboard/events stay consistent
-                ev = ChallengeIdentified(
-                    challenge_name=ch_name,
-                    category=ch_cat,
-                    points=ch.get("points", 0),
-                    context="ctf",
-                    mission="ctf",
-                )
-                yield ev
-                blackboard.apply(ev)
+                # Only emit ChallengeIdentified if PREPARE didn't already
+                if ch_name not in prepare_file_map:
+                    ev = ChallengeIdentified(
+                        challenge_name=ch_name,
+                        category=ch_cat,
+                        points=ch.get("points", 0),
+                        context="ctf",
+                        mission="ctf",
+                    )
+                    yield ev
+                    blackboard.apply(ev)
 
             # ── Pre-flight connectivity probe ──────────────────
             reachable, unreachable = await self._probe_targets(challenges)
@@ -215,6 +271,7 @@ class FanoutTopology:
                         "name": ev.challenge_name,
                         "category": ev.category,
                         "points": ev.points,
+                        "file_paths": list(ev.file_paths),
                     })
 
             # If no challenges discovered via events, try a minimal fallback:
@@ -225,6 +282,7 @@ class FanoutTopology:
                     "name": "challenge",
                     "category": "",
                     "points": 0,
+                    "file_paths": [],
                 }]
 
         logger.info("Discovered %d challenge(s)", len(challenges))
@@ -304,12 +362,23 @@ class FanoutTopology:
                 # Create sub-mission for this challenge
                 # Use per-challenge target URL if available, else fall back to mission target
                 ch_target = challenge.get("target", mission.target.uri)
+                ch_files = challenge.get("file_paths", [])
+
+                # Build challenge-specific prompt (NO general instructions leak)
+                sub_prompt = f"Solve challenge: {ch_name}."
+                if ch_files:
+                    sub_prompt += f"\nChallenge attachments: {', '.join(ch_files)}"
+
                 sub_mission = Mission(
                     mission_type=MissionType.CTF,
                     target=Target(uri=ch_target, kind="challenge"),
                     topology="ooda",
-                    prompt=f"Solve challenge: {ch_name}. " + (mission.prompt or ""),
-                    options={"challenge_name": ch_name, "category": ch_cat},
+                    prompt=sub_prompt,
+                    options={
+                        "challenge_name": ch_name,
+                        "category": ch_cat,
+                        "file_paths": ch_files,
+                    },
                 )
                 sub_mission.start()
 
@@ -405,6 +474,82 @@ class FanoutTopology:
             findings_count=len(blackboard.findings),
             mission=mission.mission_type.value,
         )
+
+    async def _run_prepare(
+        self,
+        mission: Mission,
+        agents: dict[str, AgentHandle],
+        blackboard: Blackboard,
+        general_instructions: list[str],
+        predefined: list[dict[str, Any]] | None,
+    ) -> AsyncIterator[DomainEvent]:
+        """PREPARE phase: execute general setup commands + discover challenge attachments.
+
+        Runs in a single SDK coordinator call. Emits ChallengeIdentified events
+        with file_paths populated from filesystem exploration.
+        """
+        yield PhaseTransition(
+            to_phase="prepare",
+            reason="Environment setup and attachment discovery",
+            aggregate_id=mission.id,
+            mission=mission.mission_type.value,
+        )
+        logger.info("▶ PREPARE — environment setup + attachment discovery")
+
+        # Build challenge list section for the prompt
+        if predefined:
+            ch_lines = []
+            for ch in predefined:
+                name = ch.get("name", "?")
+                target = ch.get("target", "?")
+                cat = ch.get("category", "")
+                line = f"- {name} (target: {target})"
+                if cat:
+                    line += f" [category: {cat}]"
+                ch_lines.append(line)
+            challenge_list = "\n".join(ch_lines)
+        else:
+            challenge_list = "(No predefined challenges — discover from filesystem)"
+
+        # Build general instructions sections
+        if general_instructions:
+            gi_section = "## General Instructions (execute these first)\n"
+            gi_detail = (
+                "Execute these commands/actions in order. For DESTRUCTIVE operations "
+                "(delete, reset --hard, force push, drop, rm -rf), list them and ask "
+                "for confirmation before executing.\n\n"
+                + "\n".join(f"{i+1}. {instr}" for i, instr in enumerate(general_instructions))
+            )
+        else:
+            gi_section = ""
+            gi_detail = "No general instructions — skip to attachment discovery."
+
+        prepare_prompt = _PREPARE_PROMPT.format(
+            cwd=os.getcwd(),
+            challenge_list=challenge_list,
+            general_instructions_section=gi_section,
+            general_instructions_detail=gi_detail,
+        ) + EVENT_INSTRUCTION
+
+        prepare_output = await self._run(prepare_prompt, agents, blackboard)
+
+        for ev in extract_events_from_output(prepare_output, mission):
+            yield ev
+            blackboard.apply(ev)
+
+        logger.info("PREPARE phase complete")
+
+    @staticmethod
+    def _build_file_map(blackboard: Blackboard) -> dict[str, list[str]]:
+        """Build a map of challenge_name → file_paths from blackboard state.
+
+        Used to merge PREPARE discoveries into the challenge definitions.
+        """
+        result: dict[str, list[str]] = {}
+        for ch_view in blackboard.challenges:
+            if ch_view.file_paths:
+                result[ch_view.name] = list(ch_view.file_paths)
+        return result
 
     async def _probe_targets(
         self,

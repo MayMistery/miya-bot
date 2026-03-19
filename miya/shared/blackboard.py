@@ -107,6 +107,7 @@ class ChallengeView:
     points: int = 0
     difficulty: str = ""
     technology_stack: tuple[str, ...] = ()
+    file_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -396,6 +397,7 @@ class Blackboard:
             points=e.points,
             difficulty=e.difficulty,
             technology_stack=e.technology_stack,
+            file_paths=e.file_paths,
         ))
 
     def _on_ChallengeSolved(self, e: ChallengeSolved) -> None:

@@ -244,6 +244,7 @@ class ChallengeIdentified(DomainEvent):
     points: int = 0
     difficulty: str = ""  # easy, medium, hard
     technology_stack: tuple[str, ...] = ()
+    file_paths: tuple[str, ...] = ()  # attachment/source file paths discovered in PREPARE
     context: str = "ctf"
     mission: str = "ctf"
 
