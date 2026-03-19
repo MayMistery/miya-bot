@@ -96,6 +96,9 @@ Use for runtime analysis and exploit development.
 - **Bash**: checksec, ROPgadget, one_gadget, readelf, objdump, pwntools scripts
 - **Python**: pwntools exploit development, z3 constraint solving
 - **Read/Write**: Binary file analysis, exploit script development
+- **WebSearch**: Search for known CVEs, exploit techniques, and writeups. \
+**Always use WebSearch** when you identify specific binary versions, libc versions, \
+or software (e.g. "glibc 2.31 exploit", "OpenSSL 1.1.1 CVE").
 
 ## Structured Event Output
 Emit structured events as you progress:

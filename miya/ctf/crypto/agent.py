@@ -101,6 +101,9 @@ operations. Useful for data transformation and classical crypto.
 - **Python**: PyCryptodome, gmpy2 for crypto operations; z3 for constraint solving
 - **Bash**: RsaCtfTool for automated RSA attacks; hashcat/john for hash cracking
 - **Read/Write**: Source code analysis, solver script development
+- **WebSearch**: Search for known cryptographic attacks, CVEs, and papers. \
+**Always use WebSearch** when you identify specific crypto libraries/versions \
+or recognize a well-known cryptographic construction.
 
 Always show your mathematical reasoning and explain the vulnerability.
 

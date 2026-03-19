@@ -97,6 +97,9 @@ tshark, tcpdump, volatility, and custom scripts
 - **Python**: PIL/Pillow for image manipulation, scapy for packet analysis, \
 pdfminer for PDF parsing, custom extraction scripts
 - **Read/Write**: File analysis, script development
+- **WebSearch**: Search for file format documentation, encoding schemes, \
+steganography techniques, or forensic analysis methods. Use when you encounter \
+unfamiliar formats or need reference material.
 
 Always run `file` and `strings` first. Document every extraction step.
 

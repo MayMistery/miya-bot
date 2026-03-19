@@ -101,6 +101,8 @@ _OBSERVE_CTF = """## OBSERVE
 Mission: {mission_description}
 Agents: {agent_descriptions}
 Examine the challenge files and target. Identify the category and attack surface.
+If you identify specific software/library versions, use **WebSearch** to look up \
+known CVEs and vulnerabilities for those versions.
 """
 
 _ORIENT_CTF = """## ORIENT
@@ -210,8 +212,14 @@ Target: {target}
 1. **Explore**: Read challenge files, check file types, inspect source code, \
 examine provided artifacts. If there's a URL, make an initial request to observe \
 behavior. Use `file`, `strings`, `checksec` as appropriate.
-2. **Classify**: Based on your exploration, determine the challenge category.
-3. **Strategize**: Based on what you found, outline your initial attack approach.
+2. **Research Known Vulnerabilities**: When you identify specific software, \
+frameworks, or libraries with version numbers (e.g. GORM v1.21.14, Flask 2.0.1, \
+PHP 7.4), use **WebSearch** to look up known CVEs and security advisories for \
+those exact versions. Search queries like "GORM 1.21 CVE", "Flask 2.0.1 vulnerability", \
+or "<library> <version> security issue" are very effective. Include any relevant \
+CVEs or known vulnerabilities in your recon summary.
+3. **Classify**: Based on your exploration, determine the challenge category.
+4. **Strategize**: Based on what you found, outline your initial attack approach.
 
 ## Response Format
 CATEGORY: <web|pwn|crypto|reverse|misc>
@@ -221,8 +229,9 @@ REASONING: <one sentence>
 RECON_SUMMARY:
 <Multi-line summary of what you discovered during exploration. Include: \
 technology stack, key files, identified entry points, initial observations \
-about potential vulnerabilities or approach. This will be fed to the specialist \
-agent who will solve the challenge.>
+about potential vulnerabilities or approach, and any known CVEs/advisories \
+found via WebSearch. This will be fed to the specialist agent who will \
+solve the challenge.>
 """
 
 # ── Flag submission prompt ────────────────────────────────────────
