@@ -612,12 +612,15 @@ class MissionService:
                 classifications[ev.challenge_name] = ev.category
         resume_challenges = []
         for cv in bb.challenges:
-            resume_challenges.append({
+            ch_dict: dict[str, Any] = {
                 "name": cv.name,
                 "category": classifications.get(cv.name, cv.category),
                 "points": cv.points,
                 "file_paths": list(cv.file_paths),
-            })
+            }
+            if cv.target_url:
+                ch_dict["target"] = cv.target_url
+            resume_challenges.append(ch_dict)
 
         return MissionReport(
             mission_id=last_start.aggregate_id,

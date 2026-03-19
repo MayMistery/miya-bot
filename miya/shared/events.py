@@ -247,6 +247,7 @@ class ChallengeIdentified(DomainEvent):
     difficulty: str = ""  # easy, medium, hard
     technology_stack: tuple[str, ...] = ()
     file_paths: tuple[str, ...] = ()  # attachment/source file paths discovered in PREPARE
+    target_url: str = ""  # per-challenge URL (e.g. http://10.0.0.1:8080)
     context: str = "ctf"
     mission: str = "ctf"
 

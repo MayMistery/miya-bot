@@ -108,6 +108,7 @@ class ChallengeView:
     difficulty: str = ""
     technology_stack: tuple[str, ...] = ()
     file_paths: tuple[str, ...] = ()
+    target_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -398,6 +399,7 @@ class Blackboard:
             difficulty=e.difficulty,
             technology_stack=e.technology_stack,
             file_paths=e.file_paths,
+            target_url=e.target_url,
         ))
 
     def _on_ChallengeSolved(self, e: ChallengeSolved) -> None:

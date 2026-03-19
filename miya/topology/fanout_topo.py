@@ -297,6 +297,7 @@ class FanoutTopology:
                         category=ch_cat,
                         points=ch.get("points", 0),
                         file_paths=tuple(ch_files) if ch_files else (),
+                        target_url=ch_target,
                         context="ctf",
                         mission="ctf",
                     )
