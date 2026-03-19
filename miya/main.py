@@ -1966,15 +1966,27 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
             def _hitl_reader() -> None:
                 """Blocking input reader running in a dedicated thread.
 
-                Uses simple stdin.readline() instead of prompt_toolkit to
-                avoid terminal conflicts with Rich display output during
-                fanout missions.
+                Uses select() + stdin.readline() instead of prompt_toolkit
+                to avoid terminal control conflicts with Rich output during
+                fanout missions.  select() with 0.5s timeout lets us check
+                stop_input periodically so the thread exits cleanly when the
+                mission ends (no stale readline blocking stdin for the REPL).
                 """
+                import select as _sel
                 import sys as _sys
                 while not stop_input.is_set():
                     try:
                         _sys.stderr.write("\033[33mhitl\033[0m > ")
                         _sys.stderr.flush()
+                        # Poll stdin with timeout to allow clean exit
+                        while not stop_input.is_set():
+                            rlist, _, _ = _sel.select(
+                                [_sys.stdin], [], [], 0.5,
+                            )
+                            if rlist:
+                                break
+                        if stop_input.is_set():
+                            break
                         text = _sys.stdin.readline()
                         if not text:
                             # EOF (Ctrl+D)

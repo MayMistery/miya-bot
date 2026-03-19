@@ -242,14 +242,14 @@ class FanoutDisplay:
         self._mode = _Mode.ATTACHED
         self._attached_name = challenge_name
         self.log_event(f"Attached to {challenge_name} (type 'detach' to return)")
-        self._refresh()
+        self._refresh(force=True)
         return True
 
     def detach(self) -> None:
         """Return to grid view."""
         self._mode = _Mode.GRID
         self._attached_name = ""
-        self._refresh()
+        self._refresh(force=True)
 
     def get_logs(self, challenge_name: str, n: int = 30) -> list[str]:
         """Get recent log lines for a challenge."""
