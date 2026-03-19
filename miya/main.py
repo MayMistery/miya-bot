@@ -2040,6 +2040,24 @@ async def _interactive_loop(db: str, model: str = "opus", unlimited: bool = Fals
                 """
                 import select as _sel
                 import sys as _sys
+
+                # Restore sane terminal settings.  prompt_toolkit (used by
+                # the REPL) puts the terminal in raw/application mode which
+                # may disable ICRNL (CR→NL translation).  Without this,
+                # Enter sends \r that readline() can't see as a line
+                # terminator, so keystrokes echo as ^M.
+                try:
+                    import termios
+                    fd = _sys.stdin.fileno()
+                    attrs = termios.tcgetattr(fd)
+                    # Ensure ICRNL (map CR to NL on input) is set
+                    attrs[0] |= termios.ICRNL
+                    # Ensure ECHO and ICANON (canonical/cooked mode) are set
+                    attrs[3] |= termios.ECHO | termios.ICANON
+                    termios.tcsetattr(fd, termios.TCSANOW, attrs)
+                except (ImportError, termios.error, OSError):
+                    pass  # non-POSIX or no tty — best-effort
+
                 while not stop_input.is_set():
                     try:
                         _sys.stderr.write("\033[33mhitl\033[0m > ")
