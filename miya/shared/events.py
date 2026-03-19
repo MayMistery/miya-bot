@@ -111,7 +111,7 @@ class FingerprintCompleted(DomainEvent):
     event_type: ClassVar[str] = "recon.fingerprint_completed"
     asset_id: str = ""
     software: str = ""
-    version: str = ""
+    software_version: str = ""
     technology_stack: tuple[str, ...] = ()
     context: str = "recon"
 
@@ -384,6 +384,14 @@ def event_from_dict(data: dict[str, Any]) -> DomainEvent:
     for f_name in ("ports", "services", "input_vectors", "path", "technology_stack", "target_ports", "file_paths"):
         if f_name in data and isinstance(data[f_name], list):
             data[f_name] = tuple(data[f_name])
+
+    # Handle field renames (backwards compatibility)
+    _FIELD_ALIASES = {
+        "version": "software_version",  # FingerprintCompleted renamed
+    }
+    for old_name, new_name in _FIELD_ALIASES.items():
+        if old_name in data and new_name not in data:
+            data[new_name] = data.pop(old_name)
 
     # Filter to only fields this class accepts
     import dataclasses

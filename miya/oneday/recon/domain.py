@@ -141,7 +141,7 @@ class ReconMission:
             aggregate_type="ReconMission",
             asset_id=asset_id,
             software=software,
-            version=version,
+            software_version=version,
             technology_stack=technology_stack,
             correlation_id=correlation_id,
             mission="oneday",
@@ -173,10 +173,10 @@ class ReconMission:
             if event.asset_id in self.assets:
                 self.assets[event.asset_id].fingerprint = Fingerprint(
                     software=event.software,
-                    version=event.version,
+                    version=event.software_version,
                     technology_stack=event.technology_stack,
                 )
-            self.version = event.version
+            self.version += 1
 
     def collect_events(self) -> list[DomainEvent]:
         """Drain pending events."""

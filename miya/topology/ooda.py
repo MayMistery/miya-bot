@@ -682,8 +682,16 @@ class OODATopology:
         blackboard: Blackboard,
         phase_label: str = "",
         max_turns: int | None = None,
+        operator_queue: asyncio.Queue[str] | None = None,
     ) -> str:
-        """Run the coordinator agent with a prompt and collect text output."""
+        """Run the coordinator agent with a prompt and collect text output.
+
+        On SDKTimeoutError, asks the operator whether to retry, skip,
+        or abort. This prevents silent failures and gives the human
+        a chance to decide.
+        """
+        from miya.topology.base import SDKTimeoutError
+
         all_mcp_names: set[str] = set()
         for handle in agents.values():
             all_mcp_names.update(handle.mcp_servers)
@@ -693,19 +701,50 @@ class OODATopology:
             for name, handle in agents.items()
         }
 
-        # Use injected coordinator port if available
-        if self._coordinator is not None:
-            return await self._coordinator.run(
-                prompt=prompt,
-                agents=agent_defs,
-                mcp_servers=list(all_mcp_names),
-            )
+        while True:
+            try:
+                # Use injected coordinator port if available
+                if self._coordinator is not None:
+                    return await self._coordinator.run(
+                        prompt=prompt,
+                        agents=agent_defs,
+                        mcp_servers=list(all_mcp_names),
+                    )
 
-        # Fallback: use shared Claude Agent SDK coordinator
-        return await run_sdk_coordinator(
-            prompt, agent_defs, list(all_mcp_names),
-            phase_label=phase_label, max_turns=max_turns,
-        )
+                # Fallback: use shared Claude Agent SDK coordinator
+                return await run_sdk_coordinator(
+                    prompt, agent_defs, list(all_mcp_names),
+                    phase_label=phase_label, max_turns=max_turns,
+                )
+            except SDKTimeoutError as exc:
+                self._log(logging.WARNING, f"SDK timeout: {exc}")
+
+                # Ask operator: retry / skip / abort
+                if operator_queue is not None:
+                    self._log(
+                        logging.WARNING,
+                        "SDK timed out. Type 'retry', 'skip', or 'abort' in HITL.",
+                    )
+                    # Wait for operator decision (up to 120s)
+                    try:
+                        decision = await asyncio.wait_for(
+                            operator_queue.get(), timeout=120,
+                        )
+                    except asyncio.TimeoutError:
+                        decision = "skip"
+
+                    decision = decision.strip().lower()
+                    if decision == "retry":
+                        self._log(logging.INFO, "Retrying SDK call...")
+                        continue
+                    elif decision == "abort":
+                        raise
+                    else:
+                        # skip — return empty so the phase is skipped
+                        self._log(logging.INFO, "Skipping timed-out phase")
+                        return f"[SKIPPED: SDK timeout — {exc}]"
+                else:
+                    raise
 
     @staticmethod
     def _parse_reflection(output: str) -> dict[str, str]:

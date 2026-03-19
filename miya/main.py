@@ -436,6 +436,7 @@ async def _health_ping_sdk() -> str:
     has working auth (local Claude Code, or ANTHROPIC_API_KEY), this succeeds.
     """
     from claude_agent_sdk import query, ClaudeAgentOptions
+    from claude_agent_sdk.types import AssistantMessage, TextBlock
 
     options = ClaudeAgentOptions(
         max_turns=1,
@@ -444,9 +445,9 @@ async def _health_ping_sdk() -> str:
 
     parts: list[str] = []
     async for message in query(prompt="Reply with exactly: MIYA_OK", options=options):
-        if hasattr(message, "content"):
+        if isinstance(message, AssistantMessage):
             for block in message.content:
-                if hasattr(block, "text"):
+                if isinstance(block, TextBlock):
                     parts.append(block.text)
     return "".join(parts).strip()
 
@@ -1197,7 +1198,12 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                     None, lambda: session.prompt(_prompt_html())
                 )
                 raw = raw.strip()
-            except (EOFError, KeyboardInterrupt):
+            except KeyboardInterrupt:
+                # Ctrl+C in empty REPL: just clear the line, don't exit
+                console.print()
+                continue
+            except EOFError:
+                # Ctrl+D: exit REPL
                 console.print("\n[dim]Goodbye.[/dim]")
                 break
 

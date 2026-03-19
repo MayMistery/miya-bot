@@ -274,7 +274,7 @@ class MissionService:
         if isinstance(mission_type, str):
             mission_type = MissionType(mission_type)
 
-        target = Target(uri=target_uri, kind=target_kind)
+        target = Target(uri=target_uri, kind=target_kind)  # type: ignore[arg-type]
         mission = Mission(
             mission_type=mission_type,
             target=target,
@@ -397,9 +397,9 @@ class MissionService:
                 blackboard_summary=blackboard.summary(),
                 status="failed",
                 error=str(e),
-                cost_usd=cost_snap["cost_usd"],
-                api_turns=cost_snap["turns"],
-                api_calls=cost_snap["calls"],
+                cost_usd=float(cost_snap["cost_usd"]),
+                api_turns=int(cost_snap["turns"]),
+                api_calls=int(cost_snap["calls"]),
                 target_kind=target_kind,
                 model=model,
                 prompt=prompt,
@@ -476,5 +476,5 @@ class MissionService:
         return self._mcp_registry.describe()
 
     async def close(self) -> None:
-        if self._owns_store and self._event_store and hasattr(self._event_store, "close"):
+        if self._owns_store and self._event_store:
             await self._event_store.close()

@@ -253,8 +253,8 @@ class Blackboard:
             old = self.assets[e.asset_id]
             fp = dict(old.fingerprint)
             fp["software"] = e.software
-            fp["version"] = e.version
-            fp["technology_stack"] = list(e.technology_stack)
+            fp["version"] = e.software_version
+            fp["technology_stack"] = ", ".join(e.technology_stack)
             self.assets[e.asset_id] = Asset(
                 id=old.id, host=old.host, ip=old.ip,
                 ports=old.ports, services=old.services, os=old.os,

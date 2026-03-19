@@ -56,7 +56,7 @@ class CostTracker:
         self.total_api_ms += api_ms
         self.call_count += 1
 
-    def reset(self) -> dict[str, float | int]:
+    def reset(self) -> dict[str, Any]:
         """Return snapshot and reset counters."""
         snap = self.snapshot()
         self.total_cost_usd = 0.0
@@ -65,7 +65,7 @@ class CostTracker:
         self.call_count = 0
         return snap
 
-    def snapshot(self) -> dict[str, float | int]:
+    def snapshot(self) -> dict[str, Any]:
         return {
             "cost_usd": round(self.total_cost_usd, 4),
             "turns": self.total_turns,
@@ -144,7 +144,7 @@ class Topology(Protocol):
         """Human-readable description of this topology's approach."""
         ...
 
-    async def execute(
+    def execute(
         self,
         mission: Mission,
         blackboard: Blackboard,
@@ -155,7 +155,7 @@ class Topology(Protocol):
     ) -> AsyncIterator[DomainEvent]:
         """Execute the mission using this topology.
 
-        Yields DomainEvents as the mission progresses.
+        Yields DomainEvents as the mission progresses (async generator).
         The caller is responsible for persisting events to the EventStore.
 
         Args:
@@ -372,7 +372,7 @@ def _get_topology_config() -> dict[str, int]:
         MIYA_MAX_TURNS            — max SDK turns per coordinator call (default 30)
         MIYA_FANOUT_PARALLEL      — max parallel challenge solvers (default 10)
         MIYA_FANOUT_TIMEOUT       — per-challenge timeout in seconds (default 3600)
-        MIYA_SDK_IDLE_TIMEOUT     — idle timeout between SDK messages (default 20)
+        MIYA_SDK_IDLE_TIMEOUT     — idle timeout between SDK messages (default 600)
         MIYA_SDK_RETRIES          — retry count on SDK timeout (default 1)
     """
     def _int(key: str, default: int) -> int:
@@ -388,7 +388,7 @@ def _get_topology_config() -> dict[str, int]:
         "max_turns": _int("MIYA_MAX_TURNS", 30),
         "fanout_parallel": _int("MIYA_FANOUT_PARALLEL", 10),
         "fanout_timeout": _int("MIYA_FANOUT_TIMEOUT", 3600),
-        "sdk_idle_timeout": _int("MIYA_SDK_IDLE_TIMEOUT", 20),
+        "sdk_idle_timeout": _int("MIYA_SDK_IDLE_TIMEOUT", 600),
         "sdk_retries": _int("MIYA_SDK_RETRIES", 1),
     }
 
@@ -501,20 +501,36 @@ async def _run_sdk_coordinator_once(
     turn_count = 0
     tool_use_count = 0
     t0 = time.monotonic()
+    last_message_time = t0
     current_tool: str | None = None  # track which tool is running
+    warned_slow = False
+    warn_threshold = idle_timeout * 0.8  # warn at 80% of timeout
 
     # Iterate with per-message idle timeout
     aiter = query(prompt=prompt, options=options).__aiter__()
     while True:
         try:
             message = await asyncio.wait_for(aiter.__anext__(), timeout=idle_timeout)
+            last_message_time = time.monotonic()
+            warned_slow = False  # reset on successful message
         except StopAsyncIteration:
             break
         except asyncio.TimeoutError:
             elapsed = time.monotonic() - t0
+            idle_elapsed = time.monotonic() - last_message_time
             raise SDKTimeoutError(
-                f"{tag}No SDK message for {idle_timeout}s (elapsed {elapsed:.0f}s, "
+                f"{tag}No SDK message for {idle_elapsed:.0f}s "
+                f"(total elapsed {elapsed:.0f}s, "
                 f"{turn_count} turns, {tool_use_count} tools)"
+            )
+
+        # Warn if approaching timeout (80% of idle limit since last message)
+        gap = time.monotonic() - last_message_time
+        if gap > warn_threshold and not warned_slow:
+            warned_slow = True
+            logger.warning(
+                "%sSDK slow: %.0fs since last message (timeout at %ds)",
+                tag, gap, idle_timeout,
             )
 
         turn_count += 1
@@ -615,7 +631,7 @@ def _build_sdk_options(
 
     return ClaudeAgentOptions(
         agents=sdk_agents,
-        mcp_servers=mcp_configs,
+        mcp_servers=mcp_configs,  # type: ignore[arg-type]
         allowed_tools=[
             "Read", "Write", "Edit", "Bash", "Grep", "Glob",
             "WebSearch", "WebFetch", "Agent",
@@ -828,7 +844,7 @@ def drain_hitl_queue(
     return events, suffix
 
 
-TopologyFactory = Callable[..., Topology]
+TopologyFactory = Callable[..., Any]
 
 
 class TopologyRegistry:
