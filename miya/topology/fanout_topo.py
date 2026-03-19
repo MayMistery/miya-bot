@@ -679,6 +679,11 @@ class FanoutTopology:
                     display.log_event("  stop              cancel entire mission")
                     continue
 
+                if cmd == "status" and len(parts) == 1:
+                    # No args: reprint the panel grid
+                    display._refresh(force=True)
+                    continue
+
                 if cmd == "status" and len(parts) > 1:
                     name = parts[1].strip()
                     state = display._states.get(name)
