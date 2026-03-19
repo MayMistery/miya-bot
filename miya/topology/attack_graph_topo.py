@@ -22,15 +22,14 @@ from miya.shared.events import (
     DomainEvent,
     MissionStarted,
     MissionCompleted,
-    MissionFailed,
     OperatorMessage,
     PhaseTransition,
 )
 from miya.shared.ports import CoordinatorPort, EventStorePort
 from miya.shared.types import Mission
 from miya.topology.base import (
-    Topology, TopologyRegistry, AgentHandle,
-    extract_events_from_output, _sdk_env, EVENT_INSTRUCTION,
+    TopologyRegistry, AgentHandle,
+    extract_events_from_output, EVENT_INSTRUCTION,
     run_sdk_coordinator, _get_topology_config, drain_hitl_queue,
 )
 

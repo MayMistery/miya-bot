@@ -31,31 +31,19 @@ import pytest_asyncio
 
 from miya.shared.blackboard import Blackboard
 from miya.shared.events import (
-    DomainEvent,
-    AssetDiscovered,
-    FingerprintCompleted,
     VulnerabilityFound,
     CVEMatched,
-    ExploitAttempted,
-    ExploitSucceeded,
-    ExploitFailed,
     PrivilegeEscalated,
     LootCollected,
     ChallengeIdentified,
     ChallengeSolved,
-    EntryPointDiscovered,
-    TaintPathTraced,
-    SinkConfirmed,
-    PoCValidated,
     PhaseTransition,
     ReflectionCompleted,
     MissionStarted,
     MissionCompleted,
 )
-from miya.shared.ports import CoordinatorPort
-from miya.shared.types import MissionType, Severity
 from miya.infra.event_store import SQLiteEventStore
-from miya.mission.service import MissionService, MissionReport
+from miya.mission.service import MissionService
 
 from tests.fixtures.cve_scenarios import (
     PROXYSHELL, DIRTY_PIPE, MOVEIT_CHAIN, CITRIX_BLEED, CONFLUENCE_RCE,
@@ -537,7 +525,7 @@ class TestDirtyPipeChain:
         mock = MultiStageCoordinator(responses)
         service = MissionService(event_store=store, coordinator=mock)
 
-        report = await service.execute(
+        await service.execute(
             mission_type="oneday",
             target_uri="10.0.0.50",
             topology="ooda",
@@ -808,7 +796,6 @@ class TestHeapMazeCTF:
         )
 
         # Challenge identified and solved
-        summary = report.blackboard_summary
         all_events = await store.load_all()
 
         challenge_events = [e for e in all_events if isinstance(e, ChallengeIdentified)]
@@ -837,7 +824,7 @@ class TestHeapMazeCTF:
         mock = MultiStageCoordinator(responses)
         service = MissionService(event_store=store, coordinator=mock)
 
-        report = await service.execute(
+        await service.execute(
             mission_type="ctf",
             target_uri="https://ctf.example.com/chall/heap",
             topology="ooda",
@@ -880,7 +867,6 @@ class TestBlindXXECTF:
         assert report.status == "completed"
         assert mock.iteration_count == 4
 
-        summary = report.blackboard_summary
         all_events = await store.load_all()
 
         # Challenge solved with correct flag
@@ -991,7 +977,7 @@ class TestKernelROPCTF:
         assert len(phase_events) >= 12
 
         # Report should list the challenge
-        text = report.as_text()
+        report.as_text()
         assert report.events_count > 0
 
     @pytest.mark.asyncio

@@ -4,16 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from uuid import uuid4
 
 from miya.ctf.shared.domain import (
-    ChallengeCategory,
     ChallengeStatus,
     Difficulty,
     Flag,
     SolveStrategy,
     WriteUp,
-    _now,
     _uuid,
 )
 

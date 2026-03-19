@@ -8,10 +8,8 @@ import pytest_asyncio
 
 from miya.shared.blackboard import Blackboard
 from miya.shared.events import (
-    DomainEvent, ChallengeIdentified, ChallengeSolved,
-    MissionStarted, MissionCompleted, PhaseTransition,
+    DomainEvent, ChallengeIdentified, PhaseTransition,
 )
-from miya.shared.ports import CoordinatorPort
 from miya.shared.types import Mission, MissionType, Target
 from miya.infra.event_store import SQLiteEventStore
 from miya.topology.fanout_topo import FanoutTopology

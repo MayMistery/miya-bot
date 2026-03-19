@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 from miya.shared.types import Asset, Credential, Finding, Severity
-from miya.shared.attack_graph import AttackGraph, GraphNode, GraphEdge
+from miya.shared.attack_graph import AttackGraph, GraphNode
 from miya.shared.events import (
     DomainEvent,
     AssetDiscovered,

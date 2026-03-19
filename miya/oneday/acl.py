@@ -25,23 +25,16 @@ from miya.oneday.scan.domain import ScanTarget, ScanResult, ScanTask
 from miya.oneday.vuln.domain import (
     VulnAssessment,
     VulnMatch,
-    CVE,
-    ExploitAvailability,
 )
 
 # ── Exploit types ─────────────────────────────────────────────────
 from miya.oneday.exploit.domain import (
     ExploitCampaign,
     ExploitAttempt,
-    Payload,
-    ExploitChain,
-    ExploitResult,
 )
 
 # ── Post types ────────────────────────────────────────────────────
 from miya.oneday.post.domain import (
-    PostSession,
-    AccessLevel,
     PivotTarget,
 )
 

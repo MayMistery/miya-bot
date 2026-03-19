@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from miya.zeroday.dataflow.service import _SINK_CWE_MAP
 from miya.zeroday.entrypoint.domain import CodeBase, EntryPoint, InputVector
-from miya.zeroday.dataflow.domain import TaintPath, TaintSession, TaintSink, TaintSource
-from miya.zeroday.sink.domain import Exploitability, SinkAnalysis, SinkPattern
+from miya.zeroday.dataflow.domain import TaintPath, TaintSession, TaintSource
+from miya.zeroday.sink.domain import SinkAnalysis, SinkPattern
 from miya.zeroday.poc.domain import PoCPayload, PoCProject
 
 

@@ -13,7 +13,10 @@ import logging
 import os
 import re
 import time
-from typing import Any, AsyncIterator, Callable, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from claude_agent_sdk import ClaudeAgentOptions
 
 from claude_agent_sdk.types import (
     AssistantMessage,

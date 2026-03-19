@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import pytest
-from miya.oneday.exploit.domain import ExploitCampaign, Payload, ExploitResult
-from miya.oneday.post.domain import PostSession, AccessLevel, LootItem, PivotTarget
+from miya.oneday.exploit.domain import ExploitCampaign, Payload
+from miya.oneday.post.domain import PostSession, AccessLevel, PivotTarget
 from miya.shared.events import ExploitAttempted, ExploitSucceeded, ExploitFailed
 
 
 class TestExploitCampaign:
     def test_attempt_exploit_emits_event(self):
         campaign = ExploitCampaign(target_host="10.0.0.5")
-        attempt = campaign.attempt_exploit(
+        campaign.attempt_exploit(
             cve_id="CVE-2021-44228",
             target_host="10.0.0.5",
             target_port=8080,

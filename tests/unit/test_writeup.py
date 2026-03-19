@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
-from unittest.mock import patch
 
-import pytest
 
 from miya.mission.service import _write_challenge_writeup
 

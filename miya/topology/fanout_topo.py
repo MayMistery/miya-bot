@@ -33,7 +33,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 from typing import Any, AsyncIterator
 
 from miya.shared.blackboard import Blackboard
@@ -44,19 +43,16 @@ from miya.shared.events import (
     MissionCompleted,
     ChallengeIdentified,
     ChallengeClassified,
-    ChallengeSolved,
     PhaseTransition,
 )
 from miya.shared.ports import EventStorePort
 from miya.shared.types import Mission, MissionType, Target
 from miya.topology.base import (
-    Topology,
     TopologyRegistry,
     AgentHandle,
     extract_events_from_output,
     EVENT_INSTRUCTION,
     run_sdk_coordinator,
-    _get_topology_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -119,6 +115,67 @@ empty file_paths array.
 IMPORTANT: Use absolute paths. Include directories (with trailing /) if the \
 entire directory is relevant to the challenge.
 """
+
+
+def _validate_challenges(raw: Any) -> list[dict[str, Any]] | None:
+    """Validate and normalise the ``challenges`` option.
+
+    Accepts:
+    - ``None`` → ``None`` (no predefined challenges).
+    - ``list[dict]`` → returned as-is.
+    - A JSON string (can happen if the interactive editor round-tripped
+      through ``str()``) → parsed back into ``list[dict]``.
+    - Anything else → ``None`` with a warning.
+
+    Each item must be a dict with at least a ``name`` key.  Items that
+    fail validation are logged and skipped.
+    """
+    if raw is None:
+        return None
+
+    items: list[Any] | None = None
+
+    if isinstance(raw, list):
+        items = raw
+    elif isinstance(raw, str):
+        # Attempt JSON parse (handles accidental stringification)
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                items = parsed
+            else:
+                logger.warning(
+                    "challenges option is a JSON string but not a list — ignoring"
+                )
+                return None
+        except (json.JSONDecodeError, ValueError):
+            logger.warning(
+                "challenges option is a non-JSON string — ignoring "
+                "(first 80 chars: %s)", raw[:80],
+            )
+            return None
+    else:
+        logger.warning(
+            "challenges option has unexpected type %s — ignoring",
+            type(raw).__name__,
+        )
+        return None
+
+    # Validate each item is a dict with a name
+    valid: list[dict[str, Any]] = []
+    for i, item in enumerate(items):
+        if not isinstance(item, dict):
+            logger.warning(
+                "challenges[%d] is %s, expected dict — skipping",
+                i, type(item).__name__,
+            )
+            continue
+        if "name" not in item:
+            logger.warning("challenges[%d] has no 'name' key — skipping", i)
+            continue
+        valid.append(item)
+
+    return valid if valid else None
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -185,7 +242,7 @@ class FanoutTopology:
 
         # ── Phase 0: PREPARE (general setup + attachment discovery) ──
         general_instructions = mission.options.get("general_instructions", [])
-        predefined = mission.options.get("challenges")
+        predefined = _validate_challenges(mission.options.get("challenges"))
 
         # Run PREPARE phase when there are general instructions OR
         # pre-defined challenges that need attachment discovery
@@ -495,13 +552,38 @@ class FanoutTopology:
         Runs in a single SDK coordinator call. Emits ChallengeIdentified events
         with file_paths populated from filesystem exploration.
         """
+        # Build a human-readable summary for the phase transition
+        prepare_details: list[str] = []
+        if general_instructions:
+            prepare_details.append(
+                f"general instructions ({len(general_instructions)}): "
+                + "; ".join(general_instructions[:3])
+                + ("..." if len(general_instructions) > 3 else "")
+            )
+        if predefined:
+            targets_summary = ", ".join(
+                f"{ch.get('name', '?')} → {ch.get('target', '?')}"
+                for ch in predefined
+            )
+            prepare_details.append(f"challenges: {targets_summary}")
+
+        reason = "Environment setup + attachment discovery"
+        if prepare_details:
+            reason += " | " + " | ".join(prepare_details)
+
         yield PhaseTransition(
             to_phase="prepare",
-            reason="Environment setup and attachment discovery",
+            reason=reason,
             aggregate_id=mission.id,
             mission=mission.mission_type.value,
         )
         logger.info("▶ PREPARE — environment setup + attachment discovery")
+        if predefined:
+            for ch in predefined:
+                logger.info(
+                    "  challenge: %s → %s",
+                    ch.get("name", "?"), ch.get("target", "?"),
+                )
 
         # Build challenge list section for the prompt
         if predefined:

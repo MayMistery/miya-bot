@@ -115,7 +115,7 @@ class MissionReport:
             f"  Status:   {self.status}",
             f"  Duration: {self.duration_seconds:.1f}s",
             f"  Events:   {self.events_count}",
-            f"",
+            "",
             f"  FINDINGS ({len(self.findings)} total, {self.critical_count} critical)",
             f"{'─' * 60}",
         ]
