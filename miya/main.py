@@ -457,17 +457,44 @@ def update(branch: str | None) -> None:
     # Resolve project root from this package's location (works from any cwd)
     project_root = str(Path(__file__).resolve().parent.parent)
 
-    # Auto-detect: explicit flag > env var > default branch (main)
-    target_branch = branch or os.environ.get("MIYA_BRANCH", "") or "main"
+    # Auto-detect: explicit flag > env var > current branch > main
+    if branch:
+        target_branch = branch
+    elif os.environ.get("MIYA_BRANCH", ""):
+        target_branch = os.environ["MIYA_BRANCH"]
+    else:
+        # Default to current branch, fallback to main
+        try:
+            target_branch = subprocess.check_output(
+                ["git", "-C", project_root, "rev-parse", "--abbrev-ref", "HEAD"],
+                stderr=subprocess.DEVNULL, text=True,
+            ).strip()
+        except Exception:
+            target_branch = "main"
 
-    console.print(f"[cyan]Updating from origin/{target_branch}...[/cyan]")
+    # Detect current branch to decide if checkout is needed
+    try:
+        current_branch = subprocess.check_output(
+            ["git", "-C", project_root, "rev-parse", "--abbrev-ref", "HEAD"],
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+    except Exception:
+        current_branch = ""
+
+    console.print(f"[cyan]Updating to origin/{target_branch}...[/cyan]")
     console.print(f"[dim]Project: {project_root}[/dim]")
 
-    steps = [
+    steps: list[tuple[str, list[str]]] = [
         ("Fetching", ["git", "-C", project_root, "fetch", "origin", target_branch]),
+    ]
+    if current_branch != target_branch:
+        steps.append(
+            ("Switching branch", ["git", "-C", project_root, "checkout", target_branch]),
+        )
+    steps.extend([
         ("Pulling", ["git", "-C", project_root, "pull", "origin", target_branch]),
         ("Syncing deps", ["uv", "sync", "--directory", project_root]),
-    ]
+    ])
 
     for label, cmd in steps:
         console.print(f"  [dim]{label}...[/dim]", end=" ")
@@ -489,9 +516,9 @@ def update(branch: str | None) -> None:
             ["git", "-C", project_root, "rev-parse", "--short", "HEAD"],
             text=True,
         ).strip()
-        console.print(f"\n[bold green]Updated to {git_hash}[/bold green]")
+        console.print(f"\n[bold green]Updated to {target_branch}@{git_hash}[/bold green]")
     except Exception:
-        console.print("\n[bold green]Update complete.[/bold green]")
+        console.print(f"\n[bold green]Updated to {target_branch}.[/bold green]")
 
 
 @cli.command()
