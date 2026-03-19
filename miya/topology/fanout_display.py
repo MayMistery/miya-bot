@@ -280,8 +280,9 @@ class FanoutDisplay:
 
         # Help hint
         hint = Text.from_markup(
-            "  [dim]Commands: attach <name> | logs <name> | "
-            "@<name> <msg> | extend <name|all>[/dim]"
+            "  [dim]Commands: help | attach <name> | logs <name> [n] | "
+            "status <name> | @<name> <msg> | ref <src> @<dst> | "
+            "extend <name|all>[/dim]"
         )
 
         parts: list[Any] = [grid, summary, hint]

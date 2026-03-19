@@ -666,6 +666,49 @@ class FanoutTopology:
                 parts = msg.split(None, 1)
                 cmd = parts[0].lower()
 
+                if cmd == "help":
+                    display.log_event("── HITL Commands ──")
+                    display.log_event("  @<name> <msg>     send message to specific challenge")
+                    display.log_event("  <msg>             broadcast to all running challenges")
+                    display.log_event("  logs <name> [n]   show last n (default 30) log lines")
+                    display.log_event("  attach <name>     live-follow a challenge's logs")
+                    display.log_event("  detach            return to grid view")
+                    display.log_event("  status <name>     show detailed status of a challenge")
+                    display.log_event("  extend <name|all> extend timeout +30m")
+                    display.log_event("  ref <src> @<dst>  inject src's knowledge into dst")
+                    display.log_event("  stop              cancel entire mission")
+                    continue
+
+                if cmd == "status" and len(parts) > 1:
+                    name = parts[1].strip()
+                    state = display._states.get(name)
+                    if state:
+                        display.log_event(
+                            f"── {state.status_icon} {name} ──"
+                        )
+                        display.log_event(
+                            f"  Category: {state.category or '?'} | "
+                            f"Phase: {state.phase} | "
+                            f"Iter: {state.iteration}/{state.max_iterations}"
+                        )
+                        display.log_event(
+                            f"  Status: {state.status} | "
+                            f"Elapsed: {state.elapsed} | "
+                            f"Remaining: {state.remaining_str or 'N/A'}"
+                        )
+                        if state.flag:
+                            display.log_event(f"  Flag: {state.flag}")
+                        if state.last_activity:
+                            display.log_event(
+                                f"  Last: {state.last_activity}"
+                            )
+                    else:
+                        display.log_event(
+                            f"Unknown: {name}. "
+                            f"Available: {', '.join(display.challenge_names)}"
+                        )
+                    continue
+
                 if cmd == "attach" and len(parts) > 1:
                     display.attach(parts[1].strip())
                     continue
@@ -675,8 +718,18 @@ class FanoutTopology:
                     continue
 
                 if cmd == "logs" and len(parts) > 1:
-                    name = parts[1].strip()
-                    lines = display.get_logs(name)
+                    log_args = parts[1].strip().split()
+                    name = log_args[0]
+                    n = 30
+                    if len(log_args) > 1:
+                        try:
+                            n = int(log_args[1])
+                        except ValueError:
+                            pass
+                    lines = display.get_logs(name, n=n)
+                    display.log_event(
+                        f"── logs {name} (last {len(lines)}) ──"
+                    )
                     for line in lines:
                         display.log_event(line)
                     continue
