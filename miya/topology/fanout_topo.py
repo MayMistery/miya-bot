@@ -824,20 +824,33 @@ class FanoutTopology:
         router_task = asyncio.create_task(_hitl_router())
 
         # Drain events with display active
-        with display:
-            while True:
-                ev = await event_queue.get()
-                if ev is None:
-                    break
-                yield ev
-                blackboard.apply(ev)
-
-        router_task.cancel()
         try:
-            await router_task
+            with display:
+                while True:
+                    ev = await event_queue.get()
+                    if ev is None:
+                        break
+                    yield ev
+                    blackboard.apply(ev)
         except asyncio.CancelledError:
-            pass
-        await waiter  # ensure cleanup
+            # Ctrl+C during fanout — cancel all sub-tasks and clean up
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            raise
+        finally:
+            router_task.cancel()
+            try:
+                await router_task
+            except asyncio.CancelledError:
+                pass
+            # Wait for sub-tasks to finish (they may already be cancelled)
+            if not waiter.done():
+                waiter.cancel()
+                try:
+                    await waiter
+                except (asyncio.CancelledError, Exception):
+                    pass
 
         # ── Phase 4: COLLECT — final report ───────────────────────
         yield PhaseTransition(

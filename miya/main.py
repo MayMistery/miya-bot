@@ -1503,9 +1503,10 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
 
                 # Discover skills recursively from .claude/skills/ and ~/.claude/skills/
                 from pathlib import Path as _P
+                _project_root = _P(__file__).resolve().parent.parent
                 skill_dirs: list[tuple[str, _P, _P]] = []
                 seen_names: set[str] = set()
-                for base in [_P.cwd() / ".claude" / "skills", _P.home() / ".claude" / "skills"]:
+                for base in [_project_root / ".claude" / "skills", _P.cwd() / ".claude" / "skills", _P.home() / ".claude" / "skills"]:
                     if not base.is_dir():
                         continue
                     for sm in sorted(base.rglob("SKILL.md")):
@@ -1530,7 +1531,7 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                         t.add_column("Scope", style="dim")
                         t.add_column("Description")
                         for name, path, base in skill_dirs:
-                            scope = "project" if ".claude" in str(base)[:len(str(_P.cwd()))+20] else "global"
+                            scope = "global" if base == _P.home() / ".claude" / "skills" else "project"
                             # Parse description from frontmatter
                             desc = ""
                             try:
@@ -2045,7 +2046,7 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                             mission_task.cancel()
                             try:
                                 await _aio.wait_for(
-                                    _aio.shield(mission_task),
+                                    mission_task,
                                     timeout=5.0,
                                 )
                             except (
@@ -2059,6 +2060,7 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                     if _force_kill.is_set():
                         if not mission_task.done():
                             mission_task.cancel()
+                            # Don't wait — force immediate return
                         return "cancel"
 
                 return "done"

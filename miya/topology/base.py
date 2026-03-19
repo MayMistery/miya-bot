@@ -726,6 +726,9 @@ class SDKSession:
                 message = await asyncio.wait_for(aiter.__anext__(), timeout=idle_timeout)
             except StopAsyncIteration:
                 break
+            except asyncio.CancelledError:
+                logger.debug("%sCancelled during SDK receive", tag)
+                raise
             except asyncio.TimeoutError:
                 elapsed = time.monotonic() - t0
                 raise SDKTimeoutError(
