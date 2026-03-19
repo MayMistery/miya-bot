@@ -290,19 +290,25 @@ class FanoutTopology:
                     "points": ch.get("points", 0),
                     "file_paths": ch_files,
                 })
-                # Only emit ChallengeIdentified if PREPARE didn't already
-                if ch_name not in prepare_file_map:
-                    ev = ChallengeIdentified(
-                        challenge_name=ch_name,
-                        category=ch_cat,
-                        points=ch.get("points", 0),
-                        file_paths=tuple(ch_files) if ch_files else (),
-                        target_url=ch_target,
-                        context="ctf",
-                        mission="ctf",
-                    )
-                    yield ev
-                    blackboard.apply(ev)
+                # Always emit ChallengeIdentified with target_url.
+                # If PREPARE already emitted one (without target_url),
+                # replace it in the blackboard.
+                if ch_name in prepare_file_map:
+                    blackboard.challenges = [
+                        cv for cv in blackboard.challenges
+                        if cv.name != ch_name
+                    ]
+                ev = ChallengeIdentified(
+                    challenge_name=ch_name,
+                    category=ch_cat,
+                    points=ch.get("points", 0),
+                    file_paths=tuple(ch_files) if ch_files else (),
+                    target_url=ch_target,
+                    context="ctf",
+                    mission="ctf",
+                )
+                yield ev
+                blackboard.apply(ev)
 
             # ── Pre-flight connectivity probe ──────────────────
             reachable, unreachable = await self._probe_targets(challenges)
