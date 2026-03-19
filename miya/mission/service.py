@@ -37,19 +37,21 @@ def _write_challenge_writeup(
     approach: str,
     target: str,
     output_dir: Path | str | None = None,
+    events: list[Any] | None = None,
 ) -> Path | None:
-    """Auto-generate a writeup markdown file for a solved CTF challenge.
+    """Auto-generate a detailed writeup for a solved CTF challenge.
+
+    Includes full event timeline with payloads and analysis.
 
     Args:
-        output_dir: Directory to write into. If None, writeup generation is skipped
-                    (useful for tests or headless execution).
+        output_dir: Directory to write into. If None, writeup is skipped.
+        events: All DomainEvents collected during this challenge's OODA loop.
     """
     if output_dir is None:
         return None
 
     import re
     safe_name = re.sub(r'[^\w\-]', '_', challenge_name)
-    # Extract inner part of flag{...} for filename
     m = re.match(r'[A-Za-z0-9_]+\{(.+)\}', flag)
     flag_part = m.group(1) if m else flag
     safe_flag = re.sub(r'[^\w\-]', '_', flag_part)
@@ -58,18 +60,122 @@ def _write_challenge_writeup(
     out.mkdir(parents=True, exist_ok=True)
     filepath = out / f"{safe_name}_{safe_flag}.md"
 
-    content = (
-        f"# {challenge_name}\n\n"
-        f"**Target:** `{target}`\n"
-        f"**Flag:** `{flag}`\n\n"
-        f"---\n\n"
-        f"## Solution\n\n"
-        f"{approach or '*(Automated solution by Miya)*'}\n\n"
-        f"---\n\n"
-        f"*Solved by Miya DDD Pentest Agent*\n"
-    )
+    # ── Build detailed writeup ────────────────────────────
+    sections: list[str] = []
+    sections.append(f"# {challenge_name}\n")
+    sections.append(f"**Target:** `{target}`")
+    sections.append(f"**Flag:** `{flag}`")
+    sections.append(f"**Approach:** {approach or 'Automated'}\n")
+    sections.append("---\n")
 
-    filepath.write_text(content, encoding="utf-8")
+    # Detailed timeline from events
+    if events:
+        sections.append("## Timeline\n")
+        for ev in events:
+            etype = type(ev).__name__
+
+            if etype == "PhaseTransition":
+                to_phase = getattr(ev, "to_phase", "")
+                reason = getattr(ev, "reason", "")
+                sections.append(f"### Phase: {to_phase.upper()}\n")
+                if reason:
+                    sections.append(f"_{reason}_\n")
+
+            elif etype == "ChallengeIdentified":
+                cat = getattr(ev, "category", "")
+                diff = getattr(ev, "difficulty", "")
+                tech = getattr(ev, "technology_stack", ())
+                sections.append(f"**Identified:** category={cat}, difficulty={diff}")
+                if tech:
+                    sections.append(f"  Tech stack: {', '.join(tech)}\n")
+
+            elif etype == "ChallengeClassified":
+                cat = getattr(ev, "category", "")
+                conf = getattr(ev, "confidence", 0)
+                reasoning = getattr(ev, "reasoning", "")
+                sections.append(f"**Classified:** {cat} (confidence {conf:.0%})")
+                if reasoning:
+                    sections.append(f"  {reasoning}\n")
+
+            elif etype == "AssetDiscovered":
+                host = getattr(ev, "host", "")
+                ports = getattr(ev, "ports", ())
+                services = getattr(ev, "services", ())
+                sections.append(f"**Asset:** {host}")
+                if ports:
+                    sections.append(f"  Ports: {', '.join(str(p) for p in ports)}")
+                if services:
+                    sections.append(f"  Services: {', '.join(services)}\n")
+
+            elif etype == "VulnerabilityFound":
+                vuln = getattr(ev, "vulnerability", "")
+                sev = getattr(ev, "severity", "")
+                detail = getattr(ev, "detail", "")
+                sections.append(f"**Vulnerability:** {vuln} [{sev}]")
+                if detail:
+                    sections.append(f"```\n{detail}\n```\n")
+
+            elif etype == "ExploitAttempted":
+                technique = getattr(ev, "technique", "")
+                payload = getattr(ev, "payload", "")
+                target_desc = getattr(ev, "target", "")
+                sections.append(f"**Exploit Attempt:** {technique}")
+                if target_desc:
+                    sections.append(f"  Target: {target_desc}")
+                if payload:
+                    sections.append(f"  Payload:\n```\n{payload}\n```\n")
+
+            elif etype == "ExploitSucceeded":
+                technique = getattr(ev, "technique", "")
+                result = getattr(ev, "result", "")
+                sections.append(f"**Exploit Succeeded:** {technique}")
+                if result:
+                    sections.append(f"```\n{result}\n```\n")
+
+            elif etype == "ExploitFailed":
+                technique = getattr(ev, "technique", "")
+                reason = getattr(ev, "reason", "")
+                sections.append(f"**Exploit Failed:** {technique}")
+                if reason:
+                    sections.append(f"  Reason: {reason}\n")
+
+            elif etype == "FlagSubmitted":
+                accepted = getattr(ev, "accepted", False)
+                response = getattr(ev, "response", "")
+                sections.append(
+                    f"**Flag Submitted:** `{flag}` "
+                    f"{'ACCEPTED' if accepted else 'REJECTED'}"
+                )
+                if response:
+                    sections.append(f"  Response: {response}\n")
+
+            elif etype == "ReflectionCompleted":
+                decision = getattr(ev, "decision", "")
+                assessment = getattr(ev, "assessment", "")
+                insights = getattr(ev, "insights", "")
+                if assessment:
+                    sections.append(f"**Reflection:** {assessment}")
+                if insights:
+                    sections.append(f"  Insights: {insights}")
+                sections.append(f"  Decision: {decision}\n")
+
+            elif etype == "OperatorMessage":
+                content = getattr(ev, "content", "")
+                sections.append(f"> **Operator:** {content}\n")
+
+            elif etype == "ChallengeSolved":
+                sections.append("\n## Flag Captured\n")
+                sections.append(f"```\n{flag}\n```\n")
+                if approach:
+                    sections.append(f"**Method:** {approach}\n")
+    else:
+        sections.append("## Solution\n")
+        sections.append(f"{approach or '*(Automated solution by Miya)*'}\n")
+
+    sections.append("---\n")
+    sections.append("*Solved by Miya DDD Pentest Agent*\n")
+
+    filepath.write_text("\n".join(sections), encoding="utf-8")
     logger.info("Writeup generated: %s", filepath)
     return filepath
 
@@ -355,11 +461,21 @@ class MissionService:
                         logger.warning("Failed to record solved challenge in campaign", exc_info=True)
                     # Auto-generate writeup file
                     if event.flag and mission_type == MissionType.CTF:
+                        # Collect events for this challenge's writeup
+                        ch_events = [
+                            e for e in collected_events
+                            if getattr(e, "challenge_name", "") == event.challenge_name
+                            or type(e).__name__ in (
+                                "PhaseTransition", "ReflectionCompleted",
+                                "OperatorMessage",
+                            )
+                        ]
                         try:
                             _write_challenge_writeup(
                                 event.challenge_name, event.flag,
                                 event.approach, target_uri,
                                 output_dir=self._writeup_dir,
+                                events=ch_events,
                             )
                         except Exception:
                             logger.warning("Failed to generate writeup", exc_info=True)

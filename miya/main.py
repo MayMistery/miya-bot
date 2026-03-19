@@ -962,6 +962,21 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                     _logging.DEBUG: "debug", TRACE: "trace"}
     cfg: dict[str, Any] = {"model": model, "topology": "ooda",
                            "verbose": _level_names.get(_current_level, "info")}
+
+    # Load persistent config (project .miya.toml + global ~/.config/miya/config.toml)
+    from miya.infra.config import apply_config, save_config, load_config
+    saved_cfg = apply_config(cfg)
+    # Saved values override defaults (but CLI --model flag already set above)
+    for k in ("model", "topology", "verbose"):
+        if k in saved_cfg:
+            cfg[k] = saved_cfg[k]
+    if saved_cfg:
+        console.print(
+            f"[dim]Config loaded: "
+            f"{', '.join(f'{k}={v}' for k, v in saved_cfg.items() if k != 'api_key')}"
+            f"[/dim]"
+        )
+
     mission_history: list[MissionReport] = []
 
     # ── Background job state ──────────────────────────────────────
@@ -1375,6 +1390,12 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                                     "[/cyan]"
                                 )
                                 break
+                            if low == "help":
+                                console.print(
+                                    "[dim]HITL: @name msg | bg "
+                                    "| stop | help[/dim]"
+                                )
+                                continue
                             _fg_loop.call_soon_threadsafe(
                                 _hitl_q.put_nowait, text,
                             )
@@ -1690,22 +1711,33 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                     continue
 
             # ── Set ───────────────────────────────────────────────
+            # set [-g] <key> <value>
+            # -g writes to global ~/.config/miya/config.toml
+            # without -g writes to .miya.toml in current directory
             if cmd == "set":
-                set_parts = raw.split(None, 2)
-                if len(set_parts) == 3:
-                    key, val = set_parts[1].lower(), set_parts[2]
-                    if key == "model":
-                        if val.lower() in ("opus", "sonnet", "haiku"):
-                            cfg["model"] = val.lower()
-                            console.print(f"[green]Model → {val.lower()}[/green]")
-                        else:
-                            console.print("[red]Use 'opus', 'sonnet', or 'haiku'.[/red]")
-                    elif key == "topology":
-                        if val in ("ooda", "attack_graph", "fanout"):
-                            cfg["topology"] = val
-                            console.print(f"[green]Topology → {val}[/green]")
-                        else:
-                            console.print("[red]Use 'ooda', 'attack_graph', or 'fanout'.[/red]")
+                set_parts = raw.split()
+                is_global = False
+                if len(set_parts) > 1 and set_parts[1] == "-g":
+                    is_global = True
+                    set_parts.pop(1)
+                # Re-parse after removing -g
+                set_tokens = []
+                skip_g = False
+                for tok in raw.split(None):
+                    if tok == "-g" and not skip_g:
+                        skip_g = True
+                        continue
+                    set_tokens.append(tok)
+
+                if len(set_tokens) >= 3:
+                    key = set_tokens[1].lower()
+                    val = " ".join(set_tokens[2:])
+
+                    # Apply to runtime
+                    if key == "model" and val.lower() in ("opus", "sonnet", "haiku"):
+                        cfg["model"] = val.lower()
+                    elif key == "topology" and val in ("ooda", "attack_graph", "fanout"):
+                        cfg["topology"] = val
                     elif key == "verbose":
                         val_lower = val.lower()
                         _valid_levels = {"info": _logging.INFO, "debug": _logging.DEBUG, "trace": TRACE,
@@ -1713,19 +1745,29 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                         if val_lower in _valid_levels:
                             setup_logging(level_override=_valid_levels[val_lower])
                             cfg["verbose"] = val_lower
-                            console.print(f"[green]Verbose → {val_lower}[/green]")
-                        else:
-                            console.print("[red]Use: info, debug, trace (or warning, error)[/red]")
                     elif key == "api_key":
                         os.environ["ANTHROPIC_API_KEY"] = val
-                        console.print(f"[green]API key → {val[:8]}...[/green]")
                     elif key == "base_url":
                         os.environ["ANTHROPIC_BASE_URL"] = val
-                        console.print(f"[green]Base URL → {val}[/green]")
+
+                    # Persist
+                    msg = save_config(key, val, is_global=is_global)
+                    console.print(f"[green]{msg}[/green]")
+                elif len(set_tokens) == 2 and set_tokens[1].lower() == "show":
+                    saved = load_config()
+                    if saved:
+                        for k, v in saved.items():
+                            display_v = v[:8] + "..." if k == "api_key" else v
+                            console.print(f"  [cyan]{k}[/cyan] = {display_v}")
                     else:
-                        console.print(f"[red]Unknown: {key}. Try: model, topology, verbose, api_key, base_url[/red]")
+                        console.print("[dim]No persistent config.[/dim]")
                 else:
-                    console.print("[yellow]Usage: set <key> <value>[/yellow]")
+                    console.print(
+                        "[yellow]Usage: set [-g] <key> <value>\n"
+                        "       set show\n"
+                        "  -g = global (~/.config/miya/config.toml)\n"
+                        "  Without -g = project (.miya.toml)[/yellow]"
+                    )
                 continue
 
             # ── Mission execution ─────────────────────────────────
@@ -1852,6 +1894,24 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                                 "[/cyan]"
                             )
                             break  # exit reader thread
+                        if low == "help":
+                            console.print(
+                                "[dim]── HITL Commands ──[/dim]\n"
+                                "  [yellow]@<name> <msg>[/yellow]"
+                                "     send to specific challenge\n"
+                                "  [yellow]<msg>[/yellow]"
+                                "             broadcast to all\n"
+                                "  [yellow]bg[/yellow]"
+                                "               → background, "
+                                "return to REPL\n"
+                                "  [yellow]stop[/yellow]"
+                                "             cancel mission\n"
+                                "  [yellow]help[/yellow]"
+                                "             this message\n"
+                                "[dim](fanout also: logs/attach/"
+                                "detach/status/extend/ref)[/dim]"
+                            )
+                            continue
                         loop.call_soon_threadsafe(
                             hitl_queue.put_nowait, text,
                         )
@@ -1969,6 +2029,17 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                     )
 
                 elif outcome == "cancel":
+                    # Save partial report so history/events/blackboard work
+                    partial = MissionReport(
+                        mission_type=mission_type,
+                        target=target,
+                        topology=topology,
+                        events_count=len(live_events),
+                        status="stopped",
+                        model=mission_model,
+                        prompt=mission_prompt,
+                    )
+                    mission_history.append(partial)
                     console.print(
                         f"[yellow]Mission stopped "
                         f"({len(live_events)} events). "
