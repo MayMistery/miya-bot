@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import pytest
 from datetime import datetime, timezone
 
@@ -10,25 +9,9 @@ from miya.shared.events import (
     DomainEvent,
     MissionStarted,
     MissionCompleted,
-    MissionFailed,
-    PhaseTransition,
-    ReflectionCompleted,
     AssetDiscovered,
-    FingerprintCompleted,
-    ScanCompleted,
-    VulnerabilityFound,
-    CVEMatched,
-    ExploitAttempted,
     ExploitSucceeded,
-    ExploitFailed,
-    EntryPointDiscovered,
     TaintPathTraced,
-    SinkConfirmed,
-    PoCValidated,
-    ChallengeIdentified,
-    ChallengeSolved,
-    PrivilegeEscalated,
-    LootCollected,
     EventBus,
     event_from_dict,
     _EVENT_REGISTRY,

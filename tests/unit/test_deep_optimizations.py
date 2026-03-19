@@ -9,7 +9,6 @@ Covers:
 
 from __future__ import annotations
 
-import json
 import pytest
 import pytest_asyncio
 
@@ -21,7 +20,6 @@ from miya.shared.events import (
     ExploitSucceeded,
     ExploitFailed,
     LootCollected,
-    AssetDiscovered,
 )
 from miya.shared.attack_graph import GraphEdge
 from miya.shared.types import Severity

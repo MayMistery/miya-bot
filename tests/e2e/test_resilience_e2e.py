@@ -19,26 +19,17 @@ import pytest_asyncio
 
 from miya.shared.blackboard import Blackboard
 from miya.shared.events import (
-    DomainEvent,
     AssetDiscovered,
     VulnerabilityFound,
     CVEMatched,
-    ExploitAttempted,
-    ExploitSucceeded,
     ScanCompleted,
-    ChallengeIdentified,
-    ChallengeSolved,
-    PhaseTransition,
-    ReflectionCompleted,
-    MissionStarted,
-    MissionCompleted,
     _EVENT_REGISTRY,
 )
 from miya.shared.types import MissionType, Mission, Target, Severity
 from miya.topology.base import extract_events_from_output, AgentHandle, TopologyRegistry
 from miya.infra.event_store import SQLiteEventStore
 from miya.infra.mcp_registry import MCPRegistry
-from miya.mission.service import MissionService, MissionReport, AGENT_BUILDERS
+from miya.mission.service import MissionService, AGENT_BUILDERS
 
 
 def _ev(event_type: str, **fields: object) -> str:

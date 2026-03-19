@@ -8,7 +8,6 @@ Value Objects: AccessLevel, PivotTarget
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 from miya.shared.events import (
     DomainEvent,
     PrivilegeEscalated,
@@ -158,7 +157,7 @@ class PostSession:
 
     def credentials(self) -> list[LootItem]:
         """Return all collected credentials."""
-        return [l for l in self.loot if l.loot_type in ("credential", "hash", "token", "key")]
+        return [item for item in self.loot if item.loot_type in ("credential", "hash", "token", "key")]
 
     def high_confidence_pivots(self) -> list[PivotTarget]:
         """Return pivot targets with high confidence."""

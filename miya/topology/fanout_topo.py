@@ -33,7 +33,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 from typing import Any, AsyncIterator
 
 from miya.shared.blackboard import Blackboard
@@ -44,19 +43,16 @@ from miya.shared.events import (
     MissionCompleted,
     ChallengeIdentified,
     ChallengeClassified,
-    ChallengeSolved,
     PhaseTransition,
 )
 from miya.shared.ports import EventStorePort
 from miya.shared.types import Mission, MissionType, Target
 from miya.topology.base import (
-    Topology,
     TopologyRegistry,
     AgentHandle,
     extract_events_from_output,
     EVENT_INSTRUCTION,
     run_sdk_coordinator,
-    _get_topology_config,
 )
 
 logger = logging.getLogger(__name__)

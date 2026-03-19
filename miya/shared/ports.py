@@ -7,7 +7,7 @@ The domain layer NEVER imports infrastructure.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
+from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from miya.shared.events import DomainEvent
 

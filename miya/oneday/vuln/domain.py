@@ -8,7 +8,6 @@ Value Objects: CVE, ExploitAvailability
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 from miya.shared.events import (
     DomainEvent,
     CVEMatched,

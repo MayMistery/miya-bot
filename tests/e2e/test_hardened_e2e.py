@@ -20,36 +20,26 @@ import pytest
 import pytest_asyncio
 
 from miya.shared.blackboard import Blackboard
-from miya.shared.attack_graph import AttackGraph, GraphNode, GraphEdge
 from miya.shared.events import (
-    DomainEvent,
     AssetDiscovered,
     FingerprintCompleted,
-    VulnerabilityFound,
     CVEMatched,
     ExploitAttempted,
     ExploitSucceeded,
     ExploitFailed,
-    PrivilegeEscalated,
-    LootCollected,
     ChallengeIdentified,
     ChallengeSolved,
     EntryPointDiscovered,
     TaintPathTraced,
     SinkConfirmed,
     PoCValidated,
-    PhaseTransition,
     ReflectionCompleted,
-    MissionStarted,
-    MissionCompleted,
 )
-from miya.shared.ports import CoordinatorPort
-from miya.shared.types import MissionType, Severity
 from miya.infra.event_store import SQLiteEventStore
-from miya.mission.service import MissionService, MissionReport
+from miya.mission.service import MissionService
 
 from tests.fixtures.cve_scenarios import (
-    LOG4SHELL, SPRING4SHELL, SHELLSHOCK,
+    LOG4SHELL, SHELLSHOCK,
     BABY_SQLI, XSS_PLAYGROUND, BABY_PWN, RSA_BABY, REVERSEME,
 )
 
@@ -475,8 +465,6 @@ class TestBlackboardFeedbackLoop:
 
         # KEY ASSERTION: Iteration 2 prompts should contain data from iteration 1
         # The OBSERVE prompt for iteration 2 should mention the discovered asset
-        iter2_prompts = mock.all_prompts[5:]  # Prompts from iteration 2 (after 5 calls from iter 1)
-
         # The blackboard context should include the asset discovered in iter 1
         prompts_with_asset = mock.prompts_containing("192.168.1.100")
         # Should appear in iteration 2 prompts (blackboard context is embedded)
@@ -879,7 +867,6 @@ class TestAdvancedZerodayDiscovery:
         assert len(pocs) == 3
 
         # Blackboard summary
-        summary = report.blackboard_summary
         bb = Blackboard()
         bb.apply_all(all_events)
 

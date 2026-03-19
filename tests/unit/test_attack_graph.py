@@ -43,10 +43,10 @@ class TestAttackGraph:
     def simple_graph(self):
         """Build: Attacker → WebServer → Database → Objective"""
         g = AttackGraph()
-        attacker = g.add_node(GraphNode(id="attacker", label="Attacker", status="exploited"))
-        web = g.add_node(GraphNode(id="web", label="WebServer"))
-        db = g.add_node(GraphNode(id="db", label="Database"))
-        obj = g.add_node(GraphNode(id="objective", label="Objective", node_type="objective"))
+        g.add_node(GraphNode(id="attacker", label="Attacker", status="exploited"))
+        g.add_node(GraphNode(id="web", label="WebServer"))
+        g.add_node(GraphNode(id="db", label="Database"))
+        g.add_node(GraphNode(id="objective", label="Objective", node_type="objective"))
 
         g.add_edge(GraphEdge(id="e1", source_id="attacker", target_id="web",
                              label="HTTP exploit", cost=2.0, probability=0.8))

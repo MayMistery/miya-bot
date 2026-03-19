@@ -7,9 +7,7 @@ harvesting, data collection, and lateral movement planning.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
-from miya.shared.events import DomainEvent
 from miya.shared.ports import EventStorePort, ExploitFrameworkPort
 from miya.oneday.post.domain import (
     PostSession,

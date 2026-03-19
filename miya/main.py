@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 # Load .env before anything reads env vars
 load_dotenv()
 
-from miya.infra.logging_config import setup_logging, TRACE
+from miya.infra.logging_config import setup_logging, TRACE  # noqa: E402
 setup_logging()
 
 DEFAULT_MODEL = os.environ.get("MIYA_MODEL", "opus")
@@ -38,17 +38,12 @@ def _apply_api_env(api_key: str | None, base_url: str | None) -> None:
     if base_url:
         os.environ["ANTHROPIC_BASE_URL"] = base_url
 
-import click
-from rich.console import Console
-from rich.live import Live
-from rich.panel import Panel
-from rich.table import Table
-from rich.text import Text
-from rich.progress import Progress, SpinnerColumn, TextColumn
-from rich.markdown import Markdown
-from rich.layout import Layout
-from rich.syntax import Syntax
-from rich import box
+import click  # noqa: E402
+from rich.console import Console  # noqa: E402
+from rich.panel import Panel  # noqa: E402
+from rich.table import Table  # noqa: E402
+from rich.progress import Progress, SpinnerColumn, TextColumn  # noqa: E402
+from rich import box  # noqa: E402
 
 console = Console()
 
@@ -395,9 +390,9 @@ def health() -> None:
         err = str(exc)
         # Provide actionable hints for common failures
         if "API key" in err or "authentication" in err.lower() or "401" in err:
-            sdk_msg = f"auth failed — set ANTHROPIC_API_KEY or run inside Claude Code"
+            sdk_msg = "auth failed — set ANTHROPIC_API_KEY or run inside Claude Code"
         elif "Connection" in err or "timeout" in err.lower():
-            sdk_msg = f"connection failed — check network or ANTHROPIC_BASE_URL"
+            sdk_msg = "connection failed — check network or ANTHROPIC_BASE_URL"
         else:
             sdk_msg = f"error: {err[:80]}"
     checks.append(("SDK Connectivity", sdk_ok, sdk_msg))
@@ -803,7 +798,7 @@ async def _nl_parse_mission(
             new_val = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: session.prompt(
-                    HTML(f'<ansibrightblack>  new value &gt; </ansibrightblack>'),
+                    HTML('<ansibrightblack>  new value &gt; </ansibrightblack>'),
                     default=current_val,
                 ),
             )
@@ -1430,7 +1425,7 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                             cfg["verbose"] = val_lower
                             console.print(f"[green]Verbose → {val_lower}[/green]")
                         else:
-                            console.print(f"[red]Use: info, debug, trace (or warning, error)[/red]")
+                            console.print("[red]Use: info, debug, trace (or warning, error)[/red]")
                     elif key == "api_key":
                         os.environ["ANTHROPIC_API_KEY"] = val
                         console.print(f"[green]API key → {val[:8]}...[/green]")

@@ -61,7 +61,7 @@ class PwnCTFService:
         binary = Binary(path=binary_path, arch=arch, bits=bits)
 
         if self._disassembler:
-            info = await self._disassembler.analyze(binary_path)
+            await self._disassembler.analyze(binary_path)
             functions = await self._disassembler.get_functions(binary_path)
             binary.functions = [f.get("name", "") for f in functions]
 

@@ -6,9 +6,8 @@ EventStore, and projected into the Blackboard.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, ClassVar
 
 from miya.shared.types import new_id as _uuid, utc_now as _now
@@ -380,8 +379,8 @@ def event_from_dict(data: dict[str, Any]) -> DomainEvent:
 # ═══════════════════════════════════════════════════════════════════
 
 
-from typing import Callable, Coroutine
-import asyncio
+from typing import Callable, Coroutine  # noqa: E402
+import asyncio  # noqa: E402
 
 Handler = Callable[[DomainEvent], Coroutine[Any, Any, None]]
 

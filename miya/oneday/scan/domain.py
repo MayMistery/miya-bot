@@ -8,7 +8,6 @@ Value Objects: ScanTarget
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 from miya.shared.events import DomainEvent, ScanCompleted, VulnerabilityFound
 from miya.shared.types import new_id as _uuid
 

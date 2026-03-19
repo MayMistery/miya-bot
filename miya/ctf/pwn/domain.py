@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Literal
 
 from miya.ctf.shared.domain import (
@@ -12,7 +11,6 @@ from miya.ctf.shared.domain import (
     Flag,
     SolveStrategy,
     WriteUp,
-    _now,
     _uuid,
 )
 

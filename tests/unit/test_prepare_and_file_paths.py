@@ -6,17 +6,15 @@ import json
 import pytest
 import pytest_asyncio
 
-from miya.shared.blackboard import Blackboard, ChallengeView, ClassificationView
+from miya.shared.blackboard import Blackboard
 from miya.shared.events import (
     ChallengeIdentified,
     ChallengeSolved,
     DomainEvent,
-    MissionStarted,
     MissionCompleted,
     PhaseTransition,
     event_from_dict,
 )
-from miya.shared.ports import CoordinatorPort
 from miya.shared.types import Mission, MissionType, Target
 from miya.infra.event_store import SQLiteEventStore
 from miya.topology.base import extract_events_from_output, SDKSession
@@ -553,7 +551,6 @@ class TestFanoutPrepareIntegration:
 
         # Should have solved challenges
         solved = [e for e in events if isinstance(e, ChallengeSolved)]
-        solved_names = {e.challenge_name for e in solved}
         # At least one challenge should be solved
         assert len(solved) >= 1
 

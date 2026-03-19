@@ -9,9 +9,7 @@ from miya.shared.types import (
     OODAPhase,
     Target,
     Finding,
-    Credential,
     Asset,
-    AttackTechnique,
     Mission,
 )
 

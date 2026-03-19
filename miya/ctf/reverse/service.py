@@ -56,7 +56,7 @@ class ReverseCTFService:
         analysis = BinaryAnalysis(binary_path=path)
 
         if self._disassembler:
-            info = await self._disassembler.analyze(path)
+            await self._disassembler.analyze(path)
             functions = await self._disassembler.get_functions(path)
             analysis.functions = [f.get("name", "") for f in functions]
 

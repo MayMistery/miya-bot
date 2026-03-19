@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 import pytest_asyncio
 
-from miya.shared.types import Mission, MissionType, Target, Severity, Finding
+from miya.shared.types import Severity
 from miya.shared.events import (
     MissionStarted,
     MissionCompleted,
@@ -30,7 +30,6 @@ from miya.shared.events import (
     ChallengeIdentified,
     ChallengeSolved,
     PhaseTransition,
-    ReflectionCompleted,
 )
 from miya.shared.blackboard import Blackboard
 from miya.infra.event_store import SQLiteEventStore
@@ -39,10 +38,7 @@ from miya.mission.service import MissionReport
 from tests.fixtures.cve_scenarios import (
     LOG4SHELL,
     SPRING4SHELL,
-    PWNKIT,
     BABY_SQLI,
-    RSA_BABY,
-    STEGO_PNG,
 )
 
 

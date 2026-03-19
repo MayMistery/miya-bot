@@ -19,11 +19,8 @@ import json
 import pytest
 import pytest_asyncio
 
-from miya.shared.ports import CoordinatorPort
-from miya.shared.types import MissionType, Severity
 from miya.infra.event_store import SQLiteEventStore
 from miya.mission.service import MissionService, MissionReport
-from miya.topology.base import TopologyRegistry
 
 from tests.fixtures.cve_scenarios import (
     LOG4SHELL, SPRING4SHELL, ETERNAL_BLUE, SHELLSHOCK, PWNKIT,
@@ -477,7 +474,7 @@ class TestZerodayPipeline:
         assert len(mock.calls) >= 5
 
         # Blackboard populated with 0-day specific data
-        summary = report.blackboard_summary
+        report.blackboard_summary
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -711,7 +708,7 @@ class TestEventPersistence:
         mock = MockCoordinator(_build_ooda_responses_for_cve(LOG4SHELL, "10.0.0.5"))
         service = MissionService(event_store=store, coordinator=mock)
 
-        report = await service.execute(
+        await service.execute(
             mission_type="oneday", target_uri="10.0.0.5", topology="ooda",
         )
 
