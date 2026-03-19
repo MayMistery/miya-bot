@@ -217,6 +217,9 @@ class MissionReport:
     prompt: str = ""
     options: dict[str, Any] = field(default_factory=dict)
 
+    # ── Resume data (populated by get_last_mission) ──────────────
+    resume_challenges: list[dict[str, Any]] = field(default_factory=list)
+
     @property
     def critical_count(self) -> int:
         return len([f for f in self.findings if f.severity.score >= 4])
@@ -601,6 +604,21 @@ class MissionService:
         ]
         bb.apply_all(mission_events)
 
+        # Extract challenge list for fast resume (skip ENUMERATE+CLASSIFY)
+        from miya.shared.events import ChallengeClassified as _CC
+        classifications: dict[str, str] = {}
+        for ev in mission_events:
+            if isinstance(ev, _CC):
+                classifications[ev.challenge_name] = ev.category
+        resume_challenges = []
+        for cv in bb.challenges:
+            resume_challenges.append({
+                "name": cv.name,
+                "category": classifications.get(cv.name, cv.category),
+                "points": cv.points,
+                "file_paths": list(cv.file_paths),
+            })
+
         return MissionReport(
             mission_id=last_start.aggregate_id,
             mission_type=last_start.mission_type,
@@ -613,6 +631,7 @@ class MissionService:
             prompt=getattr(last_start, "prompt", ""),
             model=getattr(last_start, "model", ""),
             options=_json.loads(getattr(last_start, "options_json", "{}") or "{}"),
+            resume_challenges=resume_challenges,
         )
 
     async def list_topologies(self) -> list[dict[str, str]]:

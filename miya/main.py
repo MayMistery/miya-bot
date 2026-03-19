@@ -1142,7 +1142,7 @@ async def _interactive_loop(db: str, model: str = "opus", unlimited: bool = Fals
         t.add_row("fg", "Re-attach to background mission")
         t.add_row("jobs", "Show background mission status")
         t.add_row("kill", "Cancel background mission")
-        t.add_row("resume", "Resume last stopped mission")
+        t.add_row("resume", "Resume last stopped mission (--rescan to re-enumerate)")
         t.add_row("", "")
         t.add_row("[dim]HITL (during mission):[/dim]", "")
         t.add_row("@<name> <msg>", "Send message to specific challenge")
@@ -1300,6 +1300,7 @@ async def _interactive_loop(db: str, model: str = "opus", unlimited: bool = Fals
 
     try:
         while True:
+            _resume_challenges: list[dict] | None = None
             try:
                 raw = await asyncio.get_event_loop().run_in_executor(
                     None, lambda: session.prompt(_prompt_html())
@@ -1829,6 +1830,7 @@ async def _interactive_loop(db: str, model: str = "opus", unlimited: bool = Fals
 
             # ── Resume ────────────────────────────────────────────
             if cmd == "resume":
+                rescan = "--rescan" in raw or "-r" in raw.split()
                 last = await service.get_last_mission()
                 if last and last.mission_type:
                     solved_n = last.blackboard_summary.get('challenges_solved', 0)
@@ -1836,6 +1838,18 @@ async def _interactive_loop(db: str, model: str = "opus", unlimited: bool = Fals
                         f"[cyan]Resuming: {last.mission_type} → {last.target} "
                         f"({last.events_count} events, {solved_n} solved)[/cyan]"
                     )
+                    # Fast resume: inject known challenges to skip ENUMERATE+CLASSIFY
+                    _resume_challenges: list[dict] | None = None
+                    if not rescan and last.resume_challenges:
+                        _resume_challenges = last.resume_challenges
+                        console.print(
+                            f"[dim]Fast resume: reusing {len(_resume_challenges)} "
+                            f"known challenge(s), skipping ENUMERATE+CLASSIFY[/dim]"
+                        )
+                    elif rescan:
+                        console.print(
+                            "[dim]Full rescan: re-discovering all challenges[/dim]"
+                        )
                     # Reconstruct the full command with original options
                     replay_parts = [last.mission_type, last.target]
                     if last.topology and last.topology != "ooda":
@@ -1945,6 +1959,10 @@ async def _interactive_loop(db: str, model: str = "opus", unlimited: bool = Fals
                 parsed = nl_result
 
             mission_type, target, topology, options = parsed
+            # Inject resume challenges to skip ENUMERATE+CLASSIFY
+            if _resume_challenges:
+                options["challenges"] = _resume_challenges
+                _resume_challenges = None
             mission_model = options.pop("_model_override", cfg["model"])
             mission_prompt = options.pop("_prompt", "")
             nl_confirmed = options.pop("_nl_confirmed", False)
