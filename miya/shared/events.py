@@ -57,6 +57,9 @@ class MissionStarted(DomainEvent):
     mission_type: str = ""
     target_uri: str = ""
     topology: str = ""
+    prompt: str = ""
+    model: str = ""
+    options_json: str = ""  # JSON-serialized options dict for resume
 
 
 @dataclass(frozen=True)

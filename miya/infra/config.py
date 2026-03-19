@@ -32,6 +32,7 @@ _VALID_KEYS: dict[str, tuple[str, ...] | None] = {
     "model": ("opus", "sonnet", "haiku"),
     "topology": ("ooda", "attack_graph", "fanout"),
     "verbose": ("info", "debug", "trace", "warning", "error"),
+    "unlimited": ("true", "false"),
     "api_key": None,
     "base_url": None,
 }
@@ -128,6 +129,9 @@ def apply_config(cfg_dict: dict[str, Any]) -> dict[str, str]:
     for key in ("model", "topology", "verbose"):
         if key in saved:
             cfg_dict[key] = saved[key]
+
+    if "unlimited" in saved:
+        cfg_dict["unlimited"] = saved["unlimited"].lower() == "true"
 
     # Apply verbose level
     if "verbose" in saved:

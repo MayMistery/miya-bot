@@ -7,6 +7,7 @@ executes the mission, and produces a report.
 from __future__ import annotations
 
 import asyncio
+import json as _json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -609,6 +610,9 @@ class MissionService:
             events_count=len(mission_events),
             blackboard_summary=bb.summary(),
             status="suspended",
+            prompt=getattr(last_start, "prompt", ""),
+            model=getattr(last_start, "model", ""),
+            options=_json.loads(getattr(last_start, "options_json", "{}") or "{}"),
         )
 
     async def list_topologies(self) -> list[dict[str, str]]:

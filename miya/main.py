@@ -240,8 +240,10 @@ def print_report(report: Any) -> None:
 
 @click.group(invoke_without_command=True)
 @click.option("--verbose", "-v", count=True, help="Verbosity: -v = DEBUG, -vv = TRACE (tool use)")
+@click.option("--unlimited", is_flag=True, default=False,
+              help="Unlimited mode: no timeouts, no iteration limits")
 @click.pass_context
-def cli(ctx: click.Context, verbose: int) -> None:
+def cli(ctx: click.Context, verbose: int, unlimited: bool) -> None:
     """Miya — DDD Pentest Agent"""
     if verbose:
         import logging
@@ -250,9 +252,11 @@ def cli(ctx: click.Context, verbose: int) -> None:
     # Store verbose level in context so subcommands (interactive) can access it
     ctx.ensure_object(dict)
     ctx.obj["verbose"] = verbose
+    ctx.obj["unlimited"] = unlimited
     if ctx.invoked_subcommand is None:
         # Default: launch interactive mode
-        ctx.invoke(interactive, db="miya_events.db", model=None, api_key=None, base_url=None)
+        ctx.invoke(interactive, db="miya_events.db", model=None, api_key=None,
+                   base_url=None, unlimited=unlimited)
 
 
 def _common_options(f: Any) -> Any:
@@ -987,7 +991,8 @@ async def _interactive_loop(db: str, model: str = "opus", unlimited: bool = Fals
                     _logging.WARNING: "warning", _logging.INFO: "info",
                     _logging.DEBUG: "debug", TRACE: "trace"}
     cfg: dict[str, Any] = {"model": model, "topology": "ooda",
-                           "verbose": _level_names.get(_current_level, "info")}
+                           "verbose": _level_names.get(_current_level, "info"),
+                           "unlimited": unlimited}
 
     # Load persistent config (project .miya.toml + global ~/.config/miya/config.toml)
     from miya.infra.config import apply_config, save_config, load_config
@@ -1179,6 +1184,7 @@ async def _interactive_loop(db: str, model: str = "opus", unlimited: bool = Fals
         console.print(Panel(
             f"[bold]Model:[/bold]     {cfg['model']}\n"
             f"[bold]Topology:[/bold]  {cfg['topology']}\n"
+            f"[bold]Unlimited:[/bold] {'[bold yellow]ON[/bold yellow]' if cfg.get('unlimited') else '[dim]off[/dim]'}\n"
             f"[bold]Verbose:[/bold]   {cfg['verbose']}\n"
             f"[bold]API Key:[/bold]   {key_status}\n"
             f"[bold]Base URL:[/bold]  {url_display}\n"
@@ -1825,15 +1831,27 @@ async def _interactive_loop(db: str, model: str = "opus", unlimited: bool = Fals
             if cmd == "resume":
                 last = await service.get_last_mission()
                 if last and last.mission_type:
+                    solved_n = last.blackboard_summary.get('challenges_solved', 0)
                     console.print(
                         f"[cyan]Resuming: {last.mission_type} → {last.target} "
-                        f"({last.events_count} events, "
-                        f"{last.blackboard_summary.get('challenges_solved', 0)} solved)"
-                        f"[/cyan]"
+                        f"({last.events_count} events, {solved_n} solved)[/cyan]"
                     )
+                    # Reconstruct the full command with original options
                     replay_parts = [last.mission_type, last.target]
                     if last.topology and last.topology != "ooda":
                         replay_parts.extend(["--topology", last.topology])
+                    if last.prompt:
+                        replay_parts.extend(["--prompt", shlex.quote(last.prompt)])
+                    if last.model:
+                        replay_parts.extend(["--model", last.model])
+                    # Restore saved options (category, unlimited, etc.)
+                    for k, v in last.options.items():
+                        if k == "unlimited" and v:
+                            replay_parts.append("--unlimited")
+                        elif k == "category" and v:
+                            replay_parts.extend(["--category", str(v)])
+                        elif k == "language" and v:
+                            replay_parts.extend(["--language", str(v)])
                     raw = " ".join(replay_parts)
                     lower = raw.lower()
                     cmd = lower.split()[0]
@@ -1877,6 +1895,8 @@ async def _interactive_loop(db: str, model: str = "opus", unlimited: bool = Fals
                         if val_lower in _valid_levels:
                             setup_logging(level_override=_valid_levels[val_lower])
                             cfg["verbose"] = val_lower
+                    elif key == "unlimited":
+                        cfg["unlimited"] = val.lower() in ("true", "1", "on", "yes")
                     elif key == "api_key":
                         os.environ["ANTHROPIC_API_KEY"] = val
                     elif key == "base_url":
@@ -1902,6 +1922,7 @@ async def _interactive_loop(db: str, model: str = "opus", unlimited: bool = Fals
                         "  [cyan]model[/cyan]      opus | sonnet | haiku\n"
                         "  [cyan]topology[/cyan]   ooda | attack_graph | fanout\n"
                         "  [cyan]verbose[/cyan]    info | debug | trace | warning | error\n"
+                        "  [cyan]unlimited[/cyan]  true | false  (no timeouts / iteration limits)\n"
                         "  [cyan]api_key[/cyan]    <string>  (always saved to global)\n"
                         "  [cyan]base_url[/cyan]   <url>     (always saved to global)\n"
                         "\n"
@@ -1923,7 +1944,7 @@ async def _interactive_loop(db: str, model: str = "opus", unlimited: bool = Fals
             mission_model = options.pop("_model_override", cfg["model"])
             mission_prompt = options.pop("_prompt", "")
             nl_confirmed = options.pop("_nl_confirmed", False)
-            if unlimited:
+            if cfg.get("unlimited") or options.get("unlimited"):
                 options["unlimited"] = True
 
             kind_map = {"oneday": "service", "zeroday": "source"}
@@ -1937,7 +1958,7 @@ async def _interactive_loop(db: str, model: str = "opus", unlimited: bool = Fals
                     f"[bold]Topology:[/bold] {topology}",
                     f"[bold]Model:[/bold]    {mission_model}",
                 ]
-                if unlimited:
+                if options.get("unlimited"):
                     panel_lines.append("[bold yellow]Mode:[/bold yellow]    [bold yellow]UNLIMITED[/bold yellow] (no timeouts)")
                 if mission_prompt:
                     panel_lines.append(f"[bold]Prompt:[/bold]  {mission_prompt[:80]}")

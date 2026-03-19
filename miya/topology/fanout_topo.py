@@ -230,6 +230,7 @@ class FanoutTopology:
         from miya.topology.ooda import OODATopology
 
         # ── Mission Start ─────────────────────────────────────────
+        import json as _json
         start_event = MissionStarted(
             aggregate_id=mission.id,
             aggregate_type="Mission",
@@ -237,6 +238,13 @@ class FanoutTopology:
             target_uri=mission.target.uri,
             topology=self.name,
             mission=mission.mission_type.value,
+            prompt=mission.prompt,
+            model=mission.options.get("_model_override", ""),
+            options_json=_json.dumps(
+                {k: v for k, v in mission.options.items()
+                 if not k.startswith("_") and isinstance(v, (str, int, float, bool))},
+                ensure_ascii=False,
+            ),
         )
         yield start_event
         blackboard.apply(start_event)
