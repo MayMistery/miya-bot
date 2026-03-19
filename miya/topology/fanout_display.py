@@ -1,8 +1,9 @@
-"""Rich Live panel grid for parallel challenge solving.
+"""Rich panel display for parallel challenge solving.
 
-Displays per-challenge progress panels during FAN-OUT phase.
-Supports display modes: GRID (overview), ATTACHED (single challenge logs),
-and interactive commands for bg/fg, attach/detach, per-challenge HITL.
+Displays per-challenge progress during FAN-OUT phase using non-invasive
+snapshot printing (no Rich Live / terminal takeover). Status updates are
+printed only on significant events (phase transitions, solve, fail) and
+throttled to avoid flooding the terminal while keeping HITL input usable.
 
 Interactive commands (typed via HITL input):
     logs <name>          — show recent log buffer for a challenge
@@ -22,8 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from rich.columns import Columns
-from rich.console import Group
-from rich.live import Live
+from rich.console import Console, Group  # noqa: F401 - Console used at runtime
 from rich.panel import Panel
 from rich.text import Text
 
@@ -153,6 +153,11 @@ class FanoutDisplay:
             display.detach()             # back to grid
     """
 
+    # Minimum seconds between full grid reprints (throttle)
+    _GRID_INTERVAL = 15.0
+    # Events that always trigger an immediate reprint
+    _SIGNIFICANT_STATUSES = frozenset({"solved", "failed", "timeout"})
+
     def __init__(
         self,
         challenges: list[dict[str, Any]],
@@ -161,12 +166,15 @@ class FanoutDisplay:
     ) -> None:
         self._states: dict[str, ChallengeState] = {}
         self._max_columns = max_columns
-        self._live: Live | None = None
+        self._console: Console | None = None
+        self._active = False
         self._event_log: deque[str] = deque(maxlen=12)
         self._mode = _Mode.GRID
         self._attached_name: str = ""
         self._timeout = timeout
         self._solved_set: set[str] = set()  # dedup solved notifications
+        self._last_grid_time: float = 0.0
+        self._last_grid_key: str = ""  # dedup identical grids
 
         for ch in challenges:
             name = ch.get("name", "?")
@@ -184,10 +192,18 @@ class FanoutDisplay:
         state = self._states.get(challenge_name)
         if not state:
             return
+        old_phase = state.phase
+        old_status = state.status
         for k, v in kwargs.items():
             if hasattr(state, k):
                 setattr(state, k, v)
-        self._refresh()
+        # Significant: phase changed, or status became terminal
+        significant = (
+            state.phase != old_phase
+            or state.status != old_status
+            or state.status in self._SIGNIFICANT_STATUSES
+        )
+        self._refresh(force=significant)
 
     def capture_log(self, challenge_name: str, line: str) -> None:
         """Capture a log line into a challenge's buffer."""
@@ -195,7 +211,8 @@ class FanoutDisplay:
         if state:
             state.log_buffer.append(line)
             state.last_activity = line[:60]
-        self._refresh()
+        # Log capture is not significant — only triggers throttled refresh
+        self._refresh(force=False)
 
     def log_event(self, text: str) -> None:
         """Add a line to the global scrolling event log."""
@@ -205,7 +222,9 @@ class FanoutDisplay:
                 return
             self._solved_set.add(text)
         self._event_log.append(text)
-        self._refresh()
+        # Event log entries are printed immediately as single lines
+        if self._console:
+            self._console.print(f"  [dim]{text}[/dim]")
 
     def mark_timeout_at(self, challenge_name: str, timeout_at: float) -> None:
         """Set the absolute monotonic time when timeout fires."""
@@ -245,9 +264,24 @@ class FanoutDisplay:
 
     # ── Rendering ────────────────────────────────────────────────
 
-    def _refresh(self) -> None:
-        if self._live:
-            self._live.update(self._render())
+    def _refresh(self, *, force: bool = False) -> None:
+        """Print a status snapshot if significant or enough time has elapsed."""
+        if not self._console or not self._active:
+            return
+        now = time.monotonic()
+        elapsed = now - self._last_grid_time
+        if not force and elapsed < self._GRID_INTERVAL:
+            return
+        # Build a compact dedup key to avoid reprinting identical state
+        key = "|".join(
+            f"{s.name}:{s.status}:{s.phase}:{s.iteration}:{s.flag}"
+            for s in self._states.values()
+        )
+        if key == self._last_grid_key and not force:
+            return
+        self._last_grid_key = key
+        self._last_grid_time = now
+        self._console.print(self._render())
 
     def _render(self) -> Group:
         if self._mode == _Mode.ATTACHED:
@@ -278,19 +312,7 @@ class FanoutDisplay:
             f"[dim]({total} total)[/dim]"
         )
 
-        # Help hint
-        hint = Text.from_markup(
-            "  [dim]Commands: help | attach <name> | logs <name> [n] | "
-            "status <name> | @<name> <msg> | ref <src> @<dst> | "
-            "extend <name|all>[/dim]"
-        )
-
-        parts: list[Any] = [grid, summary, hint]
-        if self._event_log:
-            event_text = "\n".join(
-                f"  [dim]{line}[/dim]" for line in self._event_log
-            )
-            parts.append(Text.from_markup(event_text))
+        parts: list[Any] = [grid, summary]
 
         return Group(*parts)
 
@@ -396,23 +418,20 @@ class FanoutDisplay:
     # ── Context manager ──────────────────────────────────────────
 
     def __enter__(self) -> "FanoutDisplay":
-        from rich.console import Console
-        self._live = Live(
-            self._render(),
-            console=Console(stderr=True),
-            refresh_per_second=2,
-            transient=False,
-        )
-        self._live.__enter__()
+        self._console = Console(stderr=True)
+        self._active = True
+        # Print initial grid snapshot
+        self._last_grid_time = 0.0  # force first print
+        self._refresh(force=True)
         return self
 
     def __exit__(self, *exc: Any) -> bool:
-        if self._live:
-            self._live.update(self._render())
-            self._live.__exit__(*exc)
-            self._live = None
+        if self._console and self._active:
+            # Print final state
+            self._console.print(self._render())
+        self._active = False
         return False
 
     @property
     def is_active(self) -> bool:
-        return self._live is not None
+        return self._active

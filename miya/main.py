@@ -1964,18 +1964,22 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                 )
 
             def _hitl_reader() -> None:
-                """Blocking input reader running in a dedicated thread."""
-                from prompt_toolkit import PromptSession as _PS
-                from prompt_toolkit.formatted_text import HTML as _HTML
-                hitl_session: _PS[str] = _PS()
+                """Blocking input reader running in a dedicated thread.
+
+                Uses simple stdin.readline() instead of prompt_toolkit to
+                avoid terminal conflicts with Rich display output during
+                fanout missions.
+                """
+                import sys as _sys
                 while not stop_input.is_set():
                     try:
-                        text = hitl_session.prompt(
-                            _HTML(
-                                '<ansiyellow><b>hitl</b></ansiyellow> '
-                                '<ansibrightblack>&gt;</ansibrightblack> '
-                            ),
-                        )
+                        _sys.stderr.write("\033[33mhitl\033[0m > ")
+                        _sys.stderr.flush()
+                        text = _sys.stdin.readline()
+                        if not text:
+                            # EOF (Ctrl+D)
+                            _cancel_requested.set()
+                            break
                         text = text.strip()
                         if not text or stop_input.is_set():
                             continue
