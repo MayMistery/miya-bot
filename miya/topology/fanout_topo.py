@@ -414,8 +414,9 @@ class FanoutTopology:
             mission=mission.mission_type.value,
         )
         logger.info(
-            "▶ FAN-OUT — %d challenges, %d parallel slots",
+            "▶ FAN-OUT — %d challenges, %d parallel slots, timeout %dm",
             len(challenges), self._max_parallel,
+            self._per_challenge_timeout / 60,
         )
 
         # ── Rich Live display for parallel progress ───────────
@@ -423,11 +424,27 @@ class FanoutTopology:
         display = FanoutDisplay(
             [dict(ch, _max_iter=self._max_iter) for ch in challenges],
             max_columns=self._max_parallel,
+            timeout=self._per_challenge_timeout,
         )
 
         def _on_progress(challenge_name: str, **kwargs: Any) -> None:
             """Callback from sub-OODAs to update display state."""
             display.update(challenge_name, **kwargs)
+
+        def _on_log(challenge_name: str, line: str) -> None:
+            """Callback from sub-OODAs to capture log lines."""
+            display.capture_log(challenge_name, line)
+
+        # ── Per-challenge HITL queues ─────────────────────────
+        ch_queues: dict[str, asyncio.Queue[str]] = {
+            ch["name"]: asyncio.Queue() for ch in challenges
+        }
+
+        # ── Per-challenge timeout extension events ────────────
+        # Maps challenge_name → asyncio.Event that's set to cancel timeout
+        timeout_extensions: dict[str, asyncio.Event] = {
+            ch["name"]: asyncio.Event() for ch in challenges
+        }
 
         # Semaphore for concurrency control
         sem = asyncio.Semaphore(self._max_parallel)
@@ -436,25 +453,30 @@ class FanoutTopology:
         # Event types from sub-OODA that should NOT pollute the main mission
         _SUB_MISSION_FILTER = {"mission.started", "mission.completed", "mission.failed"}
 
+        # ── Timeout warning threshold ─────────────────────────
+        _WARN_BEFORE = 300.0  # warn 5 minutes before timeout
+
         async def _solve_challenge(challenge: dict[str, Any]) -> None:
             """Solve a single challenge using a dedicated OODA loop."""
+            import time as _time
             async with sem:
                 ch_name = challenge["name"]
                 ch_cat = challenge.get("category", "")
-                display.update(ch_name, status="running",
-                               started_at=__import__("time").monotonic())
-                display.log_event(f"→ Solving: {ch_name} ({ch_cat or 'unknown'})")
+                now = _time.monotonic()
+                timeout_deadline = now + self._per_challenge_timeout
 
-                # Create sub-mission for this challenge
+                display.update(ch_name, status="running", started_at=now)
+                display.mark_timeout_at(ch_name, timeout_deadline)
+                display.log_event(f"\u2192 Solving: {ch_name} ({ch_cat or 'unknown'})")
+
                 ch_target = challenge.get("target", mission.target.uri)
                 ch_files = challenge.get("file_paths", [])
 
-                # Build challenge-specific prompt (NO general instructions leak)
                 is_whitebox = challenge.get("_whitebox", False)
                 sub_prompt = f"Solve challenge: {ch_name}."
                 if is_whitebox:
                     sub_prompt += (
-                        "\n\n⚠ WHITEBOX MODE: The target service is unreachable. "
+                        "\n\n\u26a0 WHITEBOX MODE: The target service is unreachable. "
                         "Analyze source code ONLY. Find vulnerabilities, construct "
                         "exploit payloads, and determine the flag from static analysis. "
                         "Do NOT attempt network connections to the target."
@@ -482,15 +504,13 @@ class FanoutTopology:
                 if ch_files:
                     from miya.shared.blackboard import ChallengeView
                     sub_bb.challenges.append(ChallengeView(
-                        name=ch_name,
-                        category=ch_cat,
+                        name=ch_name, category=ch_cat,
                         file_paths=tuple(ch_files),
                     ))
                 if ch_cat:
                     from miya.shared.blackboard import ClassificationView
                     sub_bb.classification = ClassificationView(
-                        category=ch_cat,
-                        confidence=0.8,
+                        category=ch_cat, confidence=0.8,
                         reasoning="from enumerate phase",
                     )
 
@@ -501,44 +521,109 @@ class FanoutTopology:
                     if direct:
                         sub_agents = direct
 
+                # Per-challenge HITL queue
+                ch_op_queue = ch_queues.get(ch_name)
+
                 ooda = OODATopology(
                     max_iterations=self._max_iter,
                     coordinator=self._coordinator,
                     challenge_tag=ch_name,
                     on_progress=_on_progress,
+                    on_log=_on_log,
                 )
 
-                try:
-                    async def _run_ooda() -> None:
-                        async for ev in ooda.execute(
-                            sub_mission, sub_bb, sub_agents, event_store,
-                            campaign=campaign,
-                        ):
-                            if ev.__class__.event_type not in _SUB_MISSION_FILTER:
-                                await event_queue.put(ev)
-                            # Update display on key events
-                            from miya.shared.events import ChallengeSolved
-                            if isinstance(ev, ChallengeSolved):
-                                display.update(ch_name, status="solved",
-                                               flag=ev.flag, phase="DONE")
-                                display.log_event(
-                                    f"✓ {ch_name} SOLVED: {ev.flag[:40]}"
-                                )
+                async def _run_ooda() -> None:
+                    from miya.shared.events import ChallengeSolved
+                    async for ev in ooda.execute(
+                        sub_mission, sub_bb, sub_agents, event_store,
+                        operator_queue=ch_op_queue,
+                        campaign=campaign,
+                    ):
+                        if ev.__class__.event_type not in _SUB_MISSION_FILTER:
+                            await event_queue.put(ev)
+                        if isinstance(ev, ChallengeSolved):
+                            display.update(ch_name, status="solved",
+                                           flag=ev.flag, phase="DONE")
+                            display.log_event(
+                                f"\u2713 {ch_name} SOLVED: {ev.flag[:40]}"
+                            )
 
-                    await asyncio.wait_for(
-                        _run_ooda(),
-                        timeout=self._per_challenge_timeout,
-                    )
-                except asyncio.TimeoutError:
-                    display.update(ch_name, status="timeout", phase="TIMEOUT")
-                    display.log_event(f"⏰ {ch_name} timed out")
-                    logger.warning(
-                        "Challenge %s timed out after %.0fs",
-                        ch_name, self._per_challenge_timeout,
-                    )
+                # ── Run with timeout + renewal ────────────────
+                ooda_task = asyncio.create_task(_run_ooda())
+                extend_event = timeout_extensions[ch_name]
+                warned = False
+
+                try:
+                    while not ooda_task.done():
+                        remaining = timeout_deadline - _time.monotonic()
+
+                        if remaining <= 0:
+                            # Timeout expired — notify and wait for extension
+                            display.update(ch_name, status="timeout", phase="TIMEOUT")
+                            display.log_event(
+                                f"\u23f0 {ch_name}: timeout! "
+                                f"Type 'extend {ch_name}' to add 30m"
+                            )
+
+                            # Wait up to 60s for an extend command
+                            extend_event.clear()
+                            try:
+                                await asyncio.wait_for(
+                                    extend_event.wait(), timeout=60.0,
+                                )
+                                # Extended! Reset deadline
+                                timeout_deadline = _time.monotonic() + 1800.0
+                                display.mark_timeout_at(ch_name, timeout_deadline)
+                                display.update(ch_name, status="running",
+                                               phase=display._states[ch_name].phase
+                                               if ch_name in display._states else "ACT")
+                                display.log_event(
+                                    f"\u27f3 {ch_name}: extended +30m"
+                                )
+                                warned = False
+                                continue
+                            except asyncio.TimeoutError:
+                                # No extension — cancel the task
+                                ooda_task.cancel()
+                                try:
+                                    await ooda_task
+                                except (asyncio.CancelledError, Exception):
+                                    pass
+                                display.log_event(
+                                    f"\u274c {ch_name}: timed out (no extension)"
+                                )
+                                logger.warning(
+                                    "Challenge %s timed out after %.0fs (no extension)",
+                                    ch_name, self._per_challenge_timeout,
+                                )
+                                return
+
+                        # Warn before timeout
+                        if not warned and remaining <= _WARN_BEFORE:
+                            display.log_event(
+                                f"\u26a0 {ch_name}: {remaining / 60:.0f}m remaining"
+                            )
+                            warned = True
+
+                        # Wait for task or check interval
+                        wait_time = min(remaining, 30.0)
+                        done, _ = await asyncio.wait(
+                            {ooda_task}, timeout=max(wait_time, 1.0),
+                        )
+                        if done:
+                            # Propagate any exception
+                            ooda_task.result()
+
+                except asyncio.CancelledError:
+                    ooda_task.cancel()
+                    try:
+                        await ooda_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    raise
                 except Exception:
                     display.update(ch_name, status="failed", phase="FAILED")
-                    display.log_event(f"✗ {ch_name} failed")
+                    display.log_event(f"\u274c {ch_name} failed")
                     logger.error("Challenge %s failed", ch_name, exc_info=True)
 
         # Launch all challenge solvers
@@ -555,6 +640,95 @@ class FanoutTopology:
 
         waiter = asyncio.create_task(_wait_all())
 
+        # ── HITL router: dispatch operator messages ───────────
+        async def _hitl_router() -> None:
+            """Route HITL messages to per-challenge queues or handle commands."""
+            if operator_queue is None:
+                return
+            while True:
+                try:
+                    msg = await asyncio.wait_for(
+                        operator_queue.get(), timeout=1.0,
+                    )
+                except asyncio.TimeoutError:
+                    # Check if all tasks are done
+                    if all(t.done() for t in tasks):
+                        return
+                    continue
+                except asyncio.CancelledError:
+                    return
+
+                msg = msg.strip()
+                if not msg:
+                    continue
+
+                # ── Display commands ──────────────────────
+                parts = msg.split(None, 1)
+                cmd = parts[0].lower()
+
+                if cmd == "attach" and len(parts) > 1:
+                    display.attach(parts[1].strip())
+                    continue
+
+                if cmd == "detach":
+                    display.detach()
+                    continue
+
+                if cmd == "logs" and len(parts) > 1:
+                    name = parts[1].strip()
+                    lines = display.get_logs(name)
+                    for line in lines:
+                        display.log_event(line)
+                    continue
+
+                if cmd == "extend":
+                    target_name = parts[1].strip() if len(parts) > 1 else "all"
+                    ext_parts = target_name.split()
+                    name = ext_parts[0]
+                    # Parse optional minutes: extend <name> [min]
+                    # For now, just signal the event
+                    if name.lower() == "all":
+                        for evt in timeout_extensions.values():
+                            evt.set()
+                        display.log_event("Extended all challenges +30m")
+                    elif name in timeout_extensions:
+                        timeout_extensions[name].set()
+                    else:
+                        display.log_event(f"Unknown challenge: {name}")
+                    continue
+
+                # ── Per-challenge HITL: @name message ─────
+                if msg.startswith("@"):
+                    at_parts = msg[1:].split(None, 1)
+                    target_name = at_parts[0] if at_parts else ""
+                    hitl_msg = at_parts[1] if len(at_parts) > 1 else ""
+                    if target_name in ch_queues and hitl_msg:
+                        ch_queues[target_name].put_nowait(hitl_msg)
+                        display.log_event(
+                            f"\U0001f4e8 @{target_name}: {hitl_msg[:50]}"
+                        )
+                    elif target_name not in ch_queues:
+                        display.log_event(
+                            f"Unknown challenge: {target_name}. "
+                            f"Available: {', '.join(ch_queues.keys())}"
+                        )
+                    continue
+
+                # ── Broadcast to all running challenges ───
+                running_names = [
+                    n for n, s in display._states.items()
+                    if s.status in ("running", "classifying")
+                ]
+                for name in running_names:
+                    ch_queues[name].put_nowait(msg)
+                if running_names:
+                    display.log_event(
+                        f"\U0001f4e8 broadcast → {len(running_names)} challenge(s): "
+                        f"{msg[:40]}"
+                    )
+
+        router_task = asyncio.create_task(_hitl_router())
+
         # Drain events with display active
         with display:
             while True:
@@ -564,6 +738,11 @@ class FanoutTopology:
                 yield ev
                 blackboard.apply(ev)
 
+        router_task.cancel()
+        try:
+            await router_task
+        except asyncio.CancelledError:
+            pass
         await waiter  # ensure cleanup
 
         # ── Phase 4: COLLECT — final report ───────────────────────

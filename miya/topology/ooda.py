@@ -251,6 +251,7 @@ class OODATopology:
         coordinator: CoordinatorPort | None = None,
         challenge_tag: str = "",
         on_progress: Any | None = None,
+        on_log: Any | None = None,
     ) -> None:
         cfg = _get_topology_config()
         self._max_iterations = max_iterations if max_iterations is not None else cfg["ooda_max_iterations"]
@@ -258,10 +259,14 @@ class OODATopology:
         self._tag = f"[{challenge_tag}] " if challenge_tag else ""
         self._challenge_tag = challenge_tag
         self._on_progress = on_progress  # callback(challenge_name, **kwargs)
+        self._on_log = on_log  # callback(challenge_name, line)
 
     def _log(self, level: int, msg: str, *args: Any) -> None:
-        """Log with optional challenge tag prefix."""
-        logger.log(level, "%s%s", self._tag, msg % args if args else msg)
+        """Log with optional challenge tag prefix + capture to log buffer."""
+        formatted = msg % args if args else msg
+        logger.log(level, "%s%s", self._tag, formatted)
+        if self._on_log and self._challenge_tag:
+            self._on_log(self._challenge_tag, formatted)
 
     def _report(self, **kwargs: Any) -> None:
         """Report progress to display callback."""

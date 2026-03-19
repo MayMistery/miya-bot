@@ -339,7 +339,7 @@ def _get_topology_config() -> dict[str, int]:
         "ag_max_steps": _int("MIYA_AG_MAX_STEPS", 20),
         "max_turns": _int("MIYA_MAX_TURNS", 30),
         "fanout_parallel": _int("MIYA_FANOUT_PARALLEL", 10),
-        "fanout_timeout": _int("MIYA_FANOUT_TIMEOUT", 1800),
+        "fanout_timeout": _int("MIYA_FANOUT_TIMEOUT", 3600),
     }
 
 
