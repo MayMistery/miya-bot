@@ -37,6 +37,48 @@ logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  Cost Tracker — accumulates API usage across coordinator calls
+# ═══════════════════════════════════════════════════════════════════
+
+
+class CostTracker:
+    """Thread-safe accumulator for API usage metrics."""
+
+    def __init__(self) -> None:
+        self.total_cost_usd: float = 0.0
+        self.total_turns: int = 0
+        self.total_api_ms: int = 0
+        self.call_count: int = 0
+
+    def add(self, cost: float, turns: int, api_ms: int) -> None:
+        self.total_cost_usd += cost
+        self.total_turns += turns
+        self.total_api_ms += api_ms
+        self.call_count += 1
+
+    def reset(self) -> dict[str, Any]:
+        """Return snapshot and reset counters."""
+        snap = self.snapshot()
+        self.total_cost_usd = 0.0
+        self.total_turns = 0
+        self.total_api_ms = 0
+        self.call_count = 0
+        return snap
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "cost_usd": round(self.total_cost_usd, 4),
+            "turns": self.total_turns,
+            "api_ms": self.total_api_ms,
+            "calls": self.call_count,
+        }
+
+
+# Global cost tracker — reset per mission
+_cost_tracker = CostTracker()
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  Agent Handle
 # ═══════════════════════════════════════════════════════════════════
 
@@ -102,7 +144,7 @@ class Topology(Protocol):
         """Human-readable description of this topology's approach."""
         ...
 
-    async def execute(
+    def execute(
         self,
         mission: Mission,
         blackboard: Blackboard,
@@ -113,7 +155,7 @@ class Topology(Protocol):
     ) -> AsyncIterator[DomainEvent]:
         """Execute the mission using this topology.
 
-        Yields DomainEvents as the mission progresses.
+        Yields DomainEvents as the mission progresses (async generator).
         The caller is responsible for persisting events to the EventStore.
 
         Args:
@@ -317,6 +359,10 @@ def _sdk_env() -> dict[str, str]:
     return env
 
 
+class SDKTimeoutError(Exception):
+    """Raised when SDK calls exceed the idle timeout after retries."""
+
+
 def _get_topology_config() -> dict[str, int]:
     """Read topology tunables from environment.
 
@@ -324,6 +370,10 @@ def _get_topology_config() -> dict[str, int]:
         MIYA_OODA_MAX_ITERATIONS  — max OODA loop iterations (default 10)
         MIYA_AG_MAX_STEPS         — max attack-graph steps  (default 20)
         MIYA_MAX_TURNS            — max SDK turns per coordinator call (default 30)
+        MIYA_FANOUT_PARALLEL      — max parallel challenge solvers (default 10)
+        MIYA_FANOUT_TIMEOUT       — per-challenge timeout in seconds (default 3600)
+        MIYA_SDK_IDLE_TIMEOUT     — idle timeout between SDK messages (default 600)
+        MIYA_SDK_RETRIES          — retry count on SDK timeout (default 1)
     """
     def _int(key: str, default: int) -> int:
         raw = os.environ.get(key, "")
@@ -336,6 +386,10 @@ def _get_topology_config() -> dict[str, int]:
         "ooda_max_iterations": _int("MIYA_OODA_MAX_ITERATIONS", 10),
         "ag_max_steps": _int("MIYA_AG_MAX_STEPS", 20),
         "max_turns": _int("MIYA_MAX_TURNS", 30),
+        "fanout_parallel": _int("MIYA_FANOUT_PARALLEL", 10),
+        "fanout_timeout": _int("MIYA_FANOUT_TIMEOUT", 3600),
+        "sdk_idle_timeout": _int("MIYA_SDK_IDLE_TIMEOUT", 600),
+        "sdk_retries": _int("MIYA_SDK_RETRIES", 1),
     }
 
 
@@ -389,10 +443,52 @@ async def run_sdk_coordinator(
     Each call creates a fresh query() — no conversation context is retained.
     For multi-turn context reuse, use ``SDKSession`` instead.
 
+    Idle timeout: if no message received within MIYA_SDK_IDLE_TIMEOUT (default 20s),
+    retries once, then raises SDKTimeoutError.
+
     Logging behaviour (controlled via ``-v`` / ``-vv``):
         TRACE  — every tool_use call (name + input), tool_result, and text block
         DEBUG  — prompt summary, per-phase summary with timing
     """
+    cfg = _get_topology_config()
+    idle_timeout = cfg["sdk_idle_timeout"]
+    max_retries = cfg["sdk_retries"]
+
+    tag = f"[{phase_label}] " if phase_label else ""
+
+    for attempt in range(1 + max_retries):
+        try:
+            return await _run_sdk_coordinator_once(
+                prompt, agent_defs, mcp_names,
+                phase_label=phase_label, max_turns=max_turns,
+                idle_timeout=idle_timeout,
+            )
+        except (asyncio.TimeoutError, SDKTimeoutError) as exc:
+            if attempt < max_retries:
+                logger.warning(
+                    "%sSDK idle timeout (%ds), retrying (%d/%d)...",
+                    tag, idle_timeout, attempt + 1, max_retries,
+                )
+                continue
+            raise SDKTimeoutError(
+                f"SDK unresponsive after {idle_timeout}s idle timeout "
+                f"({1 + max_retries} attempts). Check API connectivity."
+            ) from exc
+
+    # Unreachable, but satisfies type checker
+    raise SDKTimeoutError("SDK timeout")  # pragma: no cover
+
+
+async def _run_sdk_coordinator_once(
+    prompt: str,
+    agent_defs: dict[str, Any],
+    mcp_names: list[str],
+    *,
+    phase_label: str = "",
+    max_turns: int | None = None,
+    idle_timeout: int = 20,
+) -> str:
+    """Single attempt of stateless coordinator execution with idle timeout."""
     from claude_agent_sdk import query
     from miya.infra.logging_config import TRACE
 
@@ -405,9 +501,38 @@ async def run_sdk_coordinator(
     turn_count = 0
     tool_use_count = 0
     t0 = time.monotonic()
+    last_message_time = t0
     current_tool: str | None = None  # track which tool is running
+    warned_slow = False
+    warn_threshold = idle_timeout * 0.8  # warn at 80% of timeout
 
-    async for message in query(prompt=prompt, options=options):
+    # Iterate with per-message idle timeout
+    aiter = query(prompt=prompt, options=options).__aiter__()
+    while True:
+        try:
+            message = await asyncio.wait_for(aiter.__anext__(), timeout=idle_timeout)
+            last_message_time = time.monotonic()
+            warned_slow = False  # reset on successful message
+        except StopAsyncIteration:
+            break
+        except asyncio.TimeoutError:
+            elapsed = time.monotonic() - t0
+            idle_elapsed = time.monotonic() - last_message_time
+            raise SDKTimeoutError(
+                f"{tag}No SDK message for {idle_elapsed:.0f}s "
+                f"(total elapsed {elapsed:.0f}s, "
+                f"{turn_count} turns, {tool_use_count} tools)"
+            )
+
+        # Warn if approaching timeout (80% of idle limit since last message)
+        gap = time.monotonic() - last_message_time
+        if gap > warn_threshold and not warned_slow:
+            warned_slow = True
+            logger.warning(
+                "%sSDK slow: %.0fs since last message (timeout at %ds)",
+                tag, gap, idle_timeout,
+            )
+
         turn_count += 1
 
         # ── AssistantMessage: text, thinking, tool_use blocks ──
@@ -454,10 +579,11 @@ async def run_sdk_coordinator(
 
         # ── ResultMessage: final stats from SDK ──
         elif isinstance(message, ResultMessage):
+            api_ms = getattr(message, "duration_api_ms", 0) or 0
+            cost = getattr(message, "total_cost_usd", 0) or 0
+            turns = getattr(message, "num_turns", 0) or 0
+            _cost_tracker.add(cost, turns, api_ms)
             if logger.isEnabledFor(TRACE):
-                api_ms = getattr(message, "duration_api_ms", 0) or 0
-                cost = getattr(message, "total_cost_usd", 0) or 0
-                turns = getattr(message, "num_turns", 0) or 0
                 logger.log(TRACE, "%s⏱ SDK: %dms, %d turns, $%.4f",
                            tag, api_ms, turns, cost)
 
@@ -505,15 +631,16 @@ def _build_sdk_options(
 
     return ClaudeAgentOptions(
         agents=sdk_agents,
-        mcp_servers=mcp_configs,
+        mcp_servers=mcp_configs,  # type: ignore[arg-type]
         allowed_tools=[
             "Read", "Write", "Edit", "Bash", "Grep", "Glob",
-            "WebSearch", "WebFetch", "Agent",
+            "WebSearch", "WebFetch", "Agent", "Skill",
         ] + all_mcp_patterns,
         permission_mode="acceptEdits",
         max_turns=max_turns if max_turns is not None else cfg["max_turns"],
         cwd=os.getcwd(),
         env=_sdk_env(),
+        setting_sources=["user", "project"],
     )
 
 
@@ -560,7 +687,9 @@ class SDKSession:
             self._agent_defs, self._mcp_names, max_turns=self._max_turns,
         )
         self._client = ClaudeSDKClient(options)
-        await self._client.connect(initial_prompt, session_id=self._session_id)
+        # NOTE: ClaudeSDKClient.connect() does not support session_id yet.
+        # Session ID is stored locally for future SDK support.
+        await self._client.connect(initial_prompt)
 
     async def query(self, prompt: str, *, phase_label: str = "") -> str:
         """Send a prompt and collect the text response.
@@ -568,11 +697,17 @@ class SDKSession:
         Because the session is stateful, the model sees all prior messages.
         This means ``prompt`` only needs the new phase instruction — not the
         full blackboard/history context that stateless calls require.
+
+        Uses idle timeout: raises SDKTimeoutError if no message for
+        MIYA_SDK_IDLE_TIMEOUT seconds. No retry — caller handles.
         """
         from miya.infra.logging_config import TRACE
 
         if self._client is None:
             raise RuntimeError("SDKSession not connected. Call connect() first.")
+
+        cfg = _get_topology_config()
+        idle_timeout = cfg["sdk_idle_timeout"]
 
         tag = f"[{phase_label}] " if phase_label else ""
         logger.debug("%sprompt (%d chars): %s", tag, len(prompt), _truncate_for_log(prompt, 300))
@@ -585,7 +720,22 @@ class SDKSession:
         t0 = time.monotonic()
         current_tool: str | None = None
 
-        async for message in self._client.receive_response():
+        aiter = self._client.receive_response().__aiter__()
+        while True:
+            try:
+                message = await asyncio.wait_for(aiter.__anext__(), timeout=idle_timeout)
+            except StopAsyncIteration:
+                break
+            except asyncio.CancelledError:
+                logger.debug("%sCancelled during SDK receive", tag)
+                raise
+            except asyncio.TimeoutError:
+                elapsed = time.monotonic() - t0
+                raise SDKTimeoutError(
+                    f"{tag}No SDK message for {idle_timeout}s "
+                    f"(elapsed {elapsed:.0f}s, {turn_count} turns)"
+                )
+
             turn_count += 1
 
             if isinstance(message, AssistantMessage):
@@ -626,10 +776,11 @@ class SDKSession:
                         )
 
             elif isinstance(message, ResultMessage):
+                api_ms = getattr(message, "duration_api_ms", 0) or 0
+                cost = getattr(message, "total_cost_usd", 0) or 0
+                turns = getattr(message, "num_turns", 0) or 0
+                _cost_tracker.add(cost, turns, api_ms)
                 if logger.isEnabledFor(TRACE):
-                    api_ms = getattr(message, "duration_api_ms", 0) or 0
-                    cost = getattr(message, "total_cost_usd", 0) or 0
-                    turns = getattr(message, "num_turns", 0) or 0
                     logger.log(TRACE, "%s⏱ SDK: %dms, %d turns, $%.4f",
                                tag, api_ms, turns, cost)
 
@@ -698,7 +849,7 @@ def drain_hitl_queue(
     return events, suffix
 
 
-TopologyFactory = Callable[..., Topology]
+TopologyFactory = Callable[..., Any]
 
 
 class TopologyRegistry:

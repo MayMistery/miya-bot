@@ -7,6 +7,7 @@ executes the mission, and produces a report.
 from __future__ import annotations
 
 import asyncio
+import json as _json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -37,19 +38,21 @@ def _write_challenge_writeup(
     approach: str,
     target: str,
     output_dir: Path | str | None = None,
+    events: list[Any] | None = None,
 ) -> Path | None:
-    """Auto-generate a writeup markdown file for a solved CTF challenge.
+    """Auto-generate a detailed writeup for a solved CTF challenge.
+
+    Includes full event timeline with payloads and analysis.
 
     Args:
-        output_dir: Directory to write into. If None, writeup generation is skipped
-                    (useful for tests or headless execution).
+        output_dir: Directory to write into. If None, writeup is skipped.
+        events: All DomainEvents collected during this challenge's OODA loop.
     """
     if output_dir is None:
         return None
 
     import re
     safe_name = re.sub(r'[^\w\-]', '_', challenge_name)
-    # Extract inner part of flag{...} for filename
     m = re.match(r'[A-Za-z0-9_]+\{(.+)\}', flag)
     flag_part = m.group(1) if m else flag
     safe_flag = re.sub(r'[^\w\-]', '_', flag_part)
@@ -58,18 +61,127 @@ def _write_challenge_writeup(
     out.mkdir(parents=True, exist_ok=True)
     filepath = out / f"{safe_name}_{safe_flag}.md"
 
-    content = (
-        f"# {challenge_name}\n\n"
-        f"**Target:** `{target}`\n"
-        f"**Flag:** `{flag}`\n\n"
-        f"---\n\n"
-        f"## Solution\n\n"
-        f"{approach or '*(Automated solution by Miya)*'}\n\n"
-        f"---\n\n"
-        f"*Solved by Miya DDD Pentest Agent*\n"
-    )
+    # ── Build detailed writeup ────────────────────────────
+    sections: list[str] = []
+    sections.append(f"# {challenge_name}\n")
+    sections.append(f"**Target:** `{target}`")
+    sections.append(f"**Flag:** `{flag}`")
+    sections.append(f"**Approach:** {approach or 'Automated'}\n")
+    sections.append("---\n")
 
-    filepath.write_text(content, encoding="utf-8")
+    # Detailed timeline from events
+    if events:
+        sections.append("## Timeline\n")
+        for ev in events:
+            etype = type(ev).__name__
+
+            if etype == "PhaseTransition":
+                to_phase = getattr(ev, "to_phase", "")
+                reason = getattr(ev, "reason", "")
+                sections.append(f"### Phase: {to_phase.upper()}\n")
+                if reason:
+                    sections.append(f"_{reason}_\n")
+
+            elif etype == "ChallengeIdentified":
+                cat = getattr(ev, "category", "")
+                diff = getattr(ev, "difficulty", "")
+                tech = getattr(ev, "technology_stack", ())
+                sections.append(f"**Identified:** category={cat}, difficulty={diff}")
+                if tech:
+                    sections.append(f"  Tech stack: {', '.join(tech)}\n")
+
+            elif etype == "ChallengeClassified":
+                cat = getattr(ev, "category", "")
+                conf = getattr(ev, "confidence", 0)
+                reasoning = getattr(ev, "reasoning", "")
+                sections.append(f"**Classified:** {cat} (confidence {conf:.0%})")
+                if reasoning:
+                    sections.append(f"  {reasoning}\n")
+
+            elif etype == "AssetDiscovered":
+                host = getattr(ev, "host", "")
+                ports = getattr(ev, "ports", ())
+                services = getattr(ev, "services", ())
+                sections.append(f"**Asset:** {host}")
+                if ports:
+                    sections.append(f"  Ports: {', '.join(str(p) for p in ports)}")
+                if services:
+                    sections.append(f"  Services: {', '.join(services)}\n")
+
+            elif etype == "VulnerabilityFound":
+                vuln = getattr(ev, "vulnerability", "")
+                sev = getattr(ev, "severity", "")
+                detail = getattr(ev, "detail", "")
+                sections.append(f"**Vulnerability:** {vuln} [{sev}]")
+                if detail:
+                    sections.append(f"```\n{detail}\n```\n")
+
+            elif etype == "ExploitAttempted":
+                technique = getattr(ev, "technique", "")
+                payload = getattr(ev, "payload", "")
+                target_desc = getattr(ev, "target", "")
+                sections.append(f"**Exploit Attempt:** {technique}")
+                if target_desc:
+                    sections.append(f"  Target: {target_desc}")
+                if payload:
+                    sections.append(f"  Payload:\n```\n{payload}\n```\n")
+
+            elif etype == "ExploitSucceeded":
+                technique = getattr(ev, "technique", "")
+                result = getattr(ev, "result", "")
+                sections.append(f"**Exploit Succeeded:** {technique}")
+                if result:
+                    sections.append(f"```\n{result}\n```\n")
+
+            elif etype == "ExploitFailed":
+                technique = getattr(ev, "technique", "")
+                reason = getattr(ev, "reason", "")
+                sections.append(f"**Exploit Failed:** {technique}")
+                if reason:
+                    sections.append(f"  Reason: {reason}\n")
+
+            elif etype == "FlagSubmitted":
+                accepted = getattr(ev, "accepted", False)
+                response = getattr(ev, "response", "")
+                sections.append(
+                    f"**Flag Submitted:** `{flag}` "
+                    f"{'ACCEPTED' if accepted else 'REJECTED'}"
+                )
+                if response:
+                    sections.append(f"  Response: {response}\n")
+
+            elif etype == "ReflectionCompleted":
+                decision = getattr(ev, "decision", "")
+                assessment = getattr(ev, "assessment", "")
+                insights = getattr(ev, "insights", "")
+                if assessment:
+                    sections.append(f"**Reflection:** {assessment}")
+                if insights:
+                    sections.append(f"  Insights: {insights}")
+                sections.append(f"  Decision: {decision}\n")
+
+            elif etype == "OperatorMessage":
+                content = getattr(ev, "content", "")
+                sections.append(f"> **Operator:** {content}\n")
+
+            elif etype == "ChallengeSolved":
+                sections.append("\n## Flag Captured\n")
+                sections.append(f"```\n{flag}\n```\n")
+                if approach:
+                    sections.append(f"**Method:** {approach}\n")
+                # Include raw phase output for payload detail
+                phase_out = getattr(ev, "phase_output", "")
+                if phase_out:
+                    sections.append("### Detailed Execution Log\n")
+                    sections.append(f"```\n{phase_out[:6000]}\n```\n")
+    else:
+        sections.append("## Solution\n")
+        sections.append(f"{approach or '*(Automated solution by Miya)*'}\n")
+
+    sections.append("---\n")
+    sections.append("*Solved by Miya DDD Pentest Agent*\n")
+
+    filepath.write_text("\n".join(sections), encoding="utf-8")
     logger.info("Writeup generated: %s", filepath)
     return filepath
 
@@ -94,11 +206,19 @@ class MissionReport:
     status: str = "completed"
     error: str = ""
 
+    # ── Cost tracking ──────────────────────────────────────────────
+    cost_usd: float = 0.0
+    api_turns: int = 0
+    api_calls: int = 0
+
     # ── Original parameters for replay ─────────────────────────────
     target_kind: str = ""
     model: str = ""
     prompt: str = ""
     options: dict[str, Any] = field(default_factory=dict)
+
+    # ── Resume data (populated by get_last_mission) ──────────────
+    resume_challenges: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def critical_count(self) -> int:
@@ -269,7 +389,7 @@ class MissionService:
         if isinstance(mission_type, str):
             mission_type = MissionType(mission_type)
 
-        target = Target(uri=target_uri, kind=target_kind)
+        target = Target(uri=target_uri, kind=target_kind)  # type: ignore[arg-type]
         mission = Mission(
             mission_type=mission_type,
             target=target,
@@ -299,10 +419,45 @@ class MissionService:
         if not agents:
             raise ValueError(f"Failed to build agents for: {mission_type}")
 
-        # Get topology (pass coordinator for testability)
-        topo = TopologyRegistry.get(topology, coordinator=self._coordinator)
+        # ── MCP server health check ──────────────────────────
+        all_mcp: set[str] = set()
+        for handle in agents.values():
+            all_mcp.update(handle.mcp_servers)
+        if all_mcp:
+            ok, missing = self._mcp_registry.probe(list(all_mcp))
+            if missing:
+                logger.warning(
+                    "MCP servers unavailable (command not on PATH): %s",
+                    ", ".join(missing),
+                )
+            if ok:
+                logger.debug("MCP servers OK: %s", ", ".join(ok))
 
-        # Execute
+        # ── Unlimited mode: disable all timeouts / iteration limits ──
+        is_unlimited = options.pop("unlimited", False)
+        if is_unlimited:
+            import os
+            os.environ["MIYA_OODA_MAX_ITERATIONS"] = "999"
+            os.environ["MIYA_MAX_TURNS"] = "999"
+            os.environ["MIYA_FANOUT_TIMEOUT"] = "999999"
+            os.environ["MIYA_SDK_IDLE_TIMEOUT"] = "99999"
+            logger.info("Unlimited mode: timeouts and iteration limits disabled")
+
+        # Get topology (pass coordinator for testability + runtime tunables)
+        topo_kwargs: dict[str, Any] = {"coordinator": self._coordinator}
+        if topology == "fanout":
+            if "max_parallel" in options:
+                topo_kwargs["max_parallel"] = int(options.pop("max_parallel"))
+            if "per_challenge_timeout" in options:
+                topo_kwargs["per_challenge_timeout"] = float(options.pop("per_challenge_timeout"))
+            if is_unlimited:
+                topo_kwargs["per_challenge_timeout"] = 999999.0
+        topo = TopologyRegistry.get(topology, **topo_kwargs)
+
+        # Execute — reset cost tracker for this mission
+        from miya.topology.base import _cost_tracker
+        _cost_tracker.reset()
+
         start_time = datetime.now(timezone.utc)
         collected_events: list[DomainEvent] = []
 
@@ -324,22 +479,41 @@ class MissionService:
                             mission_id=mission.id,
                         )
                     except Exception:
-                        logger.debug("Failed to record solved challenge in campaign", exc_info=True)
+                        logger.warning("Failed to record solved challenge in campaign", exc_info=True)
                     # Auto-generate writeup file
                     if event.flag and mission_type == MissionType.CTF:
+                        # Collect events for this challenge's writeup.
+                        # Include challenge-specific events + general events
+                        # that share the same aggregate_id (sub-mission).
+                        ch_agg_id = event.aggregate_id
+                        ch_events = [
+                            e for e in collected_events
+                            if getattr(e, "challenge_name", "") == event.challenge_name
+                            or (
+                                e.aggregate_id == ch_agg_id
+                                and ch_agg_id
+                                and type(e).__name__ in (
+                                    "PhaseTransition", "ReflectionCompleted",
+                                    "OperatorMessage", "ExploitAttempted",
+                                    "ExploitSucceeded", "ExploitFailed",
+                                    "VulnerabilityFound", "AssetDiscovered",
+                                )
+                            )
+                        ]
                         try:
                             _write_challenge_writeup(
                                 event.challenge_name, event.flag,
                                 event.approach, target_uri,
                                 output_dir=self._writeup_dir,
+                                events=ch_events,
                             )
                         except Exception:
-                            logger.debug("Failed to generate writeup", exc_info=True)
+                            logger.warning("Failed to generate writeup", exc_info=True)
                 if on_event is not None:
                     try:
                         on_event(event)
                     except Exception:
-                        logger.debug("on_event callback error", exc_info=True)
+                        logger.warning("on_event callback error", exc_info=True)
 
             mission.complete()
         except Exception as e:
@@ -355,9 +529,9 @@ class MissionService:
             try:
                 await self._event_store.append([fail_event])
             except Exception:
-                logger.debug("Could not persist MissionFailed event", exc_info=True)
+                logger.warning("Could not persist MissionFailed event", exc_info=True)
             duration = (datetime.now(timezone.utc) - start_time).total_seconds()
-            # Return partial report with findings collected so far
+            cost_snap = _cost_tracker.snapshot()
             return MissionReport(
                 mission_id=mission.id,
                 mission_type=mission_type.value,
@@ -369,6 +543,9 @@ class MissionService:
                 blackboard_summary=blackboard.summary(),
                 status="failed",
                 error=str(e),
+                cost_usd=float(cost_snap["cost_usd"]),
+                api_turns=int(cost_snap["turns"]),
+                api_calls=int(cost_snap["calls"]),
                 target_kind=target_kind,
                 model=model,
                 prompt=prompt,
@@ -376,6 +553,7 @@ class MissionService:
             )
 
         duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+        cost_snap = _cost_tracker.snapshot()
 
         return MissionReport(
             mission_id=mission.id,
@@ -387,10 +565,76 @@ class MissionService:
             duration_seconds=duration,
             blackboard_summary=blackboard.summary(),
             status=mission.status,
+            cost_usd=cost_snap["cost_usd"],
+            api_turns=cost_snap["turns"],
+            api_calls=cost_snap["calls"],
             target_kind=target_kind,
             model=model,
             prompt=prompt,
             options=dict(options),
+        )
+
+    async def get_last_mission(self) -> MissionReport | None:
+        """Retrieve the last mission's parameters from the event store.
+
+        Scans for the most recent MissionStarted event and reconstructs
+        enough info to allow resume.
+        """
+        if not self._event_store:
+            return None
+        all_events = await self._event_store.load_all()
+        if not all_events:
+            return None
+
+        # Find last MissionStarted
+        from miya.shared.events import MissionStarted as _MS
+        last_start = None
+        for ev in reversed(all_events):
+            if isinstance(ev, _MS):
+                last_start = ev
+                break
+        if not last_start:
+            return None
+
+        # Rebuild blackboard from all events after this mission start
+        bb = Blackboard()
+        mission_events = [
+            e for e in all_events
+            if e.aggregate_id == last_start.aggregate_id
+        ]
+        bb.apply_all(mission_events)
+
+        # Extract challenge list for fast resume (skip ENUMERATE+CLASSIFY)
+        from miya.shared.events import ChallengeClassified as _CC
+        classifications: dict[str, str] = {}
+        for ev in mission_events:
+            if isinstance(ev, _CC):
+                classifications[ev.challenge_name] = ev.category
+        resume_challenges = []
+        for cv in bb.challenges:
+            ch_dict: dict[str, Any] = {
+                "name": cv.name,
+                "category": classifications.get(cv.name, cv.category),
+                "points": cv.points,
+                "file_paths": list(cv.file_paths),
+            }
+            if cv.target_url:
+                ch_dict["target"] = cv.target_url
+            resume_challenges.append(ch_dict)
+
+        return MissionReport(
+            mission_id=last_start.aggregate_id,
+            mission_type=last_start.mission_type,
+            target=last_start.target_uri,
+            topology=last_start.topology,
+            findings=list(bb.findings),
+            events_count=len(mission_events),
+            blackboard_summary=bb.summary(),
+            status="suspended",
+            prompt=getattr(last_start, "prompt", ""),
+            model=getattr(last_start, "model", ""),
+            options=_json.loads(getattr(last_start, "options_json", "{}") or "{}"),
+            resume_challenges=resume_challenges,
         )
 
     async def list_topologies(self) -> list[dict[str, str]]:
@@ -400,5 +644,5 @@ class MissionService:
         return self._mcp_registry.describe()
 
     async def close(self) -> None:
-        if self._owns_store and self._event_store and hasattr(self._event_store, "close"):
+        if self._owns_store and self._event_store:
             await self._event_store.close()

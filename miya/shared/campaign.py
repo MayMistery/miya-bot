@@ -57,7 +57,7 @@ class Campaign:
                 c._path = p
                 return c
             except Exception:
-                logger.debug("Failed to load campaign from %s", p, exc_info=True)
+                logger.warning("Failed to load campaign from %s — starting fresh", p, exc_info=True)
         c = cls()
         c._path = p
         return c
@@ -139,6 +139,24 @@ class Campaign:
             mission_id=mission_id,
         )
 
+    def record_checkpoint(
+        self,
+        challenge_name: str,
+        status: str,
+        reason: str = "",
+        mission_id: str = "",
+    ) -> None:
+        """Record a challenge checkpoint (timeout/failed/in_progress).
+
+        Used by resume to skip challenges that already completed or timed out.
+        """
+        self.add(
+            key=f"checkpoint:{challenge_name}",
+            value=json.dumps({"status": status, "reason": reason}),
+            category="checkpoint",
+            mission_id=mission_id,
+        )
+
     # ── Query ──────────────────────────────────────────────────────
 
     def get_solved(self) -> list[dict[str, str]]:
@@ -161,6 +179,21 @@ class Campaign:
     def is_solved(self, challenge_name: str) -> bool:
         """Check if a challenge has been solved in this campaign."""
         return any(e.key == f"solved:{challenge_name}" for e in self.entries)
+
+    def get_checkpoint(self, challenge_name: str) -> dict[str, str] | None:
+        """Get checkpoint status for a challenge (timeout/failed/etc)."""
+        for e in self.entries:
+            if e.key == f"checkpoint:{challenge_name}":
+                try:
+                    return json.loads(e.value)
+                except Exception:
+                    return {"status": e.value, "reason": ""}
+        return None
+
+    def clear_checkpoints(self) -> None:
+        """Clear all checkpoint entries (for fresh retry)."""
+        self.entries = [e for e in self.entries if e.category != "checkpoint"]
+        self.save()
 
     # ── Context for LLM ───────────────────────────────────────────
 

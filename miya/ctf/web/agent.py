@@ -89,6 +89,10 @@ known vulnerability patterns after fingerprinting the stack.
 - **Bash**: curl, wget, Python scripting for custom exploits, request automation
 - **Read/Write**: Source code analysis, exploit script development
 - **WebFetch**: Direct HTTP requests for web interaction
+- **WebSearch**: Search for known CVEs, security advisories, and exploitation \
+techniques. **Always use WebSearch** when you identify specific software/library \
+versions (e.g. "GORM 1.21 CVE", "Gin v1.7.7 vulnerability", "jQuery 3.3.1 exploit"). \
+Known CVEs often directly point to the intended vulnerability in CTF challenges.
 
 ## Key Principles
 - Think about **why** a vulnerability exists, not just **what** the vulnerability is

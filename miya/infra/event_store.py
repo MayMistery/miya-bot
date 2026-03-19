@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import aiosqlite
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +12,8 @@ from typing import Any
 
 from miya.shared.events import DomainEvent, event_from_dict
 from miya.shared.ports import EventStorePort
+
+logger = logging.getLogger(__name__)
 
 
 _SCHEMA = """
@@ -47,10 +50,35 @@ class SQLiteEventStore(EventStorePort):
         self._db: aiosqlite.Connection | None = None
 
     async def initialize(self) -> None:
-        """Create tables if they don't exist."""
-        self._db = await aiosqlite.connect(self._db_path)
-        await self._db.executescript(_SCHEMA)
-        await self._db.commit()
+        """Create tables if they don't exist.
+
+        If the on-disk database is read-only (e.g. filesystem permissions,
+        macOS sandbox, Docker bind-mount), falls back to an in-memory
+        database so the mission can still run without persistence.
+        """
+        try:
+            self._db = await aiosqlite.connect(self._db_path)
+            await self._db.executescript(_SCHEMA)
+            await self._db.commit()
+        except Exception as exc:
+            err_msg = str(exc).lower()
+            if "readonly" in err_msg or "read-only" in err_msg or "read only" in err_msg:
+                logger.warning(
+                    "Database '%s' is read-only (%s) — falling back to "
+                    "in-memory event store. Events will NOT be persisted "
+                    "across sessions.",
+                    self._db_path, exc,
+                )
+                if self._db:
+                    try:
+                        await self._db.close()
+                    except Exception:
+                        pass
+                self._db = await aiosqlite.connect(":memory:")
+                await self._db.executescript(_SCHEMA)
+                await self._db.commit()
+            else:
+                raise
 
     async def close(self) -> None:
         if self._db:
@@ -83,26 +111,31 @@ class SQLiteEventStore(EventStorePort):
         await db.execute("BEGIN IMMEDIATE")
         try:
             for event in events:
-                payload = event.to_dict()
-                metadata = json.dumps({
-                    "correlation_id": event.correlation_id,
-                    "causation_id": event.causation_id,
-                    "timestamp": event.timestamp.isoformat(),
-                })
-
-                # Optimistic concurrency check (now atomic under write lock)
-                if expected_version >= 0 and event.aggregate_id:
+                # Auto-increment version per aggregate
+                actual_version = event.version
+                if event.aggregate_id:
                     async with db.execute(
                         "SELECT MAX(version) FROM events WHERE aggregate_id = ?",
                         (event.aggregate_id,),
                     ) as cursor:
                         row = await cursor.fetchone()
                         current = row[0] if row and row[0] is not None else -1
-                        if current != expected_version:
-                            raise ConcurrencyError(
-                                f"Expected version {expected_version}, got {current} "
-                                f"for aggregate {event.aggregate_id}"
-                            )
+                        actual_version = current + 1
+
+                    # Optimistic concurrency check
+                    if expected_version >= 0 and current != expected_version:
+                        raise ConcurrencyError(
+                            f"Expected version {expected_version}, got {current} "
+                            f"for aggregate {event.aggregate_id}"
+                        )
+
+                payload = event.to_dict()
+                payload["version"] = actual_version  # override with auto-incremented
+                metadata = json.dumps({
+                    "correlation_id": event.correlation_id,
+                    "causation_id": event.causation_id,
+                    "timestamp": event.timestamp.isoformat(),
+                })
 
                 await db.execute(
                     """INSERT INTO events
@@ -118,7 +151,7 @@ class SQLiteEventStore(EventStorePort):
                         event.mission,
                         json.dumps(payload),
                         metadata,
-                        event.version,
+                        actual_version,
                     ),
                 )
             await db.execute("COMMIT")

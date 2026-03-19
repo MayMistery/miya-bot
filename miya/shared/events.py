@@ -57,6 +57,9 @@ class MissionStarted(DomainEvent):
     mission_type: str = ""
     target_uri: str = ""
     topology: str = ""
+    prompt: str = ""
+    model: str = ""
+    options_json: str = ""  # JSON-serialized options dict for resume
 
 
 @dataclass(frozen=True)
@@ -111,7 +114,7 @@ class FingerprintCompleted(DomainEvent):
     event_type: ClassVar[str] = "recon.fingerprint_completed"
     asset_id: str = ""
     software: str = ""
-    version: str = ""
+    software_version: str = ""
     technology_stack: tuple[str, ...] = ()
     context: str = "recon"
 
@@ -244,6 +247,18 @@ class ChallengeIdentified(DomainEvent):
     difficulty: str = ""  # easy, medium, hard
     technology_stack: tuple[str, ...] = ()
     file_paths: tuple[str, ...] = ()  # attachment/source file paths discovered in PREPARE
+    target_url: str = ""  # per-challenge URL (e.g. http://10.0.0.1:8080)
+    context: str = "ctf"
+    mission: str = "ctf"
+
+
+@dataclass(frozen=True)
+class TargetUnreachable(DomainEvent):
+    """Emitted when a challenge target fails pre-flight connectivity check."""
+    event_type: ClassVar[str] = "ctf.target_unreachable"
+    challenge_name: str = ""
+    target_url: str = ""
+    error: str = ""
     context: str = "ctf"
     mission: str = "ctf"
 
@@ -254,6 +269,7 @@ class ChallengeSolved(DomainEvent):
     challenge_name: str = ""
     flag: str = ""
     approach: str = ""
+    phase_output: str = ""   # raw ACT/CONTINUE output for writeup detail
     context: str = "ctf"
     mission: str = "ctf"
 
@@ -311,6 +327,14 @@ class LootCollected(DomainEvent):
 
 
 @dataclass(frozen=True)
+class MissionSuspended(DomainEvent):
+    """Emitted when a mission is stopped by the operator for later resume."""
+    event_type: ClassVar[str] = "mission.suspended"
+    reason: str = ""
+    checkpoint: str = ""  # JSON: phase, iteration, solved challenges, etc.
+
+
+@dataclass(frozen=True)
 class OperatorMessage(DomainEvent):
     """Human-in-the-loop message injected by the operator during execution."""
     event_type: ClassVar[str] = "operator.message"
@@ -365,6 +389,14 @@ def event_from_dict(data: dict[str, Any]) -> DomainEvent:
     for f_name in ("ports", "services", "input_vectors", "path", "technology_stack", "target_ports", "file_paths"):
         if f_name in data and isinstance(data[f_name], list):
             data[f_name] = tuple(data[f_name])
+
+    # Handle field renames (backwards compatibility)
+    _FIELD_ALIASES = {
+        "version": "software_version",  # FingerprintCompleted renamed
+    }
+    for old_name, new_name in _FIELD_ALIASES.items():
+        if old_name in data and new_name not in data:
+            data[new_name] = data.pop(old_name)
 
     # Filter to only fields this class accepts
     import dataclasses

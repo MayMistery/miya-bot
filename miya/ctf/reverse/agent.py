@@ -89,6 +89,9 @@ Use for runtime verification and anti-RE bypass.
 - **Bash**: file, strings, readelf, objdump, ltrace, strace for quick analysis
 - **Python**: z3, angr, unicorn for automated solving and emulation
 - **Read/Write**: Analyze files, develop solver scripts
+- **WebSearch**: Search for known algorithms, obfuscation techniques, packers, \
+or CVEs. **Always use WebSearch** when you identify specific software versions \
+or recognize a known packing/protection scheme.
 
 ## Structured Event Output
 Emit structured events as you progress:

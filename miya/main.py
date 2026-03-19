@@ -70,8 +70,25 @@ BANNER = r"""[bold red]
 [/bold red]"""
 
 
+def _get_git_commit() -> str:
+    """Return short git commit hash, or '' on failure."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=3,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
 def show_banner() -> None:
     console.print(BANNER)
+    commit = _get_git_commit()
+    if commit:
+        console.print(f"    [dim]version: {commit}[/dim]")
+        console.print()
 
 
 def make_mission_table() -> Table:
@@ -162,12 +179,27 @@ def print_report(report: Any) -> None:
     """Print a MissionReport with rich formatting."""
     # Header
     status_color = "green" if report.status == "completed" else "red"
+    cost_usd = getattr(report, "cost_usd", 0) or 0
+    api_turns = getattr(report, "api_turns", 0) or 0
+    api_calls = getattr(report, "api_calls", 0) or 0
+
+    # Format duration nicely
+    dur = report.duration_seconds
+    if dur >= 3600:
+        dur_str = f"{dur / 3600:.1f}h"
+    elif dur >= 60:
+        dur_str = f"{dur / 60:.1f}m"
+    else:
+        dur_str = f"{dur:.1f}s"
+
     console.print(Panel(
         f"[bold]{report.mission_type.upper()}[/bold] → {report.target}\n"
         f"Topology: [yellow]{report.topology}[/yellow]  |  "
         f"Status: [{status_color}]{report.status}[/{status_color}]  |  "
-        f"Duration: {report.duration_seconds:.1f}s  |  "
-        f"Events: {report.events_count}",
+        f"Duration: {dur_str}  |  "
+        f"Events: {report.events_count}\n"
+        f"Cost: [yellow]${cost_usd:.4f}[/yellow]  |  "
+        f"Turns: {api_turns}  |  API calls: {api_calls}",
         title="[bold red]Mission Report[/bold red]",
         border_style="red",
         box=box.DOUBLE,
@@ -225,8 +257,10 @@ def print_report(report: Any) -> None:
 
 @click.group(invoke_without_command=True)
 @click.option("--verbose", "-v", count=True, help="Verbosity: -v = DEBUG, -vv = TRACE (tool use)")
+@click.option("--unlimited", is_flag=True, default=False,
+              help="Unlimited mode: no timeouts, no iteration limits")
 @click.pass_context
-def cli(ctx: click.Context, verbose: int) -> None:
+def cli(ctx: click.Context, verbose: int, unlimited: bool) -> None:
     """Miya — DDD Pentest Agent"""
     if verbose:
         import logging
@@ -235,16 +269,20 @@ def cli(ctx: click.Context, verbose: int) -> None:
     # Store verbose level in context so subcommands (interactive) can access it
     ctx.ensure_object(dict)
     ctx.obj["verbose"] = verbose
+    ctx.obj["unlimited"] = unlimited
     if ctx.invoked_subcommand is None:
         # Default: launch interactive mode
-        ctx.invoke(interactive, db="miya_events.db", model=None, api_key=None, base_url=None)
+        ctx.invoke(interactive, db="miya_events.db", model=None, api_key=None,
+                   base_url=None, unlimited=unlimited)
 
 
 def _common_options(f: Any) -> Any:
-    """Shared --model, --api-key, --base-url options."""
+    """Shared --model, --api-key, --base-url, --unlimited options."""
     f = click.option("--model", "-m", default=None, help=_MODEL_HELP)(f)
     f = click.option("--api-key", default=None, help=_KEY_HELP)(f)
     f = click.option("--base-url", default=None, help=_BASE_URL_HELP)(f)
+    f = click.option("--unlimited", is_flag=True, default=False,
+                     help="Unlimited mode: no timeouts, no iteration limits")(f)
     return f
 
 
@@ -255,10 +293,12 @@ def _common_options(f: Any) -> Any:
 @click.option("--topology", "-T", default="ooda", type=click.Choice(["ooda", "attack_graph", "fanout"]))
 @click.option("--db", default="miya_events.db", help="SQLite database path")
 @_common_options
-def oneday(target: str, prompt: str, source: str | None, topology: str, db: str, model: str | None, api_key: str | None, base_url: str | None) -> None:
+def oneday(target: str, prompt: str, source: str | None, topology: str, db: str, model: str | None, api_key: str | None, base_url: str | None, unlimited: bool) -> None:
     """Exploit known CVEs (1-day vulnerabilities)"""
     _apply_api_env(api_key, base_url)
     opts: dict[str, Any] = {}
+    if unlimited:
+        opts["unlimited"] = True
     target_kind = "service"
     if source:
         opts["source_path"] = source
@@ -274,10 +314,12 @@ def oneday(target: str, prompt: str, source: str | None, topology: str, db: str,
 @click.option("--topology", "-T", default="ooda", type=click.Choice(["ooda", "attack_graph", "fanout"]))
 @click.option("--db", default="miya_events.db", help="SQLite database path")
 @_common_options
-def zeroday(target: str, prompt: str, service: str | None, language: str, topology: str, db: str, model: str | None, api_key: str | None, base_url: str | None) -> None:
+def zeroday(target: str, prompt: str, service: str | None, language: str, topology: str, db: str, model: str | None, api_key: str | None, base_url: str | None, unlimited: bool) -> None:
     """Discover unknown vulnerabilities (0-day)"""
     _apply_api_env(api_key, base_url)
     opts: dict[str, Any] = {"language": language}
+    if unlimited:
+        opts["unlimited"] = True
     if service:
         opts["service_url"] = service
     asyncio.run(_run_mission("zeroday", target, "source", topology, db, model=model or DEFAULT_MODEL, prompt=prompt, **opts))
@@ -301,11 +343,16 @@ def _detect_target_kind(target: str) -> str:
 @click.option("--topology", "-T", default="ooda", type=click.Choice(["ooda", "attack_graph", "fanout"]))
 @click.option("--db", default="miya_events.db", help="SQLite database path")
 @_common_options
-def ctf(target: str, prompt: str, category: str, topology: str, db: str, model: str | None, api_key: str | None, base_url: str | None) -> None:
+def ctf(target: str, prompt: str, category: str, topology: str, db: str, model: str | None, api_key: str | None, base_url: str | None, unlimited: bool) -> None:
     """Solve CTF challenges"""
     _apply_api_env(api_key, base_url)
     kind = _detect_target_kind(target)
-    asyncio.run(_run_mission("ctf", target, kind, topology, db, model=model or DEFAULT_MODEL, prompt=prompt, category=category))
+    opts: dict[str, Any] = {}
+    if category:
+        opts["category"] = category
+    if unlimited:
+        opts["unlimited"] = True
+    asyncio.run(_run_mission("ctf", target, kind, topology, db, model=model or DEFAULT_MODEL, prompt=prompt, **opts))
 
 
 @cli.command()
@@ -428,6 +475,7 @@ async def _health_ping_sdk() -> str:
     has working auth (local Claude Code, or ANTHROPIC_API_KEY), this succeeds.
     """
     from claude_agent_sdk import query, ClaudeAgentOptions
+    from claude_agent_sdk.types import AssistantMessage, TextBlock
 
     options = ClaudeAgentOptions(
         max_turns=1,
@@ -436,9 +484,9 @@ async def _health_ping_sdk() -> str:
 
     parts: list[str] = []
     async for message in query(prompt="Reply with exactly: MIYA_OK", options=options):
-        if hasattr(message, "content"):
+        if isinstance(message, AssistantMessage):
             for block in message.content:
-                if hasattr(block, "text"):
+                if isinstance(block, TextBlock):
                     parts.append(block.text)
     return "".join(parts).strip()
 
@@ -488,6 +536,9 @@ def update(branch: str | None) -> None:
         )
     steps.extend([
         ("Pulling", ["git", "-C", project_root, "pull", "origin", target_branch]),
+        ("Updating skills (submodules)", [
+            "git", "-C", project_root, "submodule", "update", "--init", "--recursive",
+        ]),
         ("Syncing deps", ["uv", "sync", "--directory", project_root]),
     ])
 
@@ -520,10 +571,10 @@ def update(branch: str | None) -> None:
 @click.option("--db", default="miya_events.db", help="SQLite database path")
 @_common_options
 @click.pass_context
-def interactive(ctx: click.Context, db: str, model: str | None, api_key: str | None, base_url: str | None) -> None:
+def interactive(ctx: click.Context, db: str, model: str | None, api_key: str | None, base_url: str | None, unlimited: bool) -> None:
     """Interactive REPL mode"""
     _apply_api_env(api_key, base_url)
-    asyncio.run(_interactive_loop(db, model=model or DEFAULT_MODEL))
+    asyncio.run(_interactive_loop(db, model=model or DEFAULT_MODEL, unlimited=unlimited))
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -882,16 +933,21 @@ async def _run_mission(
 
     show_banner()
 
+    is_unlimited = options.get("unlimited", False)
+
     panel_lines = [
         f"[bold]Mission:[/bold] {mission_type.upper()}",
         f"[bold]Target:[/bold]  {target}",
         f"[bold]Topology:[/bold] {topology}",
         f"[bold]Model:[/bold]   {model}",
     ]
+    if is_unlimited:
+        panel_lines.append("[bold yellow]Mode:[/bold yellow]    [bold yellow]UNLIMITED[/bold yellow] (no timeouts)")
     if prompt:
         panel_lines.append(f"[bold]Prompt:[/bold]  {prompt[:80]}")
-    if options:
-        panel_lines.append(f"[bold]Options:[/bold] {options}")
+    display_opts = {k: v for k, v in options.items() if k != "unlimited"}
+    if display_opts:
+        panel_lines.append(f"[bold]Options:[/bold] {display_opts}")
     console.print(Panel(
         "\n".join(panel_lines),
         title="[bold cyan]Mission Configuration[/bold cyan]",
@@ -930,7 +986,7 @@ async def _run_mission(
         await service.close()
 
 
-async def _interactive_loop(db: str, model: str = "opus") -> None:
+async def _interactive_loop(db: str, model: str = "opus", unlimited: bool = False) -> None:
     from prompt_toolkit import PromptSession
     from prompt_toolkit.completion import WordCompleter
     from prompt_toolkit.history import FileHistory
@@ -952,8 +1008,58 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                     _logging.WARNING: "warning", _logging.INFO: "info",
                     _logging.DEBUG: "debug", TRACE: "trace"}
     cfg: dict[str, Any] = {"model": model, "topology": "ooda",
-                           "verbose": _level_names.get(_current_level, "info")}
+                           "verbose": _level_names.get(_current_level, "info"),
+                           "unlimited": unlimited}
+
+    # Load persistent config (project .miya.toml + global ~/.config/miya/config.toml)
+    from miya.infra.config import apply_config, save_config, load_config
+    saved_cfg = apply_config(cfg)
+    if saved_cfg:
+        console.print(
+            f"[dim]Config loaded: "
+            f"{', '.join(f'{k}={v}' for k, v in saved_cfg.items() if k != 'api_key')}"
+            f"[/dim]"
+        )
+
     mission_history: list[MissionReport] = []
+
+    # ── Background job state ──────────────────────────────────────
+    # Holds a running mission that the user sent to the background
+    # via 'bg' during HITL. The task keeps running; 'fg' re-attaches.
+    import asyncio as _aio
+    import threading
+    import time as _time
+
+    class _BackgroundJob:
+        __slots__ = (
+            "task", "op_queue", "hitl_queue", "live_events",
+            "stop_input", "cancel_requested", "force_kill",
+            "description", "started_at",
+        )
+
+        def __init__(
+            self,
+            task: _aio.Task[MissionReport],
+            op_queue: _aio.Queue[str],
+            hitl_queue: _aio.Queue[str],
+            live_events: list[DomainEvent],
+            stop_input: threading.Event,
+            cancel_requested: threading.Event,
+            force_kill: threading.Event,
+            description: str = "",
+            started_at: float = 0.0,
+        ) -> None:
+            self.task = task
+            self.op_queue = op_queue
+            self.hitl_queue = hitl_queue
+            self.live_events = live_events
+            self.stop_input = stop_input
+            self.cancel_requested = cancel_requested
+            self.force_kill = force_kill
+            self.description = description
+            self.started_at = started_at
+
+    bg_job: _BackgroundJob | None = None
 
     # ── Prompt toolkit session with history + completion ──────────
     history_path = Path.home() / ".miya_history"
@@ -963,7 +1069,8 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
             "oneday", "zeroday", "ctf",
             # repl
             "set", "status", "history", "events", "blackboard", "campaign",
-            "report", "export", "replay", "info", "clear", "help",
+            "report", "export", "replay", "resume", "info", "clear", "help",
+            "fg", "bg", "jobs", "kill",
             "exit", "quit",
             # options
             "--topology", "--category", "--language", "--source", "--service", "--prompt",
@@ -1003,6 +1110,7 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
         "SinkConfirmed": "bold yellow",
         "PrivilegeEscalated": "bold magenta",
         "MissionFailed": "bold red",
+        "TargetUnreachable": "bold red",
         "PhaseTransition": "dim",
     }
 
@@ -1012,7 +1120,8 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
 
     def _event_detail(ev: DomainEvent) -> str:
         for attr in ("cve_id", "vulnerability", "host", "ip", "software",
-                      "title", "challenge_name", "technique", "phase"):
+                      "title", "challenge_name", "technique", "phase",
+                      "target_url"):
             val = getattr(ev, attr, None)
             if val:
                 return str(val)
@@ -1037,14 +1146,35 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
         t.add_row("  --language/-l <lang>", "Language hint (zeroday)")
         t.add_row("  --source/-s <path>", "Source code path (oneday white-box)")
         t.add_row('  --service <url>', "Live service URL (zeroday PoC)")
+        t.add_row("  --unlimited", "No timeouts, no iteration limits")
         t.add_row("", "")
         t.add_row("[dim]Session:[/dim]", "")
-        t.add_row("set model <m>", "Switch model (opus/sonnet/haiku)")
-        t.add_row("set topology <t>", "Set default topology")
-        t.add_row("set verbose <level>", "Log level: info/debug/trace")
-        t.add_row("set api_key <key>", "Set Anthropic API key")
-        t.add_row("set base_url <url>", "Set Anthropic base URL")
+        t.add_row("set <key> <value>", "Set config (saved to .miya.toml)")
+        t.add_row("set -g <key> <value>", "Set global config (~/.config/miya/)")
+        t.add_row("set show", "Show persistent config")
         t.add_row("status", "Current config & session stats")
+        t.add_row("", "")
+        t.add_row("[dim]Job Control (during mission):[/dim]", "")
+        t.add_row("bg", "Send running mission to background")
+        t.add_row("fg", "Re-attach to background mission")
+        t.add_row("jobs", "Show background mission status")
+        t.add_row("kill", "Cancel background mission")
+        t.add_row("resume", "Resume last stopped mission (--rescan to re-enumerate)")
+        t.add_row("", "")
+        t.add_row("[dim]HITL (during mission):[/dim]", "")
+        t.add_row("@<name> <msg>", "Send message to specific challenge")
+        t.add_row("<msg>", "Broadcast to all running challenges")
+        t.add_row("stop", "Gracefully stop mission")
+        t.add_row("help", "Show HITL commands")
+        t.add_row("", "")
+        t.add_row("[dim]HITL (fanout only):[/dim]", "")
+        t.add_row("logs <name> [n]", "Show challenge logs (last n lines)")
+        t.add_row("attach/detach <name>", "Live-follow / return to grid")
+        t.add_row("status <name>", "Detailed challenge status")
+        t.add_row("writeup <name>", "Regenerate writeup (solved only)")
+        t.add_row("ask <name> <question>", "Follow-up question to finished challenge")
+        t.add_row("extend <name|all>", "Extend timeout +30m")
+        t.add_row("ref <src> @<dst>", "Inject src's knowledge into dst")
         t.add_row("", "")
         t.add_row("[dim]Review:[/dim]", "")
         t.add_row("history", "Mission history")
@@ -1053,15 +1183,13 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
         t.add_row("replay [n]", "Re-run mission #n with same params")
         t.add_row("events [n]", "Last n domain events (default: 20)")
         t.add_row("blackboard", "Current blackboard state")
-        t.add_row("campaign", "Cross-mission knowledge (solved, infra, techniques)")
-        t.add_row("", "")
-        t.add_row("[dim]Natural Language:[/dim]", "")
-        t.add_row("<free text description>", "AI parses intent, confirms before run")
+        t.add_row("campaign", "Cross-mission knowledge")
         t.add_row("", "")
         t.add_row("[dim]Other:[/dim]", "")
+        t.add_row("<free text>", "AI parses intent, confirms before run")
         t.add_row("info", "MCP server info")
         t.add_row("clear", "Clear screen")
-        t.add_row("exit / quit / q / Ctrl+D", "Exit")
+        t.add_row("exit / Ctrl+D", "Exit")
         console.print(t)
 
     # ── Status ────────────────────────────────────────────────────
@@ -1073,6 +1201,7 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
         console.print(Panel(
             f"[bold]Model:[/bold]     {cfg['model']}\n"
             f"[bold]Topology:[/bold]  {cfg['topology']}\n"
+            f"[bold]Unlimited:[/bold] {'[bold yellow]ON[/bold yellow]' if cfg.get('unlimited') else '[dim]off[/dim]'}\n"
             f"[bold]Verbose:[/bold]   {cfg['verbose']}\n"
             f"[bold]API Key:[/bold]   {key_status}\n"
             f"[bold]Base URL:[/bold]  {url_display}\n"
@@ -1115,11 +1244,14 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
             "--topology", "-T", "--category", "-c", "--language", "-l",
             "--source", "-s", "--service", "--prompt", "-p", "--model", "-m",
         }
+        _KNOWN_BOOL_FLAGS = {"--unlimited"}
         i = 2
         while i < len(parts):
             tok = parts[i]
             if tok in _KNOWN_FLAGS:
                 i += 2  # skip flag + value
+            elif tok in _KNOWN_BOOL_FLAGS:
+                i += 1  # boolean flag, no value
             else:
                 # Found free-text after target — fall through to NL parser
                 return None
@@ -1147,6 +1279,9 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
             elif parts[i] in ("--model", "-m") and i + 1 < len(parts):
                 options["_model_override"] = parts[i + 1]
                 i += 2
+            elif parts[i] == "--unlimited":
+                options["unlimited"] = True
+                i += 1
             else:
                 i += 1
 
@@ -1182,24 +1317,342 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
 
     try:
         while True:
+            _resume_challenges: list[dict] | None = None
             try:
                 raw = await asyncio.get_event_loop().run_in_executor(
                     None, lambda: session.prompt(_prompt_html())
                 )
                 raw = raw.strip()
-            except (EOFError, KeyboardInterrupt):
+            except KeyboardInterrupt:
+                # Ctrl+C in empty REPL: just clear the line, don't exit
+                console.print()
+                continue
+            except EOFError:
+                # Ctrl+D: exit REPL
                 console.print("\n[dim]Goodbye.[/dim]")
                 break
 
             if not raw:
+                # Check if bg job finished while user was idle
+                if bg_job is not None and bg_job.task.done():
+                    try:
+                        report = bg_job.task.result()
+                        console.print(
+                            f"\n[bold green]Background mission "
+                            f"completed![/bold green] "
+                            f"({len(bg_job.live_events)} events)"
+                        )
+                        print_report(report)
+                        mission_history.append(report)
+                    except Exception as e:
+                        console.print(
+                            f"\n[bold red]Background mission "
+                            f"failed:[/bold red] {e}"
+                        )
+                    bg_job = None
                 continue
 
             lower = raw.lower()
             parts = lower.split()
             cmd = parts[0] if parts else ""
 
+            # ── Jobs — show background mission status ──────────
+            if cmd == "jobs":
+                if bg_job is None:
+                    console.print("[dim]No background jobs.[/dim]")
+                elif bg_job.task.done():
+                    try:
+                        report = bg_job.task.result()
+                        console.print(
+                            f"[bold green]Job completed:[/bold green]"
+                            f" {bg_job.description} "
+                            f"({len(bg_job.live_events)} events)"
+                        )
+                        print_report(report)
+                        mission_history.append(report)
+                    except Exception as e:
+                        console.print(
+                            f"[bold red]Job failed:[/bold red] {e}"
+                        )
+                    bg_job = None
+                else:
+                    elapsed = _time.monotonic() - bg_job.started_at
+                    console.print(
+                        f"[cyan]Running:[/cyan] {bg_job.description}"
+                        f" ({len(bg_job.live_events)} events, "
+                        f"{elapsed:.0f}s elapsed)"
+                    )
+                    # Show last 5 events
+                    for ev in bg_job.live_events[-5:]:
+                        name = type(ev).__name__
+                        detail = _event_detail(ev)
+                        console.print(
+                            f"  [dim]{name}: {detail[:60]}[/dim]"
+                        )
+                continue
+
+            # ── fg — re-attach to background mission ───────────
+            if cmd == "fg":
+                if bg_job is None:
+                    console.print(
+                        "[dim]No background job to attach.[/dim]"
+                    )
+                    continue
+                if bg_job.task.done():
+                    try:
+                        report = bg_job.task.result()
+                        console.print(
+                            "[bold green]Job already completed!"
+                            "[/bold green]"
+                        )
+                        print_report(report)
+                        mission_history.append(report)
+                    except Exception as e:
+                        console.print(
+                            f"[bold red]Job failed:[/bold red] {e}"
+                        )
+                    bg_job = None
+                    continue
+
+                # Re-enter HITL loop for the background job
+                console.print(
+                    f"[cyan]Re-attaching to: "
+                    f"{bg_job.description}[/cyan]"
+                )
+                console.print(
+                    "[dim]── HITL resumed ('bg' to background "
+                    "again) ──[/dim]"
+                )
+
+                # Reset bg_requested, set up new HITL reader
+                _bg_requested_fg = threading.Event()
+                _stop_fg = threading.Event()
+                _cancel_fg = bg_job.cancel_requested
+                _force_fg = bg_job.force_kill
+                _hitl_q = bg_job.hitl_queue
+                _op_q = bg_job.op_queue
+                _fg_loop = asyncio.get_event_loop()
+
+                def _hitl_reader_fg() -> None:
+                    from prompt_toolkit import PromptSession as _PS
+                    from prompt_toolkit.formatted_text import HTML as _H
+                    s: _PS[str] = _PS()
+                    while not _stop_fg.is_set():
+                        try:
+                            text = s.prompt(
+                                _H(
+                                    '<ansiyellow><b>hitl</b>'
+                                    '</ansiyellow> '
+                                    '<ansibrightblack>&gt;'
+                                    '</ansibrightblack> '
+                                ),
+                            )
+                            text = text.strip()
+                            if not text or _stop_fg.is_set():
+                                continue
+                            low = text.lower()
+                            if low in ("stop", "quit", "exit"):
+                                _cancel_fg.set()
+                                break
+                            if low == "bg":
+                                _bg_requested_fg.set()
+                                console.print(
+                                    "[cyan]Back to background."
+                                    "[/cyan]"
+                                )
+                                break
+                            if low == "help":
+                                console.print(
+                                    "[dim]HITL: @name msg | bg "
+                                    "| stop | help[/dim]"
+                                )
+                                continue
+                            _fg_loop.call_soon_threadsafe(
+                                _hitl_q.put_nowait, text,
+                            )
+                        except (EOFError, KeyboardInterrupt):
+                            _cancel_fg.set()
+                            break
+
+                t = threading.Thread(
+                    target=_hitl_reader_fg, daemon=True,
+                    name="hitl-reader-fg",
+                )
+                t.start()
+
+                fg_task = bg_job.task
+                bg_job_ref = bg_job
+                bg_job = None  # clear bg slot
+
+                # Run HITL loop for fg
+                while not fg_task.done():
+                    await _aio.sleep(0.3)
+                    while not _hitl_q.empty():
+                        try:
+                            msg = _hitl_q.get_nowait()
+                            _op_q.put_nowait(msg)
+                            # Don't show "queued" for display-only HITL commands
+                            _cmd0 = msg.split(None, 1)[0].lower() if msg.strip() else ""
+                            if _cmd0 not in ("status", "logs", "attach", "detach", "help"):
+                                console.print(
+                                    f"  [yellow]\U0001f4e8 queued:"
+                                    f"[/yellow] {msg[:80]}"
+                                )
+                        except _aio.QueueEmpty:
+                            break
+                    if _bg_requested_fg.is_set():
+                        break
+                    if _cancel_fg.is_set():
+                        if not fg_task.done():
+                            fg_task.cancel()
+                            try:
+                                await _aio.wait_for(
+                                    _aio.shield(fg_task),
+                                    timeout=5.0,
+                                )
+                            except (
+                                _aio.CancelledError,
+                                _aio.TimeoutError,
+                                Exception,
+                            ):
+                                pass
+                        break
+
+                _stop_fg.set()
+
+                if fg_task.done():
+                    try:
+                        report = fg_task.result()
+                        console.print(
+                            f"[dim]── "
+                            f"{len(bg_job_ref.live_events)} "
+                            f"events ──[/dim]"
+                        )
+                        print_report(report)
+                        mission_history.append(report)
+                    except (_aio.CancelledError, Exception) as e:
+                        console.print(
+                            f"[yellow]Mission ended: {e}[/yellow]"
+                        )
+                elif _bg_requested_fg.is_set():
+                    bg_job = bg_job_ref
+                    console.print(
+                        f"[cyan]Mission in background "
+                        f"({len(bg_job_ref.live_events)} events). "
+                        f"'fg' to re-attach.[/cyan]"
+                    )
+                continue
+
+            # ── Kill background job ────────────────────────────
+            if cmd == "kill":
+                if bg_job is None:
+                    console.print(
+                        "[dim]No background job to kill.[/dim]"
+                    )
+                else:
+                    bg_job.cancel_requested.set()
+                    if not bg_job.task.done():
+                        bg_job.task.cancel()
+                    console.print(
+                        "[yellow]Background job killed.[/yellow]"
+                    )
+                    bg_job = None
+                continue
+
+            # ── Skill management ──────────────────────────────────
+            if cmd == "skill":
+                skill_parts = raw.split(None, 2)
+                sub = skill_parts[1].lower() if len(skill_parts) > 1 else "list"
+
+                # Discover skills recursively from .claude/skills/ and ~/.claude/skills/
+                from pathlib import Path as _P
+                _project_root = _P(__file__).resolve().parent.parent
+                skill_dirs: list[tuple[str, _P, _P]] = []
+                seen_names: set[str] = set()
+                for base in [_project_root / ".claude" / "skills", _P.cwd() / ".claude" / "skills", _P.home() / ".claude" / "skills"]:
+                    if not base.is_dir():
+                        continue
+                    for sm in sorted(base.rglob("SKILL.md")):
+                        name = sm.parent.name
+                        if name not in seen_names:
+                            seen_names.add(name)
+                            skill_dirs.append((name, sm, base))
+
+                if sub == "list":
+                    if not skill_dirs:
+                        console.print(
+                            "[dim]No skills found.\n"
+                            "  Project: .claude/skills/<name>/SKILL.md\n"
+                            "  Global:  ~/.claude/skills/<name>/SKILL.md[/dim]"
+                        )
+                    else:
+                        t = Table(
+                            title="Skills", box=box.SIMPLE,
+                            title_style="bold cyan",
+                        )
+                        t.add_column("Name", style="bold green")
+                        t.add_column("Scope", style="dim")
+                        t.add_column("Description")
+                        for name, path, base in skill_dirs:
+                            scope = "global" if base == _P.home() / ".claude" / "skills" else "project"
+                            # Parse description from frontmatter
+                            desc = ""
+                            try:
+                                text = path.read_text(encoding="utf-8")
+                                if text.startswith("---"):
+                                    fm = text.split("---", 2)
+                                    if len(fm) >= 3:
+                                        for line in fm[1].splitlines():
+                                            if line.strip().startswith("description:"):
+                                                desc = line.split(":", 1)[1].strip().strip('"').strip("'")
+                                                break
+                            except Exception:
+                                pass
+                            t.add_row(
+                                name, scope,
+                                desc[:60] + ("..." if len(desc) > 60 else ""),
+                            )
+                        console.print(t)
+
+                elif sub == "info" and len(skill_parts) > 2:
+                    target = skill_parts[2].strip()
+                    found = None
+                    for name, path, base in skill_dirs:
+                        if name == target:
+                            found = path
+                            break
+                    if found:
+                        text = found.read_text(encoding="utf-8")
+                        # Show first 50 lines
+                        lines = text.splitlines()[:50]
+                        console.print(Panel(
+                            "\n".join(lines),
+                            title=f"[bold]{target}[/bold] SKILL.md",
+                            border_style="cyan",
+                        ))
+                        if len(text.splitlines()) > 50:
+                            console.print(
+                                f"[dim]... {len(text.splitlines()) - 50} more lines. "
+                                f"Full path: {found}[/dim]"
+                            )
+                    else:
+                        console.print(f"[red]Skill '{target}' not found.[/red]")
+
+                else:
+                    console.print(
+                        "[yellow]Usage: skill list | skill info <name>[/yellow]"
+                    )
+                continue
+
             # ── Exit ──────────────────────────────────────────────
             if cmd in ("exit", "quit", "q"):
+                if bg_job is not None and not bg_job.task.done():
+                    console.print(
+                        "[yellow]A mission is running in the "
+                        "background. 'kill' it first, or 'fg' "
+                        "to re-attach.[/yellow]"
+                    )
+                    continue
                 console.print("[dim]Goodbye.[/dim]")
                 break
 
@@ -1399,23 +1852,80 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                 else:
                     continue
 
+            # ── Resume ────────────────────────────────────────────
+            if cmd == "resume":
+                rescan = "--rescan" in raw or "-r" in raw.split()
+                last = await service.get_last_mission()
+                if last and last.mission_type:
+                    solved_n = last.blackboard_summary.get('challenges_solved', 0)
+                    console.print(
+                        f"[cyan]Resuming: {last.mission_type} → {last.target} "
+                        f"({last.events_count} events, {solved_n} solved)[/cyan]"
+                    )
+                    # Fast resume: inject known challenges to skip ENUMERATE+CLASSIFY
+                    _resume_challenges: list[dict] | None = None
+                    if not rescan and last.resume_challenges:
+                        _resume_challenges = last.resume_challenges
+                        console.print(
+                            f"[dim]Fast resume: reusing {len(_resume_challenges)} "
+                            f"known challenge(s), skipping ENUMERATE+CLASSIFY[/dim]"
+                        )
+                    elif rescan:
+                        console.print(
+                            "[dim]Full rescan: re-discovering all challenges[/dim]"
+                        )
+                    # Reconstruct the full command with original options
+                    replay_parts = [last.mission_type, last.target]
+                    if last.topology and last.topology != "ooda":
+                        replay_parts.extend(["--topology", last.topology])
+                    if last.prompt:
+                        replay_parts.extend(["--prompt", shlex.quote(last.prompt)])
+                    if last.model:
+                        replay_parts.extend(["--model", last.model])
+                    # Restore saved options (category, unlimited, etc.)
+                    for k, v in last.options.items():
+                        if k == "unlimited" and v:
+                            replay_parts.append("--unlimited")
+                        elif k == "category" and v:
+                            replay_parts.extend(["--category", str(v)])
+                        elif k == "language" and v:
+                            replay_parts.extend(["--language", str(v)])
+                    raw = " ".join(replay_parts)
+                    lower = raw.lower()
+                    cmd = lower.split()[0]
+                    # Fall through to mission execution
+                else:
+                    console.print("[dim]No mission to resume.[/dim]")
+                    continue
+
             # ── Set ───────────────────────────────────────────────
+            # set [-g] <key> <value>
+            # -g writes to global ~/.config/miya/config.toml
+            # without -g writes to .miya.toml in current directory
             if cmd == "set":
-                set_parts = raw.split(None, 2)
-                if len(set_parts) == 3:
-                    key, val = set_parts[1].lower(), set_parts[2]
-                    if key == "model":
-                        if val.lower() in ("opus", "sonnet", "haiku"):
-                            cfg["model"] = val.lower()
-                            console.print(f"[green]Model → {val.lower()}[/green]")
-                        else:
-                            console.print("[red]Use 'opus', 'sonnet', or 'haiku'.[/red]")
-                    elif key == "topology":
-                        if val in ("ooda", "attack_graph", "fanout"):
-                            cfg["topology"] = val
-                            console.print(f"[green]Topology → {val}[/green]")
-                        else:
-                            console.print("[red]Use 'ooda', 'attack_graph', or 'fanout'.[/red]")
+                set_parts = raw.split()
+                is_global = False
+                if len(set_parts) > 1 and set_parts[1] == "-g":
+                    is_global = True
+                    set_parts.pop(1)
+                # Re-parse after removing -g
+                set_tokens = []
+                skip_g = False
+                for tok in raw.split(None):
+                    if tok == "-g" and not skip_g:
+                        skip_g = True
+                        continue
+                    set_tokens.append(tok)
+
+                if len(set_tokens) >= 3:
+                    key = set_tokens[1].lower()
+                    val = " ".join(set_tokens[2:])
+
+                    # Apply to runtime
+                    if key == "model" and val.lower() in ("opus", "sonnet", "haiku"):
+                        cfg["model"] = val.lower()
+                    elif key == "topology" and val in ("ooda", "attack_graph", "fanout"):
+                        cfg["topology"] = val
                     elif key == "verbose":
                         val_lower = val.lower()
                         _valid_levels = {"info": _logging.INFO, "debug": _logging.DEBUG, "trace": TRACE,
@@ -1423,34 +1933,65 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                         if val_lower in _valid_levels:
                             setup_logging(level_override=_valid_levels[val_lower])
                             cfg["verbose"] = val_lower
-                            console.print(f"[green]Verbose → {val_lower}[/green]")
-                        else:
-                            console.print("[red]Use: info, debug, trace (or warning, error)[/red]")
+                    elif key == "unlimited":
+                        cfg["unlimited"] = val.lower() in ("true", "1", "on", "yes")
                     elif key == "api_key":
                         os.environ["ANTHROPIC_API_KEY"] = val
-                        console.print(f"[green]API key → {val[:8]}...[/green]")
                     elif key == "base_url":
                         os.environ["ANTHROPIC_BASE_URL"] = val
-                        console.print(f"[green]Base URL → {val}[/green]")
+
+                    # Persist
+                    msg = save_config(key, val, is_global=is_global)
+                    console.print(f"[green]{msg}[/green]")
+                elif len(set_tokens) == 2 and set_tokens[1].lower() == "show":
+                    saved = load_config()
+                    if saved:
+                        for k, v in saved.items():
+                            display_v = v[:8] + "..." if k == "api_key" else v
+                            console.print(f"  [cyan]{k}[/cyan] = {display_v}")
                     else:
-                        console.print(f"[red]Unknown: {key}. Try: model, topology, verbose, api_key, base_url[/red]")
+                        console.print("[dim]No persistent config.[/dim]")
                 else:
-                    console.print("[yellow]Usage: set <key> <value>[/yellow]")
+                    console.print(
+                        "[yellow]Usage: set [-g] <key> <value>\n"
+                        "       set show[/yellow]\n"
+                        "\n"
+                        "[bold]Available keys:[/bold]\n"
+                        "  [cyan]model[/cyan]      opus | sonnet | haiku\n"
+                        "  [cyan]topology[/cyan]   ooda | attack_graph | fanout\n"
+                        "  [cyan]verbose[/cyan]    info | debug | trace | warning | error\n"
+                        "  [cyan]unlimited[/cyan]  true | false  (no timeouts / iteration limits)\n"
+                        "  [cyan]api_key[/cyan]    <string>  (always saved to global)\n"
+                        "  [cyan]base_url[/cyan]   <url>     (always saved to global)\n"
+                        "\n"
+                        "[dim]  -g = global (~/.config/miya/config.toml)\n"
+                        "  Without -g = project (.miya.toml)[/dim]"
+                    )
                 continue
 
             # ── Mission execution ─────────────────────────────────
             parsed = _parse_mission_args(raw)
             if parsed is None:
                 # Not a structured command — try natural language understanding
-                nl_result = await _nl_parse_mission(raw, cfg, console, session)
+                try:
+                    nl_result = await _nl_parse_mission(raw, cfg, console, session)
+                except (KeyboardInterrupt, asyncio.CancelledError):
+                    console.print("\n[dim]Cancelled.[/dim]")
+                    continue
                 if nl_result is None:
                     continue
                 parsed = nl_result
 
             mission_type, target, topology, options = parsed
+            # Inject resume challenges to skip ENUMERATE+CLASSIFY
+            if _resume_challenges:
+                options["challenges"] = _resume_challenges
+                _resume_challenges = None
             mission_model = options.pop("_model_override", cfg["model"])
             mission_prompt = options.pop("_prompt", "")
             nl_confirmed = options.pop("_nl_confirmed", False)
+            if cfg.get("unlimited") or options.get("unlimited"):
+                options["unlimited"] = True
 
             kind_map = {"oneday": "service", "zeroday": "source"}
             target_kind = kind_map.get(mission_type, _detect_target_kind(target))
@@ -1463,35 +2004,63 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                     f"[bold]Topology:[/bold] {topology}",
                     f"[bold]Model:[/bold]    {mission_model}",
                 ]
+                if options.get("unlimited"):
+                    panel_lines.append("[bold yellow]Mode:[/bold yellow]    [bold yellow]UNLIMITED[/bold yellow] (no timeouts)")
                 if mission_prompt:
                     panel_lines.append(f"[bold]Prompt:[/bold]  {mission_prompt[:80]}")
-                if options:
-                    panel_lines.append(f"[bold]Options:[/bold]  {options}")
+                display_opts = {k: v for k, v in options.items() if k != "unlimited"}
+                if display_opts:
+                    panel_lines.append(f"[bold]Options:[/bold]  {display_opts}")
                 console.print(Panel(
                     "\n".join(panel_lines),
                     title="[bold cyan]Launching Mission[/bold cyan]",
                     border_style="cyan",
                 ))
 
-            # Live event table during execution
+            # ── Launch mission + enter HITL loop ─────────────
+            import signal
+            import time as _time
+
             live_events: list[DomainEvent] = []
+            op_queue: _aio.Queue[str] = _aio.Queue()
+            hitl_queue: _aio.Queue[str] = _aio.Queue()
+            stop_input = threading.Event()
+            _cancel_requested = threading.Event()
+            _force_kill = threading.Event()
+            _bg_requested = threading.Event()
+            loop = asyncio.get_event_loop()
 
             def _on_event(ev: DomainEvent) -> None:
                 live_events.append(ev)
-                name = type(ev).__name__
-                style = _EVENT_STYLES.get(name, "dim")
-                detail = _event_detail(ev)
-                console.print(
-                    f"  [{style}]{name:.<30s}[/{style}] "
-                    f"[dim]{getattr(ev, 'context', ''):>10s}[/dim]  "
-                    f"{detail[:60]}",
-                )
+                # Only print events when in foreground (not bg)
+                if bg_job is None:
+                    name = type(ev).__name__
+                    style = _EVENT_STYLES.get(name, "dim")
+                    detail = _event_detail(ev)
+                    console.print(
+                        f"  [{style}]{name:.<30s}[/{style}] "
+                        f"[dim]{getattr(ev, 'context', ''):>10s}[/dim]  "
+                        f"{detail[:60]}",
+                    )
 
-            # Create HITL operator queue
-            import asyncio as _aio
-            import threading
-            op_queue: _aio.Queue[str] = _aio.Queue()
-            loop = asyncio.get_event_loop()
+            # ── Progressive Ctrl+C state ─────────────────────
+            _last_sigint: list[float] = [0.0]
+
+            def _sigint_handler(signum: int, frame: Any) -> None:
+                import time as _t
+                now = _t.monotonic()
+                if _cancel_requested.is_set() and now - _last_sigint[0] < 3.0:
+                    _force_kill.set()
+                    console.print(
+                        "\n[bold red]Force stopping...[/bold red]"
+                    )
+                else:
+                    _cancel_requested.set()
+                    _last_sigint[0] = now
+                    console.print(
+                        "\n[yellow]Stopping mission... "
+                        "(Ctrl+C again to force)[/yellow]"
+                    )
 
             async def _execute_mission() -> MissionReport:
                 return await service.execute(
@@ -1506,78 +2075,260 @@ async def _interactive_loop(db: str, model: str = "opus") -> None:
                     **options,
                 )
 
-            # Thread-safe HITL input: one dedicated thread reads stdin,
-            # posts to an asyncio.Queue, and exits when stop_event is set.
-            # IMPORTANT: Use a SEPARATE PromptSession — prompt_toolkit's
-            # PromptSession is not thread-safe for concurrent .prompt() calls.
-            hitl_queue: _aio.Queue[str] = _aio.Queue()
-            stop_input = threading.Event()
-
             def _hitl_reader() -> None:
-                """Blocking input reader running in a dedicated thread."""
-                # Separate session avoids concurrent .prompt() on main session
-                from prompt_toolkit import PromptSession as _PS
-                from prompt_toolkit.formatted_text import HTML as _HTML
-                hitl_session: _PS[str] = _PS()
+                """Blocking input reader running in a dedicated thread.
+
+                Uses select() + stdin.readline() instead of prompt_toolkit
+                to avoid terminal control conflicts with Rich output during
+                fanout missions.  select() with 0.5s timeout lets us check
+                stop_input periodically so the thread exits cleanly when the
+                mission ends (no stale readline blocking stdin for the REPL).
+                """
+                import select as _sel
+                import sys as _sys
+
+                # Restore sane terminal settings.  prompt_toolkit (used by
+                # the REPL) puts the terminal in raw/application mode which
+                # may disable ICRNL (CR→NL translation).  Without this,
+                # Enter sends \r that readline() can't see as a line
+                # terminator, so keystrokes echo as ^M.
+                try:
+                    import termios
+                    fd = _sys.stdin.fileno()
+                    attrs = termios.tcgetattr(fd)
+                    # Ensure ICRNL (map CR to NL on input) is set
+                    attrs[0] |= termios.ICRNL
+                    # Ensure ECHO and ICANON (canonical/cooked mode) are set
+                    attrs[3] |= termios.ECHO | termios.ICANON
+                    termios.tcsetattr(fd, termios.TCSANOW, attrs)
+                except (ImportError, termios.error, OSError):
+                    pass  # non-POSIX or no tty — best-effort
+
                 while not stop_input.is_set():
                     try:
-                        text = hitl_session.prompt(
-                            _HTML(
-                                '<ansiyellow><b>hitl</b></ansiyellow> '
-                                '<ansibrightblack>&gt;</ansibrightblack> '
-                            ),
-                        )
+                        _sys.stderr.write("\033[33mhitl\033[0m > ")
+                        _sys.stderr.flush()
+                        # Poll stdin with timeout to allow clean exit
+                        while not stop_input.is_set():
+                            rlist, _, _ = _sel.select(
+                                [_sys.stdin], [], [], 0.5,
+                            )
+                            if rlist:
+                                break
+                        if stop_input.is_set():
+                            break
+                        text = _sys.stdin.readline()
+                        if not text:
+                            # EOF (Ctrl+D)
+                            _cancel_requested.set()
+                            break
                         text = text.strip()
-                        if text and not stop_input.is_set():
-                            loop.call_soon_threadsafe(hitl_queue.put_nowait, text)
+                        if not text or stop_input.is_set():
+                            continue
+                        low = text.lower()
+                        if low in ("stop", "quit", "exit"):
+                            _cancel_requested.set()
+                            console.print(
+                                "[yellow]Stopping mission...[/yellow]"
+                            )
+                            continue
+                        if low == "bg":
+                            _bg_requested.set()
+                            console.print(
+                                "[cyan]Sending mission to background... "
+                                "('fg' to re-attach, 'jobs' to check)"
+                                "[/cyan]"
+                            )
+                            break  # exit reader thread
+                        if low == "help":
+                            console.print(
+                                "[dim]── HITL Commands ──[/dim]\n"
+                                "  [yellow]bg[/yellow]"
+                                "                     → background, "
+                                "return to REPL\n"
+                                "  [yellow]stop[/yellow]"
+                                "                   → cancel mission\n"
+                                "  [yellow]status[/yellow]"
+                                "                 → reprint panel grid\n"
+                                "  [yellow]status <name>[/yellow]"
+                                "           → detailed challenge info\n"
+                                "  [yellow]logs <name> [n][/yellow]"
+                                "         → show last n log lines "
+                                "(default 30)\n"
+                                "  [yellow]attach <name>[/yellow]"
+                                "           → live-follow challenge logs\n"
+                                "  [yellow]detach[/yellow]"
+                                "                 → return to grid view\n"
+                                "  [yellow]writeup <name>[/yellow]"
+                                "          → regenerate writeup "
+                                "(solved only)\n"
+                                "  [yellow]ask <name> <msg>[/yellow]"
+                                "        → follow-up question to "
+                                "finished challenge\n"
+                                "  [yellow]extend <name|all>[/yellow]"
+                                "       → extend timeout +30m\n"
+                                "  [yellow]ref <src> @<dst>[/yellow]"
+                                "        → inject src knowledge "
+                                "into dst\n"
+                                "  [yellow]@<name> <msg>[/yellow]"
+                                "           → send to specific "
+                                "challenge\n"
+                                "  [yellow]<msg>[/yellow]"
+                                "                   → broadcast to all\n"
+                                "  [yellow]help[/yellow]"
+                                "                   → this message"
+                            )
+                            continue
+                        loop.call_soon_threadsafe(
+                            hitl_queue.put_nowait, text,
+                        )
                     except (EOFError, KeyboardInterrupt):
+                        _cancel_requested.set()
                         break
 
-            try:
-                console.print("[dim]── Events (type to inject HITL, Ctrl+C to cancel) ──[/dim]")
-                mission_task = _aio.create_task(_execute_mission())
-
-                # Start HITL reader in a daemon thread (exits with process)
-                input_thread = threading.Thread(
-                    target=_hitl_reader, daemon=True, name="hitl-reader",
-                )
-                input_thread.start()
-
-                # Main loop: transfer hitl_queue → op_queue, wait for mission
+            async def _run_hitl_loop(
+                mission_task: _aio.Task[MissionReport],
+            ) -> str:
+                """HITL main loop. Returns outcome: 'done'|'bg'|'cancel'."""
                 while not mission_task.done():
-                    # Wait a bit, then drain any HITL input
                     await _aio.sleep(0.3)
+
+                    # Drain HITL input → op_queue
                     while not hitl_queue.empty():
                         try:
                             msg = hitl_queue.get_nowait()
                             op_queue.put_nowait(msg)
-                            console.print(f"  [yellow]📨 queued:[/yellow] {msg[:80]}")
+                            # Don't show "queued" for display-only HITL commands
+                            _cmd0 = msg.split(None, 1)[0].lower() if msg.strip() else ""
+                            if _cmd0 not in ("status", "logs", "attach", "detach", "help"):
+                                console.print(
+                                    f"  [yellow]\U0001f4e8 queued:"
+                                    f"[/yellow] {msg[:80]}"
+                                )
                         except _aio.QueueEmpty:
                             break
 
-                # Signal input thread to stop (it will exit on next prompt or EOFError)
+                    if _bg_requested.is_set():
+                        return "bg"
+
+                    if _cancel_requested.is_set():
+                        if not mission_task.done():
+                            mission_task.cancel()
+                            try:
+                                await _aio.wait_for(
+                                    mission_task,
+                                    timeout=5.0,
+                                )
+                            except (
+                                _aio.CancelledError,
+                                _aio.TimeoutError,
+                                Exception,
+                            ):
+                                pass
+                        return "cancel"
+
+                    if _force_kill.is_set():
+                        if not mission_task.done():
+                            mission_task.cancel()
+                            # Don't wait — force immediate return
+                        return "cancel"
+
+                return "done"
+
+            # ── Start mission ─────────────────────────────────
+            prev_handler = signal.signal(signal.SIGINT, _sigint_handler)
+
+            try:
+                console.print(
+                    "[dim]── Events (HITL: 'bg' background | "
+                    "'stop' cancel | Ctrl+C stop) ──[/dim]"
+                )
+                mission_task = _aio.create_task(_execute_mission())
+
+                input_thread = threading.Thread(
+                    target=_hitl_reader, daemon=True,
+                    name="hitl-reader",
+                )
+                input_thread.start()
+
+                outcome = await _run_hitl_loop(mission_task)
+
                 stop_input.set()
 
-                report = await mission_task
-                console.print(f"[dim]── {len(live_events)} events ──[/dim]")
-                console.print()
-                print_report(report)
-                mission_history.append(report)
-                if report.error:
-                    console.print(f"[yellow]Mission ended with error: {report.error}[/yellow]")
-
-            except KeyboardInterrupt:
-                console.print("\n[yellow]Mission cancelled by user.[/yellow]")
-                stop_input.set()
-                if not mission_task.done():
-                    mission_task.cancel()
+                if outcome == "done":
                     try:
-                        await mission_task
-                    except (asyncio.CancelledError, Exception):
-                        pass
+                        report = mission_task.result()
+                        console.print(
+                            f"[dim]── {len(live_events)} events "
+                            f"──[/dim]"
+                        )
+                        console.print()
+                        print_report(report)
+                        mission_history.append(report)
+                        if report.error:
+                            console.print(
+                                f"[yellow]Mission ended with "
+                                f"error: {report.error}[/yellow]"
+                            )
+                    except Exception as e:
+                        console.print(
+                            f"[bold red]Mission error:"
+                            f"[/bold red] {e}"
+                        )
+
+                elif outcome == "bg":
+                    # Store job for fg later. Task keeps running.
+                    bg_job = _BackgroundJob(
+                        task=mission_task,
+                        op_queue=op_queue,
+                        hitl_queue=hitl_queue,
+                        live_events=live_events,
+                        stop_input=stop_input,
+                        cancel_requested=_cancel_requested,
+                        force_kill=_force_kill,
+                        description=(
+                            f"{mission_type} → {target} "
+                            f"[{topology}]"
+                        ),
+                        started_at=_time.monotonic(),
+                    )
+                    console.print(
+                        f"[cyan]Mission running in background "
+                        f"({len(live_events)} events so far). "
+                        f"'fg' to re-attach, 'jobs' to check."
+                        f"[/cyan]"
+                    )
+
+                elif outcome == "cancel":
+                    # Save partial report so history/events/blackboard work
+                    partial = MissionReport(
+                        mission_type=mission_type,
+                        target=target,
+                        topology=topology,
+                        events_count=len(live_events),
+                        status="stopped",
+                        model=mission_model,
+                        prompt=mission_prompt,
+                    )
+                    mission_history.append(partial)
+                    console.print(
+                        f"[yellow]Mission stopped "
+                        f"({len(live_events)} events). "
+                        f"'resume' to continue.[/yellow]"
+                    )
+
+            except _aio.CancelledError:
+                stop_input.set()
+                console.print(
+                    f"[yellow]Mission cancelled "
+                    f"({len(live_events)} events). "
+                    f"'resume' to continue.[/yellow]"
+                )
             except Exception as e:
                 console.print(f"[bold red]Error:[/bold red] {e}")
                 stop_input.set()
+            finally:
+                signal.signal(signal.SIGINT, prev_handler)
 
             console.print()
 

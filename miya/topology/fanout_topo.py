@@ -44,6 +44,7 @@ from miya.shared.events import (
     ChallengeIdentified,
     ChallengeClassified,
     PhaseTransition,
+    TargetUnreachable,
 )
 from miya.shared.ports import EventStorePort
 from miya.shared.types import Mission, MissionType, Target
@@ -193,14 +194,16 @@ class FanoutTopology:
 
     def __init__(
         self,
-        max_parallel: int = 3,
+        max_parallel: int | None = None,
         max_iterations_per_challenge: int = 5,
-        per_challenge_timeout: float = 1800.0,  # 30 minutes default
+        per_challenge_timeout: float | None = None,
         coordinator: Any | None = None,
     ) -> None:
-        self._max_parallel = max_parallel
+        from miya.topology.base import _get_topology_config
+        cfg = _get_topology_config()
+        self._max_parallel = max_parallel if max_parallel is not None else cfg["fanout_parallel"]
         self._max_iter = max_iterations_per_challenge
-        self._per_challenge_timeout = per_challenge_timeout
+        self._per_challenge_timeout = per_challenge_timeout if per_challenge_timeout is not None else float(cfg["fanout_timeout"])
         self._coordinator = coordinator
 
     @property
@@ -227,6 +230,7 @@ class FanoutTopology:
         from miya.topology.ooda import OODATopology
 
         # ── Mission Start ─────────────────────────────────────────
+        import json as _json
         start_event = MissionStarted(
             aggregate_id=mission.id,
             aggregate_type="Mission",
@@ -234,6 +238,13 @@ class FanoutTopology:
             target_uri=mission.target.uri,
             topology=self.name,
             mission=mission.mission_type.value,
+            prompt=mission.prompt,
+            model=mission.options.get("_model_override", ""),
+            options_json=_json.dumps(
+                {k: v for k, v in mission.options.items()
+                 if not k.startswith("_") and isinstance(v, (str, int, float, bool))},
+                ensure_ascii=False,
+            ),
         )
         yield start_event
         blackboard.apply(start_event)
@@ -270,8 +281,8 @@ class FanoutTopology:
                 ch_name = ch.get("name", "challenge")
                 ch_target = ch.get("target", mission.target.uri)
                 ch_cat = ch.get("category", "")
-                # Merge file_paths from PREPARE discovery
-                ch_files = prepare_file_map.get(ch_name, [])
+                # Merge file_paths from PREPARE discovery (or historical data)
+                ch_files = prepare_file_map.get(ch_name, []) or ch.get("file_paths", [])
                 challenges.append({
                     "name": ch_name,
                     "target": ch_target,
@@ -279,29 +290,50 @@ class FanoutTopology:
                     "points": ch.get("points", 0),
                     "file_paths": ch_files,
                 })
-                # Only emit ChallengeIdentified if PREPARE didn't already
-                if ch_name not in prepare_file_map:
-                    ev = ChallengeIdentified(
-                        challenge_name=ch_name,
-                        category=ch_cat,
-                        points=ch.get("points", 0),
-                        context="ctf",
-                        mission="ctf",
-                    )
-                    yield ev
-                    blackboard.apply(ev)
+                # Always emit ChallengeIdentified with target_url.
+                # If PREPARE already emitted one (without target_url),
+                # replace it in the blackboard.
+                if ch_name in prepare_file_map:
+                    blackboard.challenges = [
+                        cv for cv in blackboard.challenges
+                        if cv.name != ch_name
+                    ]
+                ev = ChallengeIdentified(
+                    challenge_name=ch_name,
+                    category=ch_cat,
+                    points=ch.get("points", 0),
+                    file_paths=tuple(ch_files) if ch_files else (),
+                    target_url=ch_target,
+                    context="ctf",
+                    mission="ctf",
+                )
+                yield ev
+                blackboard.apply(ev)
 
             # ── Pre-flight connectivity probe ──────────────────
             reachable, unreachable = await self._probe_targets(challenges)
-            if unreachable:
-                logger.warning(
-                    "Unreachable challenges: %s",
-                    ", ".join(f"{c['name']} ({c['target']})" for c in unreachable),
-                )
             if reachable:
                 logger.info(
                     "Pre-flight: %d/%d targets reachable",
                     len(reachable), len(challenges),
+                )
+            if unreachable:
+                # Yield TargetUnreachable events so the operator sees them
+                for uc in unreachable:
+                    ev = TargetUnreachable(
+                        challenge_name=uc["name"],
+                        target_url=uc.get("target", ""),
+                        error="TCP connect failed",
+                        aggregate_id=mission.id,
+                        mission=mission.mission_type.value,
+                    )
+                    yield ev
+                    blackboard.apply(ev)
+
+                # ── HITL decision: block until operator responds ──
+                challenges = await self._handle_unreachable(
+                    challenges, reachable, unreachable,
+                    operator_queue, mission,
                 )
         else:
             # No pre-defined list — discover via agent
@@ -374,10 +406,24 @@ class FanoutTopology:
 
         # Skip already-solved challenges (campaign awareness)
         if isinstance(campaign, Campaign):
-            unsolved = [c for c in challenges if not campaign.is_solved(c["name"])]
-            skipped = len(challenges) - len(unsolved)
-            if skipped:
-                logger.info("Skipping %d already-solved challenge(s)", skipped)
+            unsolved = []
+            skipped_solved = 0
+            for c in challenges:
+                if campaign.is_solved(c["name"]):
+                    skipped_solved += 1
+                    continue
+                # Log previously attempted challenges for operator awareness
+                cp = campaign.get_checkpoint(c["name"])
+                if cp:
+                    logger.info(
+                        "Retrying challenge %s (previous: %s — %s)",
+                        c["name"], cp.get("status", "?"), cp.get("reason", ""),
+                    )
+                unsolved.append(c)
+            if skipped_solved:
+                logger.info("Skipping %d already-solved challenge(s)", skipped_solved)
+            # Clear old checkpoints for challenges we're about to retry
+            campaign.clear_checkpoints()
             challenges = unsolved
 
         if not challenges:
@@ -398,9 +444,51 @@ class FanoutTopology:
             mission=mission.mission_type.value,
         )
         logger.info(
-            "▶ FAN-OUT — %d challenges, %d parallel slots",
+            "▶ FAN-OUT — %d challenges, %d parallel slots, timeout %dm",
             len(challenges), self._max_parallel,
+            self._per_challenge_timeout / 60,
         )
+
+        # ── Rich Live display for parallel progress ───────────
+        from miya.topology.fanout_display import FanoutDisplay
+        display = FanoutDisplay(
+            [dict(ch, _max_iter=self._max_iter) for ch in challenges],
+            max_columns=self._max_parallel,
+            timeout=self._per_challenge_timeout,
+        )
+
+        def _on_progress(challenge_name: str, **kwargs: Any) -> None:
+            """Callback from sub-OODAs to update display state."""
+            display.update(challenge_name, **kwargs)
+
+        def _on_log(challenge_name: str, line: str) -> None:
+            """Callback from sub-OODAs to capture log lines."""
+            display.capture_log(challenge_name, line)
+
+        # ── Per-challenge HITL queues ─────────────────────────
+        ch_queues: dict[str, asyncio.Queue[str]] = {
+            ch["name"]: asyncio.Queue() for ch in challenges
+        }
+
+        # ── Per-challenge event storage (for writeup regeneration) ──
+        ch_events: dict[str, list[DomainEvent]] = {
+            ch["name"]: [] for ch in challenges
+        }
+        # Per-challenge metadata (target, approach) for writeup
+        ch_meta: dict[str, dict[str, str]] = {
+            ch["name"]: {
+                "target": ch.get("target", mission.target.uri),
+                "approach": "",
+                "flag": "",
+            }
+            for ch in challenges
+        }
+
+        # ── Per-challenge timeout extension events ────────────
+        # Maps challenge_name → asyncio.Event that's set to cancel timeout
+        timeout_extensions: dict[str, asyncio.Event] = {
+            ch["name"]: asyncio.Event() for ch in challenges
+        }
 
         # Semaphore for concurrency control
         sem = asyncio.Semaphore(self._max_parallel)
@@ -409,20 +497,37 @@ class FanoutTopology:
         # Event types from sub-OODA that should NOT pollute the main mission
         _SUB_MISSION_FILTER = {"mission.started", "mission.completed", "mission.failed"}
 
+        # ── Timeout warning threshold ─────────────────────────
+        _WARN_BEFORE = 300.0  # warn 5 minutes before timeout
+
         async def _solve_challenge(challenge: dict[str, Any]) -> None:
             """Solve a single challenge using a dedicated OODA loop."""
+            import time as _time
             async with sem:
                 ch_name = challenge["name"]
                 ch_cat = challenge.get("category", "")
-                logger.info("  → Solving: %s (%s)", ch_name, ch_cat or "unknown")
+                now = _time.monotonic()
+                timeout_deadline = now + self._per_challenge_timeout
 
-                # Create sub-mission for this challenge
-                # Use per-challenge target URL if available, else fall back to mission target
+                display.update(ch_name, status="running", started_at=now)
+                display.mark_timeout_at(ch_name, timeout_deadline)
+                display.log_event(f"\u2192 Solving: {ch_name} ({ch_cat or 'unknown'})")
+
                 ch_target = challenge.get("target", mission.target.uri)
                 ch_files = challenge.get("file_paths", [])
 
-                # Build challenge-specific prompt (NO general instructions leak)
+                is_whitebox = challenge.get("_whitebox", False)
                 sub_prompt = f"Solve challenge: {ch_name}."
+                if is_whitebox:
+                    sub_prompt += (
+                        "\n\n\u26a0 WHITEBOX MODE: The target service is unreachable. "
+                        "Analyze source code ONLY. Find vulnerabilities, construct "
+                        "exploit payloads, and determine the flag from static analysis. "
+                        "Do NOT attempt network connections to the target."
+                    )
+                    original_target = challenge.get("_original_target", "")
+                    if original_target:
+                        sub_prompt += f"\nOriginal target (offline): {original_target}"
                 if ch_files:
                     sub_prompt += f"\nChallenge attachments: {', '.join(ch_files)}"
 
@@ -440,23 +545,19 @@ class FanoutTopology:
                 sub_mission.start()
 
                 sub_bb = Blackboard()
-                # Seed sub-blackboard with challenge context
                 if ch_files:
                     from miya.shared.blackboard import ChallengeView
                     sub_bb.challenges.append(ChallengeView(
-                        name=ch_name,
-                        category=ch_cat,
+                        name=ch_name, category=ch_cat,
                         file_paths=tuple(ch_files),
                     ))
                 if ch_cat:
                     from miya.shared.blackboard import ClassificationView
                     sub_bb.classification = ClassificationView(
-                        category=ch_cat,
-                        confidence=0.8,
+                        category=ch_cat, confidence=0.8,
                         reasoning="from enumerate phase",
                     )
 
-                # Select agent subset based on category
                 sub_agents = agents
                 if ch_cat:
                     from miya.topology.ooda import OODATopology as _OT
@@ -464,32 +565,140 @@ class FanoutTopology:
                     if direct:
                         sub_agents = direct
 
+                # Per-challenge HITL queue
+                ch_op_queue = ch_queues.get(ch_name)
+
                 ooda = OODATopology(
                     max_iterations=self._max_iter,
                     coordinator=self._coordinator,
+                    challenge_tag=ch_name,
+                    on_progress=_on_progress,
+                    on_log=_on_log,
                 )
 
-                try:
-                    async def _run_ooda() -> None:
-                        async for ev in ooda.execute(
-                            sub_mission, sub_bb, sub_agents, event_store,
-                            campaign=campaign,
-                        ):
-                            # Filter out sub-mission lifecycle events to avoid
-                            # polluting the parent mission's event stream (BUG-2)
-                            if ev.__class__.event_type not in _SUB_MISSION_FILTER:
-                                await event_queue.put(ev)
+                async def _run_ooda() -> None:
+                    from miya.shared.events import ChallengeSolved
+                    _ch_solved = False
+                    async for ev in ooda.execute(
+                        sub_mission, sub_bb, sub_agents, event_store,
+                        operator_queue=ch_op_queue,
+                        campaign=campaign,
+                    ):
+                        # Store per-challenge events for writeup regeneration
+                        ch_events[ch_name].append(ev)
+                        if ev.__class__.event_type not in _SUB_MISSION_FILTER:
+                            await event_queue.put(ev)
+                        if isinstance(ev, ChallengeSolved):
+                            _ch_solved = True
+                            ch_meta[ch_name]["flag"] = ev.flag
+                            ch_meta[ch_name]["approach"] = ev.approach
+                            display.update(ch_name, status="solved",
+                                           flag=ev.flag, phase="DONE")
+                            _elapsed = display.get_elapsed(ch_name)
+                            display.log_event(
+                                f"\u2713 {ch_name} SOLVED: {ev.flag[:40]}"
+                                f"  ({_elapsed})"
+                            )
+                    # OODA exhausted without solving — checkpoint for resume
+                    if not _ch_solved and isinstance(campaign, Campaign):
+                        campaign.record_checkpoint(
+                            ch_name, "exhausted",
+                            reason=f"OODA loop exhausted after {ooda._max_iterations} iterations",
+                            mission_id=sub_mission.id,
+                        )
 
-                    await asyncio.wait_for(
-                        _run_ooda(),
-                        timeout=self._per_challenge_timeout,
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "Challenge %s timed out after %.0fs",
-                        ch_name, self._per_challenge_timeout,
-                    )
+                # ── Run with timeout + renewal ────────────────
+                ooda_task = asyncio.create_task(_run_ooda())
+                extend_event = timeout_extensions[ch_name]
+                warned = False
+
+                try:
+                    while not ooda_task.done():
+                        remaining = timeout_deadline - _time.monotonic()
+
+                        if remaining <= 0:
+                            # Timeout expired — notify and wait for extension
+                            display.update(ch_name, status="timeout", phase="TIMEOUT")
+                            display.log_event(
+                                f"\u23f0 {ch_name}: timeout! "
+                                f"Type 'extend {ch_name}' to add 30m"
+                            )
+
+                            # Wait up to 60s for an extend command
+                            extend_event.clear()
+                            try:
+                                await asyncio.wait_for(
+                                    extend_event.wait(), timeout=60.0,
+                                )
+                                # Extended! Reset deadline
+                                timeout_deadline = _time.monotonic() + 1800.0
+                                display.mark_timeout_at(ch_name, timeout_deadline)
+                                display.update(ch_name, status="running",
+                                               phase=display._states[ch_name].phase
+                                               if ch_name in display._states else "ACT")
+                                display.log_event(
+                                    f"\u27f3 {ch_name}: extended +30m"
+                                )
+                                warned = False
+                                continue
+                            except asyncio.TimeoutError:
+                                # No extension — cancel the task
+                                ooda_task.cancel()
+                                try:
+                                    await ooda_task
+                                except (asyncio.CancelledError, Exception):
+                                    pass
+                                _elapsed = display.get_elapsed(ch_name)
+                                display.log_event(
+                                    f"\u274c {ch_name}: timed out (no extension)"
+                                    f"  ({_elapsed})"
+                                )
+                                logger.warning(
+                                    "Challenge %s timed out after %.0fs (no extension)",
+                                    ch_name, self._per_challenge_timeout,
+                                )
+                                # Save checkpoint so resume skips this
+                                if isinstance(campaign, Campaign):
+                                    campaign.record_checkpoint(
+                                        ch_name, "timeout",
+                                        reason=f"timed out after {self._per_challenge_timeout:.0f}s",
+                                        mission_id=mission.id,
+                                    )
+                                return
+
+                        # Warn before timeout
+                        if not warned and remaining <= _WARN_BEFORE:
+                            display.log_event(
+                                f"\u26a0 {ch_name}: {remaining / 60:.0f}m remaining"
+                            )
+                            warned = True
+
+                        # Wait for task or check interval
+                        wait_time = min(remaining, 30.0)
+                        done, _ = await asyncio.wait(
+                            {ooda_task}, timeout=max(wait_time, 1.0),
+                        )
+                        if done:
+                            # Propagate any exception
+                            ooda_task.result()
+
+                except asyncio.CancelledError:
+                    ooda_task.cancel()
+                    try:
+                        await ooda_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    raise
                 except Exception:
+                    display.update(ch_name, status="failed", phase="FAILED")
+                    _elapsed = display.get_elapsed(ch_name)
+                    display.log_event(f"\u274c {ch_name} failed  ({_elapsed})")
+                    if isinstance(campaign, Campaign):
+                        campaign.record_checkpoint(
+                            ch_name, "failed",
+                            reason="exception during OODA execution",
+                            mission_id=mission.id,
+                        )
                     logger.error("Challenge %s failed", ch_name, exc_info=True)
 
         # Launch all challenge solvers
@@ -498,7 +707,6 @@ class FanoutTopology:
             for c in challenges
         ]
 
-        # Use a sentinel to signal completion instead of polling (BUG-1 fix)
         _SENTINEL = None
 
         async def _wait_all() -> None:
@@ -507,15 +715,355 @@ class FanoutTopology:
 
         waiter = asyncio.create_task(_wait_all())
 
-        # Drain events until sentinel received — no race condition
-        while True:
-            ev = await event_queue.get()
-            if ev is None:
-                break
-            yield ev
-            blackboard.apply(ev)
+        # ── HITL router: dispatch operator messages ───────────
+        async def _hitl_router() -> None:
+            """Route HITL messages to per-challenge queues or handle commands."""
+            if operator_queue is None:
+                return
+            while True:
+                try:
+                    msg = await asyncio.wait_for(
+                        operator_queue.get(), timeout=1.0,
+                    )
+                except asyncio.TimeoutError:
+                    # Check if all tasks are done
+                    if all(t.done() for t in tasks):
+                        return
+                    continue
+                except asyncio.CancelledError:
+                    return
 
-        await waiter  # ensure cleanup
+                msg = msg.strip()
+                if not msg:
+                    continue
+
+                # ── Display commands ──────────────────────
+                parts = msg.split(None, 1)
+                cmd = parts[0].lower()
+
+                if cmd == "help":
+                    display.log_event("── HITL Commands ──")
+                    display.log_event("  status              reprint panel grid")
+                    display.log_event("  status <name>       detailed challenge info")
+                    display.log_event("  logs <name> [n]     show last n log lines (default 30)")
+                    display.log_event("  attach <name>       live-follow a challenge's logs")
+                    display.log_event("  detach              return to grid view")
+                    display.log_event("  writeup <name>      regenerate writeup (solved only)")
+                    display.log_event("  ask <name> <msg>    follow-up question to a finished challenge")
+                    display.log_event("  extend <name|all>   extend timeout +30m")
+                    display.log_event("  ref <src> @<dst>    inject src's knowledge into dst")
+                    display.log_event("  @<name> <msg>       send message to specific challenge")
+                    display.log_event("  <msg>               broadcast to all running")
+                    display.log_event("  stop                cancel entire mission")
+                    continue
+
+                if cmd == "status" and len(parts) == 1:
+                    # No args: reprint the panel grid
+                    display._refresh(force=True)
+                    continue
+
+                if cmd == "status" and len(parts) > 1:
+                    name = parts[1].strip()
+                    state = display._states.get(name)
+                    if state:
+                        display.log_event(
+                            f"── {state.status_icon} {name} ──"
+                        )
+                        display.log_event(
+                            f"  Category: {state.category or '?'} | "
+                            f"Phase: {state.phase} | "
+                            f"Iter: {state.iteration}/{state.max_iterations}"
+                        )
+                        display.log_event(
+                            f"  Status: {state.status} | "
+                            f"Elapsed: {state.elapsed} | "
+                            f"Remaining: {state.remaining_str or 'N/A'}"
+                        )
+                        if state.flag:
+                            display.log_event(f"  Flag: {state.flag}")
+                        if state.last_activity:
+                            display.log_event(
+                                f"  Last: {state.last_activity}"
+                            )
+                    else:
+                        display.log_event(
+                            f"Unknown: {name}. "
+                            f"Available: {', '.join(display.challenge_names)}"
+                        )
+                    continue
+
+                if cmd == "attach" and len(parts) > 1:
+                    display.attach(parts[1].strip())
+                    continue
+
+                if cmd == "detach":
+                    display.detach()
+                    continue
+
+                if cmd == "logs" and len(parts) == 1:
+                    # No args: list all challenges with status
+                    display.log_event("── All Challenges ──")
+                    for n, s in display._states.items():
+                        line = (
+                            f"  {s.status_icon} {n:20s} "
+                            f"[{s.status:10s}] {s.phase:10s}"
+                        )
+                        if s.flag:
+                            line += f"  flag={s.flag[:25]}"
+                        if s.elapsed:
+                            line += f"  {s.elapsed}"
+                        log_count = len(s.log_buffer)
+                        line += f"  ({log_count} log lines)"
+                        display.log_event(line)
+                    continue
+
+                if cmd == "logs" and len(parts) > 1:
+                    log_args = parts[1].strip().split()
+                    name = log_args[0]
+                    n = 30
+                    if len(log_args) > 1:
+                        try:
+                            n = int(log_args[1])
+                        except ValueError:
+                            pass
+                    state = display._states.get(name)
+                    if state:
+                        # Show status header for any state
+                        hdr = f"── {state.status_icon} {name}"
+                        hdr += f" [{state.status.upper()}]"
+                        if state.flag:
+                            hdr += f"  flag={state.flag[:30]}"
+                        hdr += f"  {state.elapsed} ──"
+                        display.log_event(hdr)
+                    lines = display.get_logs(name, n=n)
+                    if lines:
+                        for line in lines:
+                            display.log_event(line)
+                    else:
+                        display.log_event("  (no logs)")
+                    display.log_event(f"  ({len(lines)} lines shown)")
+                    continue
+
+                if cmd == "extend":
+                    target_name = parts[1].strip() if len(parts) > 1 else "all"
+                    ext_parts = target_name.split()
+                    name = ext_parts[0]
+                    # Parse optional minutes: extend <name> [min]
+                    # For now, just signal the event
+                    if name.lower() == "all":
+                        for evt in timeout_extensions.values():
+                            evt.set()
+                        display.log_event("Extended all challenges +30m")
+                    elif name in timeout_extensions:
+                        timeout_extensions[name].set()
+                    else:
+                        display.log_event(f"Unknown challenge: {name}")
+                    continue
+
+                # ── Writeup regeneration ──────────────────────
+                if cmd == "writeup" and len(parts) > 1:
+                    name = parts[1].strip()
+                    state = display._states.get(name)
+                    if not state:
+                        display.log_event(
+                            f"Unknown: {name}. "
+                            f"Available: {', '.join(display.challenge_names)}"
+                        )
+                        continue
+                    if state.status != "solved" or not state.flag:
+                        display.log_event(
+                            f"{name} is not solved yet "
+                            f"(status: {state.status}). "
+                            "Writeup requires a solved challenge."
+                        )
+                        continue
+                    meta = ch_meta.get(name, {})
+                    evts = ch_events.get(name, [])
+                    try:
+                        from miya.mission.service import _write_challenge_writeup
+                        path = _write_challenge_writeup(
+                            name, state.flag,
+                            meta.get("approach", ""),
+                            meta.get("target", mission.target.uri),
+                            output_dir=".",
+                            events=evts,
+                        )
+                        if path:
+                            display.log_event(f"Writeup regenerated: {path}")
+                        else:
+                            display.log_event("Writeup generation returned None")
+                    except Exception as exc:
+                        display.log_event(f"Writeup failed: {exc}")
+                    continue
+
+                # ── Follow-up question to a finished challenge ───
+                if cmd == "ask" and len(parts) > 1:
+                    ask_parts = parts[1].strip().split(None, 1)
+                    name = ask_parts[0]
+                    question = ask_parts[1] if len(ask_parts) > 1 else ""
+                    if not question:
+                        display.log_event("Usage: ask <name> <question>")
+                        continue
+                    state = display._states.get(name)
+                    if not state:
+                        display.log_event(
+                            f"Unknown: {name}. "
+                            f"Available: {', '.join(display.challenge_names)}"
+                        )
+                        continue
+                    if state.status not in ("solved", "failed", "timeout"):
+                        # For running challenges, use @name instead
+                        display.log_event(
+                            f"{name} is still running. "
+                            f"Use '@{name} <msg>' to send HITL message."
+                        )
+                        continue
+                    # Build context from logs + events
+                    logs = display.get_logs(name, n=100)
+                    meta = ch_meta.get(name, {})
+                    context = (
+                        f"You are reviewing a CTF challenge that has been "
+                        f"{'solved' if state.status == 'solved' else 'attempted'}.\n\n"
+                        f"Challenge: {name}\n"
+                        f"Category: {state.category or '?'}\n"
+                        f"Status: {state.status}\n"
+                    )
+                    if state.flag:
+                        context += f"Flag: {state.flag}\n"
+                    if meta.get("approach"):
+                        context += f"Approach: {meta['approach']}\n"
+                    context += (
+                        f"\n## Log (last {len(logs)} lines)\n"
+                        + "\n".join(logs)
+                        + f"\n\n## Question\n{question}"
+                    )
+                    display.log_event(f"Asking {name}: {question[:50]}...")
+                    # Run a one-shot SDK query with the context
+                    try:
+                        from miya.topology.base import run_sdk_coordinator
+                        all_mcp: set[str] = set()
+                        for h in agents.values():
+                            all_mcp.update(h.mcp_servers)
+                        agent_defs = {
+                            n: h.to_agent_definition()
+                            for n, h in agents.items()
+                        }
+                        answer = await run_sdk_coordinator(
+                            context, agent_defs, list(all_mcp),
+                            phase_label="ask",
+                        )
+                        # Show answer in log
+                        for line in answer.splitlines():
+                            display.log_event(f"  {name}> {line[:120]}")
+                        # Also capture into log buffer
+                        display.capture_log(name, f"[ask] Q: {question}")
+                        for line in answer.splitlines():
+                            display.capture_log(name, f"[ask] A: {line}")
+                    except Exception as exc:
+                        display.log_event(f"Ask failed: {exc}")
+                    continue
+
+                # ── Cross-challenge knowledge: ref <source> @<target> ──
+                if cmd == "ref" and len(parts) > 1:
+                    ref_parts = parts[1].strip().split()
+                    source_name = ref_parts[0]
+                    # Optional: ref source @target (default: broadcast)
+                    target_name = ref_parts[1].lstrip("@") if len(ref_parts) > 1 else ""
+
+                    # Pull knowledge from source challenge's sub-blackboard
+                    source_logs = display.get_logs(source_name, n=50)
+                    if not source_logs:
+                        display.log_event(
+                            f"No logs for '{source_name}'. "
+                            f"Available: {', '.join(display.challenge_names)}"
+                        )
+                        continue
+
+                    # Build knowledge injection message
+                    knowledge = (
+                        f"## Reference from challenge '{source_name}'\n"
+                        f"The following is the progress log from another "
+                        f"challenge. Use relevant findings to help solve "
+                        f"the current challenge.\n\n"
+                        + "\n".join(source_logs[-30:])
+                    )
+                    if target_name and target_name in ch_queues:
+                        ch_queues[target_name].put_nowait(knowledge)
+                        display.log_event(
+                            f"\U0001f4d6 ref {source_name} → @{target_name}"
+                        )
+                    else:
+                        # Broadcast to all running
+                        for n in display.challenge_names:
+                            if n != source_name and n in ch_queues:
+                                state = display._states.get(n)
+                                if state and state.status in ("running", "classifying"):
+                                    ch_queues[n].put_nowait(knowledge)
+                        display.log_event(
+                            f"\U0001f4d6 ref {source_name} → all running"
+                        )
+                    continue
+
+                # ── Per-challenge HITL: @name message ─────
+                if msg.startswith("@"):
+                    at_parts = msg[1:].split(None, 1)
+                    target_name = at_parts[0] if at_parts else ""
+                    hitl_msg = at_parts[1] if len(at_parts) > 1 else ""
+                    if target_name in ch_queues and hitl_msg:
+                        ch_queues[target_name].put_nowait(hitl_msg)
+                        display.log_event(
+                            f"\U0001f4e8 @{target_name}: {hitl_msg[:50]}"
+                        )
+                    elif target_name not in ch_queues:
+                        display.log_event(
+                            f"Unknown challenge: {target_name}. "
+                            f"Available: {', '.join(ch_queues.keys())}"
+                        )
+                    continue
+
+                # ── Broadcast to all running challenges ───
+                running_names = [
+                    n for n, s in display._states.items()
+                    if s.status in ("running", "classifying")
+                ]
+                for name in running_names:
+                    ch_queues[name].put_nowait(msg)
+                if running_names:
+                    display.log_event(
+                        f"\U0001f4e8 broadcast → {len(running_names)} challenge(s): "
+                        f"{msg[:40]}"
+                    )
+
+        router_task = asyncio.create_task(_hitl_router())
+
+        # Drain events with display active
+        try:
+            with display:
+                while True:
+                    ev = await event_queue.get()
+                    if ev is None:
+                        break
+                    yield ev
+                    blackboard.apply(ev)
+        except asyncio.CancelledError:
+            # Ctrl+C during fanout — cancel all sub-tasks and clean up
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            raise
+        finally:
+            router_task.cancel()
+            try:
+                await router_task
+            except asyncio.CancelledError:
+                pass
+            # Wait for sub-tasks to finish (they may already be cancelled)
+            if not waiter.done():
+                waiter.cancel()
+                try:
+                    await waiter
+                except (asyncio.CancelledError, Exception):
+                    pass
 
         # ── Phase 4: COLLECT — final report ───────────────────────
         yield PhaseTransition(
@@ -626,6 +1174,23 @@ class FanoutTopology:
             yield ev
             blackboard.apply(ev)
 
+        # ── Log PREPARE summary ──────────────────────────────────
+        file_map = self._build_file_map(blackboard)
+        total_files = sum(len(v) for v in file_map.values())
+        if general_instructions:
+            logger.info(
+                "  executed %d general instruction(s)", len(general_instructions),
+            )
+        if file_map:
+            logger.info(
+                "  discovered %d attachment(s) across %d challenge(s)",
+                total_files, len(file_map),
+            )
+            for ch_name, paths in file_map.items():
+                logger.info("    %s: %s", ch_name, ", ".join(paths[:5])
+                            + (f" (+{len(paths)-5} more)" if len(paths) > 5 else ""))
+        elif predefined:
+            logger.info("  no attachments discovered for %d challenge(s)", len(predefined))
         logger.info("PREPARE phase complete")
 
     @staticmethod
@@ -638,6 +1203,172 @@ class FanoutTopology:
         for ch_view in blackboard.challenges:
             if ch_view.file_paths:
                 result[ch_view.name] = list(ch_view.file_paths)
+        return result
+
+    async def _handle_unreachable(
+        self,
+        all_challenges: list[dict[str, Any]],
+        reachable: list[dict[str, Any]],
+        unreachable: list[dict[str, Any]],
+        operator_queue: asyncio.Queue[str] | None,
+        mission: Mission,
+    ) -> list[dict[str, Any]]:
+        """Block and wait for operator decision on unreachable targets.
+
+        Operator commands (via HITL queue):
+            skip <name>      — remove challenge from solve list
+            skip all         — remove all unreachable challenges
+            url <name> <url> — update target URL, re-probe
+            whitebox <name>  — switch to pure source-code analysis (no network)
+            whitebox all     — whitebox all unreachable challenges
+            continue         — proceed with all challenges (attempt anyway)
+
+        Returns the updated challenge list.
+        """
+        unreachable_names = {c["name"] for c in unreachable}
+
+        logger.warning(
+            "⚠ %d/%d targets unreachable — waiting for operator decision:",
+            len(unreachable), len(all_challenges),
+        )
+        for uc in unreachable:
+            logger.warning(
+                "  ✗ %s → %s", uc["name"], uc.get("target", "(no target)"),
+            )
+        logger.info(
+            "  Commands: skip <name|all> | url <name> <new_url> | "
+            "whitebox <name|all> | continue"
+        )
+
+        if operator_queue is None:
+            logger.warning(
+                "No operator queue — cannot block for input. "
+                "Skipping unreachable challenges."
+            )
+            return reachable
+
+        # Block until we get a valid resolution for all unreachable challenges
+        resolved: set[str] = set()
+        result = list(reachable)
+
+        while resolved != unreachable_names:
+            try:
+                msg = await operator_queue.get()
+            except asyncio.CancelledError:
+                logger.warning("Cancelled while waiting — skipping unreachable")
+                return reachable
+
+            msg = msg.strip()
+            parts = msg.split(None, 2)
+            cmd = parts[0].lower() if parts else ""
+
+            if cmd == "continue":
+                # Proceed with everything, including unreachable
+                logger.info("Operator: continue — proceeding with all challenges")
+                return all_challenges
+
+            elif cmd == "skip":
+                target_name = parts[1] if len(parts) > 1 else ""
+                if target_name.lower() == "all":
+                    logger.info("Operator: skip all unreachable challenges")
+                    resolved = set(unreachable_names)
+                elif target_name in unreachable_names:
+                    logger.info("Operator: skip %s", target_name)
+                    resolved.add(target_name)
+                else:
+                    logger.warning(
+                        "Unknown challenge '%s'. Unreachable: %s",
+                        target_name, ", ".join(unreachable_names - resolved),
+                    )
+                    continue
+
+            elif cmd == "url" and len(parts) >= 3:
+                target_name = parts[1]
+                new_url = parts[2]
+                if target_name in unreachable_names:
+                    # Update the challenge's target URL
+                    for ch in all_challenges:
+                        if ch["name"] == target_name:
+                            old_url = ch.get("target", "")
+                            ch["target"] = new_url
+                            logger.info(
+                                "Operator: url %s → %s (was %s)",
+                                target_name, new_url, old_url,
+                            )
+                            # Re-probe the new URL
+                            probe_ok, probe_fail = await self._probe_targets([ch])
+                            if probe_ok:
+                                logger.info("  ✓ %s now reachable", target_name)
+                                result.append(ch)
+                                resolved.add(target_name)
+                            else:
+                                logger.warning(
+                                    "  ✗ %s still unreachable at %s",
+                                    target_name, new_url,
+                                )
+                            break
+                else:
+                    logger.warning(
+                        "Unknown challenge '%s'. Unreachable: %s",
+                        target_name, ", ".join(unreachable_names - resolved),
+                    )
+
+            elif cmd == "whitebox":
+                target_name = parts[1] if len(parts) > 1 else ""
+                names_to_whitebox: list[str] = []
+                if target_name.lower() == "all":
+                    names_to_whitebox = list(unreachable_names - resolved)
+                elif target_name in unreachable_names:
+                    names_to_whitebox = [target_name]
+                else:
+                    logger.warning(
+                        "Unknown challenge '%s'. Unreachable: %s",
+                        target_name, ", ".join(unreachable_names - resolved),
+                    )
+                    continue
+
+                for name in names_to_whitebox:
+                    for ch in all_challenges:
+                        if ch["name"] == name:
+                            ch_files = ch.get("file_paths", [])
+                            if not ch_files:
+                                logger.warning(
+                                    "  %s has no source files — "
+                                    "whitebox analysis may be limited",
+                                    name,
+                                )
+                            # Mark as whitebox mode: clear network target,
+                            # set target to file paths
+                            ch["_whitebox"] = True
+                            ch["_original_target"] = ch.get("target", "")
+                            if ch_files:
+                                ch["target"] = ch_files[0]
+                            logger.info(
+                                "Operator: whitebox %s — source-only analysis "
+                                "(files: %s)",
+                                name,
+                                ", ".join(ch_files[:3]) or "(none)",
+                            )
+                            result.append(ch)
+                            resolved.add(name)
+                            break
+
+            else:
+                logger.info(
+                    "Unknown command '%s'. Use: skip <name|all> | "
+                    "url <name> <new_url> | whitebox <name|all> | continue",
+                    msg,
+                )
+                continue
+
+            # Show remaining unresolved
+            remaining = unreachable_names - resolved
+            if remaining:
+                logger.info(
+                    "  %d unresolved: %s",
+                    len(remaining), ", ".join(remaining),
+                )
+
         return result
 
     async def _probe_targets(

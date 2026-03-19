@@ -61,6 +61,10 @@ class EventStorePort(Protocol):
         """Total event count."""
         ...
 
+    async def close(self) -> None:
+        """Clean up resources."""
+        ...
+
 
 # ═══════════════════════════════════════════════════════════════════
 #  Coordinator Port (LLM abstraction)

@@ -28,6 +28,7 @@ from miya.shared.events import (
     PhaseTransition,
     ReflectionCompleted,
     ChallengeClassified,
+    ChallengeSolved,
 )
 from miya.shared.ports import CoordinatorPort, EventStorePort
 from miya.shared.types import Mission, OODAPhase, MissionType
@@ -100,6 +101,8 @@ _OBSERVE_CTF = """## OBSERVE
 Mission: {mission_description}
 Agents: {agent_descriptions}
 Examine the challenge files and target. Identify the category and attack surface.
+If you identify specific software/library versions, use **WebSearch** to look up \
+known CVEs and vulnerabilities for those versions.
 """
 
 _ORIENT_CTF = """## ORIENT
@@ -209,8 +212,14 @@ Target: {target}
 1. **Explore**: Read challenge files, check file types, inspect source code, \
 examine provided artifacts. If there's a URL, make an initial request to observe \
 behavior. Use `file`, `strings`, `checksec` as appropriate.
-2. **Classify**: Based on your exploration, determine the challenge category.
-3. **Strategize**: Based on what you found, outline your initial attack approach.
+2. **Research Known Vulnerabilities**: When you identify specific software, \
+frameworks, or libraries with version numbers (e.g. GORM v1.21.14, Flask 2.0.1, \
+PHP 7.4), use **WebSearch** to look up known CVEs and security advisories for \
+those exact versions. Search queries like "GORM 1.21 CVE", "Flask 2.0.1 vulnerability", \
+or "<library> <version> security issue" are very effective. Include any relevant \
+CVEs or known vulnerabilities in your recon summary.
+3. **Classify**: Based on your exploration, determine the challenge category.
+4. **Strategize**: Based on what you found, outline your initial attack approach.
 
 ## Response Format
 CATEGORY: <web|pwn|crypto|reverse|misc>
@@ -220,8 +229,9 @@ REASONING: <one sentence>
 RECON_SUMMARY:
 <Multi-line summary of what you discovered during exploration. Include: \
 technology stack, key files, identified entry points, initial observations \
-about potential vulnerabilities or approach. This will be fed to the specialist \
-agent who will solve the challenge.>
+about potential vulnerabilities or approach, and any known CVEs/advisories \
+found via WebSearch. This will be fed to the specialist agent who will \
+solve the challenge.>
 """
 
 # ── Flag submission prompt ────────────────────────────────────────
@@ -249,10 +259,59 @@ class OODATopology:
         self,
         max_iterations: int | None = None,
         coordinator: CoordinatorPort | None = None,
+        challenge_tag: str = "",
+        on_progress: Any | None = None,
+        on_log: Any | None = None,
     ) -> None:
         cfg = _get_topology_config()
         self._max_iterations = max_iterations if max_iterations is not None else cfg["ooda_max_iterations"]
         self._coordinator = coordinator
+        self._tag = f"[{challenge_tag}] " if challenge_tag else ""
+        self._challenge_tag = challenge_tag
+        self._on_progress = on_progress  # callback(challenge_name, **kwargs)
+        self._on_log = on_log  # callback(challenge_name, line)
+
+    def _log(self, level: int, msg: str, *args: Any) -> None:
+        """Log with optional challenge tag prefix + capture to log buffer."""
+        formatted = msg % args if args else msg
+        logger.log(level, "%s%s", self._tag, formatted)
+        if self._on_log and self._challenge_tag:
+            self._on_log(self._challenge_tag, formatted)
+
+    def _report(self, **kwargs: Any) -> None:
+        """Report progress to display callback."""
+        if self._on_progress and self._challenge_tag:
+            self._on_progress(self._challenge_tag, **kwargs)
+
+    def _log_output_summary(self, phase: str, output: str) -> None:
+        """Log a truncated summary of SDK phase output to the log buffer.
+
+        Captures the first meaningful lines of the agent's response so that
+        ``logs <name>`` shows useful detail, not just phase transitions.
+        """
+        if not output or not self._on_log or not self._challenge_tag:
+            return
+        # Take first non-empty lines, skip JSON event blocks
+        lines = []
+        for raw_line in output.splitlines():
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            # Skip structured event JSON emitted for extract_events_from_output
+            if stripped.startswith(("{", "[")) and any(
+                k in stripped for k in ('"event_type"', '"events"')
+            ):
+                continue
+            lines.append(stripped)
+            if len(lines) >= 8:
+                break
+        if lines:
+            self._on_log(
+                self._challenge_tag,
+                f"  [{phase}] " + lines[0][:120],
+            )
+            for line in lines[1:]:
+                self._on_log(self._challenge_tag, f"    {line[:120]}")
 
     @property
     def name(self) -> str:
@@ -287,6 +346,7 @@ class OODATopology:
         from miya.shared.campaign import Campaign as _Campaign
 
         # ── Mission Start ─────────────────────────────────────────
+        import json as _json
         start_event = MissionStarted(
             aggregate_id=mission.id,
             aggregate_type="Mission",
@@ -294,6 +354,13 @@ class OODATopology:
             target_uri=mission.target.uri,
             topology=self.name,
             mission=mission.mission_type.value,
+            prompt=mission.prompt,
+            model=mission.options.get("_model_override", ""),
+            options_json=_json.dumps(
+                {k: v for k, v in mission.options.items()
+                 if not k.startswith("_") and isinstance(v, (str, int, float, bool))},
+                ensure_ascii=False,
+            ),
         )
         yield start_event
         blackboard.apply(start_event)
@@ -314,7 +381,7 @@ class OODATopology:
             operator_prompt = (
                 f"\n\n## Operator Instructions\n{mission.prompt}\n"
             )
-            logger.info("📋 Operator prompt: %s", mission.prompt[:120])
+            self._log(logging.INFO, "📋 Operator prompt: %s", mission.prompt[:120])
 
         observe_output = ""
         orient_output = ""
@@ -345,9 +412,10 @@ class OODATopology:
                 )
                 yield classify_event
                 blackboard.apply(classify_event)
-                logger.info("Auto-classified as: %s", classified_category)
+                self._log(logging.INFO, "Auto-classified as: %s", classified_category)
+                self._report(category=classified_category, status="classifying")
                 if recon_summary:
-                    logger.info("  recon summary: %s", recon_summary[:120])
+                    self._log(logging.INFO, "  recon summary: %s", recon_summary[:120])
 
         # ── Determine agents for session ──────────────────────────
         # For CTF with known category, use specialist agent
@@ -373,10 +441,16 @@ class OODATopology:
             try:
                 await session.connect()
             except Exception:
-                logger.warning(
+                self._log(
+                    logging.WARNING,
                     "SDKSession connect failed — falling back to stateless mode",
-                    exc_info=True,
                 )
+                logger.debug("Session connect error details", exc_info=True)
+                # Clean up partially-connected session to avoid resource leak
+                try:
+                    await session.disconnect()
+                except Exception:
+                    pass
                 session = None
 
         try:
@@ -387,12 +461,14 @@ class OODATopology:
                     if removed:
                         logger.debug("Blackboard compacted: %s", removed)
 
-                logger.info(
+                self._log(
+                    logging.INFO,
                     "━━━━ OODA #%d/%d ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
                     iteration, self._max_iterations,
                 )
+                self._report(iteration=iteration, status="running")
                 if previous_insights:
-                    logger.info("  focus: %s", previous_insights[:120])
+                    self._log(logging.INFO, "  focus: %s", previous_insights[:120])
 
                 # ── Drain HITL ────────────────────────────────────
                 hitl_events, op_suffix = _drain_hitl()
@@ -410,7 +486,8 @@ class OODATopology:
                         mission=mission.mission_type.value,
                     )
 
-                    logger.info("▶ CONTINUE (autonomous iteration)")
+                    self._log(logging.INFO, "▶ CONTINUE (autonomous iteration)")
+                    self._report(phase="CONTINUE", iteration=iteration)
                     continue_tmpl = _CONTINUE_CTF if mission_key == "ctf" else _CONTINUE_GENERIC
                     continue_prompt = continue_tmpl.format(
                         iteration=iteration,
@@ -423,9 +500,30 @@ class OODATopology:
                         continue_prompt, phase_label=f"CONTINUE-{iteration}",
                     )
 
+                    _solved_in_continue = False
                     for extracted in extract_events_from_output(continue_output, mission):
+                        if isinstance(extracted, ChallengeSolved):
+                            object.__setattr__(
+                                extracted, "phase_output",
+                                continue_output[:8000],
+                            )
+                            _solved_in_continue = True
                         yield extracted
                         blackboard.apply(extracted)
+
+                    # Fast-exit: flag captured in CONTINUE phase
+                    if _solved_in_continue:
+                        self._log(logging.INFO, "✓ Flag captured — done")
+                        self._report(status="solved", phase="DONE")
+                        yield ReflectionCompleted(
+                            decision="complete",
+                            assessment="Flag captured during CONTINUE phase",
+                            insights="",
+                            next_focus="",
+                            aggregate_id=mission.id,
+                            mission=mission.mission_type.value,
+                        )
+                        break
 
                     # Parse reflection from the combined output
                     decision = self._parse_reflection(continue_output)
@@ -445,7 +543,8 @@ class OODATopology:
                     yield phase_event
                     blackboard.apply(phase_event)
 
-                    logger.info("▶ OBSERVE — %s", self._PHASE_DESC["OBSERVE"])
+                    self._log(logging.INFO, "▶ OBSERVE — %s", self._PHASE_DESC["OBSERVE"])
+                    self._report(phase="OBSERVE")
                     focus_hint = ""
                     if previous_insights:
                         focus_hint = f"\nFocus from last REFLECT: {previous_insights}\n"
@@ -467,6 +566,7 @@ class OODATopology:
                         observe_output = await self._run_coordinator(
                             observe_prompt, mission, session_agents, blackboard, phase_label="OBSERVE"
                         )
+                    self._log_output_summary("OBSERVE", observe_output)
 
                     for extracted in extract_events_from_output(
                         observe_output, mission, causation_id=phase_event.event_id,
@@ -491,7 +591,8 @@ class OODATopology:
                             aggregate_id=mission.id,
                             mission=mission.mission_type.value,
                         )
-                        logger.info("▶ ORIENT — %s", self._PHASE_DESC["ORIENT"])
+                        self._log(logging.INFO, "▶ ORIENT — %s", self._PHASE_DESC["ORIENT"])
+                        self._report(phase="ORIENT")
                         orient_prompt = _get_phase_prompt(mission_key, "ORIENT").format(
                             blackboard_context=blackboard.to_context_prompt(),
                             mission_description=mission_desc,
@@ -500,6 +601,7 @@ class OODATopology:
                         orient_output = await self._run_coordinator(
                             orient_prompt, mission, agents, blackboard, phase_label="ORIENT"
                         )
+                        self._log_output_summary("ORIENT", orient_output)
                         for extracted in extract_events_from_output(orient_output, mission):
                             yield extracted
                             blackboard.apply(extracted)
@@ -515,7 +617,8 @@ class OODATopology:
                             aggregate_id=mission.id,
                             mission=mission.mission_type.value,
                         )
-                        logger.info("▶ DECIDE — %s", self._PHASE_DESC["DECIDE"])
+                        self._log(logging.INFO, "▶ DECIDE — %s", self._PHASE_DESC["DECIDE"])
+                        self._report(phase="DECIDE")
                         decide_prompt = _get_phase_prompt(mission_key, "DECIDE").format(
                             blackboard_context=blackboard.to_context_prompt(),
                             mission_description=mission_desc,
@@ -524,6 +627,7 @@ class OODATopology:
                         decide_output = await self._run_coordinator(
                             decide_prompt, mission, agents, blackboard, phase_label="DECIDE"
                         )
+                        self._log_output_summary("DECIDE", decide_output)
 
                     # ── ACT ────────────────────────────────────────
                     hitl_events, op_suffix = _drain_hitl()
@@ -538,7 +642,8 @@ class OODATopology:
                         aggregate_id=mission.id,
                         mission=mission.mission_type.value,
                     )
-                    logger.info("▶ ACT — %s", self._PHASE_DESC["ACT"])
+                    self._log(logging.INFO, "▶ ACT — %s", self._PHASE_DESC["ACT"])
+                    self._report(phase="ACT")
                     flag_hint = _FLAG_SUBMIT_INSTRUCTION if mission_key == "ctf" else ""
                     act_prompt = _get_phase_prompt(mission_key, "ACT").format(
                         blackboard_context=blackboard.to_context_prompt(),
@@ -558,10 +663,33 @@ class OODATopology:
                         act_output = await self._run_coordinator(
                             act_prompt, mission, act_agents, blackboard, phase_label="ACT"
                         )
+                    self._log_output_summary("ACT", act_output)
 
+                    _solved_in_act = False
                     for extracted in extract_events_from_output(act_output, mission):
+                        if isinstance(extracted, ChallengeSolved):
+                            # Attach raw ACT output so writeup has payload detail
+                            object.__setattr__(
+                                extracted, "phase_output",
+                                act_output[:8000],
+                            )
+                            _solved_in_act = True
                         yield extracted
                         blackboard.apply(extracted)
+
+                    # ── Fast-exit: if flag was captured, skip REFLECT ──
+                    if _solved_in_act:
+                        self._log(logging.INFO, "✓ Flag captured — skipping REFLECT")
+                        self._report(status="solved", phase="DONE")
+                        yield ReflectionCompleted(
+                            decision="complete",
+                            assessment="Flag captured during ACT phase",
+                            insights="",
+                            next_focus="",
+                            aggregate_id=mission.id,
+                            mission=mission.mission_type.value,
+                        )
+                        break
 
                     # ── REFLECT ────────────────────────────────────
                     hitl_events, op_suffix = _drain_hitl()
@@ -575,7 +703,8 @@ class OODATopology:
                         aggregate_id=mission.id,
                         mission=mission.mission_type.value,
                     )
-                    logger.info("▶ REFLECT — %s", self._PHASE_DESC["REFLECT"])
+                    self._log(logging.INFO, "▶ REFLECT — %s", self._PHASE_DESC["REFLECT"])
+                    self._report(phase="REFLECT")
                     reflect_prompt = _get_phase_prompt(mission_key, "REFLECT").format(
                         blackboard_context=blackboard.to_context_prompt(),
                         mission_description=mission_desc,
@@ -589,18 +718,22 @@ class OODATopology:
                         reflect_output = await self._run_coordinator(
                             reflect_prompt, mission, agents, blackboard, phase_label="REFLECT"
                         )
+                    self._log_output_summary("REFLECT", reflect_output)
 
                     decision = self._parse_reflection(reflect_output)
 
                 # ── Common: process reflection decision ───────────
                 previous_insights = decision.get("next_focus", "") or decision.get("insights", "")
                 d = decision.get("decision", "continue")
-                _DECISION_ICONS = {"complete": "✓", "pivot": "↻", "continue": "⟳"}
-                logger.info(
+                _DECISION_ICONS = {"complete": "\u2713", "pivot": "\u21bb", "continue": "\u27f3"}
+                self._log(
+                    logging.INFO,
                     "%s %s — %s",
                     _DECISION_ICONS.get(d, "?"), d.upper(),
                     (decision.get("assessment", "") or decision.get("insights", ""))[:120],
                 )
+                if d == "complete":
+                    self._report(status="solved", phase="DONE")
 
                 reflection_event = ReflectionCompleted(
                     aggregate_id=mission.id,
@@ -615,11 +748,54 @@ class OODATopology:
                 if d == "complete":
                     break
             else:
-                # Loop exhausted without explicit completion
-                logger.warning(
-                    f"OODA loop exhausted after {self._max_iterations} iterations "
-                    f"without explicit completion"
-                )
+                # Loop exhausted — check if a flag was actually found
+                _ch_name = mission.options.get("challenge_name", "")
+                _flag_found = False
+
+                # Check 1: explicit ChallengeSolved already in blackboard
+                if blackboard.solved_flags:
+                    _flag_found = True
+
+                # Check 2: flag pattern in findings (LootCollected with flag)
+                if not _flag_found:
+                    import re as _re
+                    _FLAG_RE = _re.compile(r'flag\{[^}]+\}', _re.IGNORECASE)
+                    for f in blackboard.findings:
+                        if _FLAG_RE.search(f.detail or "") or _FLAG_RE.search(f.evidence or ""):
+                            _flag_found = True
+                            _flag_match = _FLAG_RE.search(f.detail or "") or _FLAG_RE.search(f.evidence or "")
+                            if _flag_match and _ch_name:
+                                self._log(
+                                    logging.INFO,
+                                    "\u2713 Flag found in findings: %s — emitting ChallengeSolved",
+                                    _flag_match.group()[:50],
+                                )
+                                solved_ev = ChallengeSolved(
+                                    aggregate_id=mission.id,
+                                    challenge_name=_ch_name,
+                                    flag=_flag_match.group(),
+                                    approach="extracted from findings after OODA exhaustion",
+                                    mission=mission.mission_type.value,
+                                )
+                                yield solved_ev
+                                blackboard.apply(solved_ev)
+                            break
+
+                if _flag_found:
+                    self._log(
+                        logging.INFO,
+                        "OODA loop exhausted after %d iterations but flag was found",
+                        self._max_iterations,
+                    )
+                    self._report(status="solved", phase="DONE")
+                else:
+                    self._log(
+                        logging.WARNING,
+                        "OODA loop exhausted after %d iterations "
+                        "without explicit completion",
+                        self._max_iterations,
+                    )
+                    self._report(status="failed", phase="FAILED")
         finally:
             # Always clean up the session
             if session is not None:
@@ -642,8 +818,16 @@ class OODATopology:
         blackboard: Blackboard,
         phase_label: str = "",
         max_turns: int | None = None,
+        operator_queue: asyncio.Queue[str] | None = None,
     ) -> str:
-        """Run the coordinator agent with a prompt and collect text output."""
+        """Run the coordinator agent with a prompt and collect text output.
+
+        On SDKTimeoutError, asks the operator whether to retry, skip,
+        or abort. This prevents silent failures and gives the human
+        a chance to decide.
+        """
+        from miya.topology.base import SDKTimeoutError
+
         all_mcp_names: set[str] = set()
         for handle in agents.values():
             all_mcp_names.update(handle.mcp_servers)
@@ -653,19 +837,50 @@ class OODATopology:
             for name, handle in agents.items()
         }
 
-        # Use injected coordinator port if available
-        if self._coordinator is not None:
-            return await self._coordinator.run(
-                prompt=prompt,
-                agents=agent_defs,
-                mcp_servers=list(all_mcp_names),
-            )
+        while True:
+            try:
+                # Use injected coordinator port if available
+                if self._coordinator is not None:
+                    return await self._coordinator.run(
+                        prompt=prompt,
+                        agents=agent_defs,
+                        mcp_servers=list(all_mcp_names),
+                    )
 
-        # Fallback: use shared Claude Agent SDK coordinator
-        return await run_sdk_coordinator(
-            prompt, agent_defs, list(all_mcp_names),
-            phase_label=phase_label, max_turns=max_turns,
-        )
+                # Fallback: use shared Claude Agent SDK coordinator
+                return await run_sdk_coordinator(
+                    prompt, agent_defs, list(all_mcp_names),
+                    phase_label=phase_label, max_turns=max_turns,
+                )
+            except SDKTimeoutError as exc:
+                self._log(logging.WARNING, f"SDK timeout: {exc}")
+
+                # Ask operator: retry / skip / abort
+                if operator_queue is not None:
+                    self._log(
+                        logging.WARNING,
+                        "SDK timed out. Type 'retry', 'skip', or 'abort' in HITL.",
+                    )
+                    # Wait for operator decision (up to 120s)
+                    try:
+                        decision = await asyncio.wait_for(
+                            operator_queue.get(), timeout=120,
+                        )
+                    except asyncio.TimeoutError:
+                        decision = "skip"
+
+                    decision = decision.strip().lower()
+                    if decision == "retry":
+                        self._log(logging.INFO, "Retrying SDK call...")
+                        continue
+                    elif decision == "abort":
+                        raise
+                    else:
+                        # skip — return empty so the phase is skipped
+                        self._log(logging.INFO, "Skipping timed-out phase")
+                        return f"[SKIPPED: SDK timeout — {exc}]"
+                else:
+                    raise
 
     @staticmethod
     def _parse_reflection(output: str) -> dict[str, str]:
@@ -691,24 +906,25 @@ class OODATopology:
             re.IGNORECASE | re.DOTALL,
         )
 
+        decision_parsed = False
         for match in pattern.finditer(output):
             key = match.group(1).upper().strip()
             val = match.group(2).strip()
             if key == "DECISION":
-                # Extract first valid decision word
-                val_lower = val.lower()
+                # Strict: only accept first word as decision value
+                first_word = val.split()[0].lower().rstrip(".,;:!") if val.split() else ""
                 for d in ("complete", "pivot", "continue"):
-                    if d in val_lower:
+                    if first_word == d:
                         result["decision"] = d
+                        decision_parsed = True
                         break
             else:
                 result[key.lower()] = val
 
-        # Heuristic fallback: if output mentions "objective achieved" / "flag found"
-        # but no DECISION field was parsed, treat as complete.
-        # NOTE: "flag{" removed — it triggers false positives when the model
-        # discusses CTF flags without having actually captured one.
-        if result["decision"] == "continue":
+        # Heuristic fallback ONLY if no DECISION field was parsed at all.
+        # This prevents false positives from the model discussing outcomes
+        # without actually declaring a decision.
+        if not decision_parsed:
             lower = output.lower()
             if any(phrase in lower for phrase in (
                 "objective achieved", "mission complete", "flag found",
@@ -747,7 +963,8 @@ class OODATopology:
             file_info=f"Operator hint: {mission.prompt[:200]}" if mission.prompt else "",
         )
 
-        logger.info("▶ CLASSIFY — exploring and classifying challenge")
+        self._log(logging.INFO, "▶ CLASSIFY — exploring and classifying challenge")
+        self._report(phase="CLASSIFY", status="classifying")
         try:
             output = await self._run_coordinator(
                 classify_prompt, mission, agents, blackboard,
@@ -755,7 +972,7 @@ class OODATopology:
                 max_turns=5,  # slightly more turns to allow actual exploration
             )
         except Exception:
-            logger.debug("Auto-classify failed, skipping", exc_info=True)
+            logger.warning("Auto-classify failed, skipping", exc_info=True)
             return "", ""
 
         # Extract any events emitted during classification exploration
