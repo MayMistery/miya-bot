@@ -91,6 +91,7 @@ class ReflectionCompleted(DomainEvent):
     assessment: str = ""
     decision: str = ""  # "continue", "pivot", "retry", "complete"
     insights: str = ""
+    next_focus: str = ""
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -335,11 +336,59 @@ class MissionSuspended(DomainEvent):
 
 
 @dataclass(frozen=True)
+class MissionResumed(DomainEvent):
+    """Emitted when a previously suspended mission is resumed."""
+    event_type: ClassVar[str] = "mission.resumed"
+    previous_mission_id: str = ""
+    resumed_from_checkpoint: str = ""  # JSON: which checkpoint we're resuming from
+
+
+@dataclass(frozen=True)
 class OperatorMessage(DomainEvent):
     """Human-in-the-loop message injected by the operator during execution."""
     event_type: ClassVar[str] = "operator.message"
     content: str = ""
     context: str = "operator"
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Attack Graph Events
+# ═══════════════════════════════════════════════════════════════════
+
+
+@dataclass(frozen=True)
+class GraphNodeAdded(DomainEvent):
+    """A new node was added to the attack graph."""
+    event_type: ClassVar[str] = "graph.node_added"
+    node_id: str = ""
+    label: str = ""
+    node_type: str = ""  # asset, vulnerability, access, objective
+    status: str = "discovered"
+    context: str = "attack_graph"
+
+
+@dataclass(frozen=True)
+class GraphEdgeAdded(DomainEvent):
+    """A new edge (attack path) was added to the attack graph."""
+    event_type: ClassVar[str] = "graph.edge_added"
+    edge_id: str = ""
+    source_label: str = ""
+    target_label: str = ""
+    technique: str = ""
+    cost: float = 1.0
+    probability: float = 0.5
+    context: str = "attack_graph"
+
+
+@dataclass(frozen=True)
+class GraphNodeStatusChanged(DomainEvent):
+    """A node's status was updated in the attack graph."""
+    event_type: ClassVar[str] = "graph.node_status_changed"
+    node_id: str = ""
+    label: str = ""
+    old_status: str = ""
+    new_status: str = ""
+    context: str = "attack_graph"
 
 
 # ═══════════════════════════════════════════════════════════════════

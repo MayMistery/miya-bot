@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 
 class CostTracker:
-    """Thread-safe accumulator for API usage metrics."""
+    """Event-loop-bound accumulator for API usage metrics."""
 
     def __init__(self) -> None:
         self.total_cost_usd: float = 0.0
@@ -207,6 +207,7 @@ def extract_events_from_output(
     name_map: dict[str, type[DomainEvent]] = extract_events_from_output._name_map  # type: ignore[attr-defined]
 
     events: list[DomainEvent] = []
+    _seen_dedup: set[str] = set()
     # Accept optional whitespace between EventTypeName and the JSON brace
     pattern = r'\[EVENT:(\w+)\s*\{'
     current_causation = causation_id
@@ -287,6 +288,21 @@ def extract_events_from_output(
 
         try:
             event = event_cls(**filtered)
+
+            # Validate ChallengeSolved: flag must not be empty
+            if event_type_name == "ChallengeSolved":
+                if not getattr(event, "flag", "").strip():
+                    logger.warning("Dropping ChallengeSolved with empty flag")
+                    continue
+
+            # Deduplicate: skip if same event type + key fields already seen
+            dedup_key = _event_dedup_key(event_type_name, filtered)
+            if dedup_key and dedup_key in _seen_dedup:
+                logger.debug("Dedup: skipping duplicate %s", event_type_name)
+                continue
+            if dedup_key:
+                _seen_dedup.add(dedup_key)
+
             events.append(event)
             # Chain: next event's causation_id = this event's event_id
             current_causation = event.event_id
@@ -294,6 +310,15 @@ def extract_events_from_output(
             logger.warning("Failed to create %s: %s (data=%s)", event_type_name, e, filtered)
 
     return events
+
+
+def _event_dedup_key(event_type_name: str, data: dict[str, Any]) -> str | None:
+    """Build a dedup key for events that should not be emitted twice."""
+    if event_type_name == "ChallengeSolved":
+        return f"ChallengeSolved:{data.get('challenge_name', '')}:{data.get('flag', '')}"
+    if event_type_name == "FlagSubmitted":
+        return f"FlagSubmitted:{data.get('challenge_name', '')}:{data.get('flag', '')}"
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════════

@@ -20,6 +20,9 @@ from miya.shared.attack_graph import AttackGraph, GraphNode, GraphEdge
 from miya.shared.blackboard import Blackboard
 from miya.shared.events import (
     DomainEvent,
+    GraphEdgeAdded,
+    GraphNodeAdded,
+    GraphNodeStatusChanged,
     MissionStarted,
     MissionCompleted,
     OperatorMessage,
@@ -135,6 +138,39 @@ OBJECTIVE_REACHED: <yes/no>
 """
 
 
+_GRAPH_BUILD_PROMPT = """## Attack Surface → Graph Construction
+
+Based on the reconnaissance results, construct the initial attack graph.
+
+**Discovered Assets:**
+{assets_summary}
+
+**Discovered Vulnerabilities:**
+{vulns_summary}
+
+**Entry Points:**
+{entry_points_summary}
+
+**Mission:** {mission_description}
+
+**Your task:** Map out all feasible attack paths from the attacker position to the objective.
+For each path, estimate:
+- Success probability (0.0-1.0)
+- Cost/complexity (1-10)
+- Required prerequisites
+
+Output as structured graph mutations:
+NEW_EDGES:
+- Attacker → <target_node> (<technique>, cost=<N>, p=<probability>)
+- <node_A> → <node_B> (<technique>, cost=<N>, p=<probability>)
+
+STATUS_UPDATES:
+- <node> → <new_status>
+
+OBJECTIVE_REACHED: no
+"""
+
+
 class AttackGraphTopology:
     """Graph-based attack planning and execution topology."""
 
@@ -217,6 +253,11 @@ class AttackGraphTopology:
                 status="exploited",
             ))
             graph.set_root(root.id)
+            yield GraphNodeAdded(
+                aggregate_id=mission.id, mission=mission.mission_type.value,
+                node_id=root.id, label="Attacker",
+                node_type="access", status="exploited",
+            )
 
             objective = graph.add_node(GraphNode(
                 label="Objective",
@@ -224,23 +265,58 @@ class AttackGraphTopology:
                 properties={"type": mission.mission_type.value},
             ))
             graph.add_objective(objective.id)
+            yield GraphNodeAdded(
+                aggregate_id=mission.id, mission=mission.mission_type.value,
+                node_id=objective.id, label="Objective",
+                node_type="objective", status="discovered",
+            )
 
         # Run recon agent to discover initial attack surface
-        recon_agents = {k: v for k, v in agents.items()
-                       if v.context_name in ("recon", "entrypoint", "web", "pwn", "crypto", "reverse", "misc")}
-        if recon_agents:
-            recon_prompt = (
-                f"Reconnaissance phase. Target: {mission.target}\n"
-                f"Discover the attack surface. Report all assets, services, "
-                f"entry points, and potential vulnerabilities found.\n"
-                f"Blackboard:\n{blackboard.to_context_prompt()}\n"
-                + operator_prompt + EVENT_INSTRUCTION
-            )
-            recon_output = await self._run_agent(recon_prompt, mission, agents, blackboard)
+        recon_prompt = (
+            f"Reconnaissance phase. Target: {mission.target}\n"
+            f"Discover the attack surface. Report all assets, services, "
+            f"entry points, and potential vulnerabilities found.\n"
+            f"Blackboard:\n{blackboard.to_context_prompt()}\n"
+            + operator_prompt + EVENT_INSTRUCTION
+        )
+        recon_output = await self._run_agent(recon_prompt, mission, agents, blackboard)
 
-            for extracted in extract_events_from_output(recon_output, mission):
+        for extracted in extract_events_from_output(recon_output, mission):
+            yield extracted
+            blackboard.apply(extracted)
+
+        # ── Build initial graph edges from recon findings ──────
+        if blackboard.assets or blackboard.findings or blackboard.entry_points:
+            yield PhaseTransition(
+                from_phase="recon",
+                to_phase="graph_build",
+                reason="Constructing attack graph from recon data",
+                aggregate_id=mission.id,
+                mission=mission.mission_type.value,
+            )
+            logger.info("▶ GRAPH_BUILD — constructing attack paths from recon data")
+
+            assets_lines = []
+            for a in blackboard.assets.values():
+                assets_lines.append(f"- {a.host or a.ip} ports={list(a.ports)} services={list(a.services)}")
+            vulns_lines = [f"- {f.oneliner()}" for f in blackboard.findings[:20]]
+            ep_lines = [f"- {ep.endpoint} vectors={ep.input_vectors}" for ep in blackboard.entry_points[:15]]
+
+            build_prompt = _GRAPH_BUILD_PROMPT.format(
+                assets_summary="\n".join(assets_lines) or "None discovered",
+                vulns_summary="\n".join(vulns_lines) or "None discovered",
+                entry_points_summary="\n".join(ep_lines) or "None discovered",
+                mission_description=mission_desc,
+            ) + EVENT_INSTRUCTION
+            build_output = await self._run_agent(build_prompt, mission, agents, blackboard)
+
+            for extracted in extract_events_from_output(build_output, mission):
                 yield extracted
                 blackboard.apply(extracted)
+
+            # Apply graph mutations from build output and emit events
+            for ev in self._apply_rebuild_with_events(build_output, graph, mission):
+                yield ev
 
         def _drain_hitl() -> tuple[list[OperatorMessage], str]:
             return drain_hitl_queue(
@@ -361,7 +437,13 @@ class AttackGraphTopology:
             if succeeded:
                 graph.update_edge_status(selected_edge.id, "succeeded")
                 if target_node:
+                    old_status = target_node.status
                     graph.update_node_status(target_node.id, "exploited")
+                    yield GraphNodeStatusChanged(
+                        aggregate_id=mission.id, mission=mission.mission_type.value,
+                        node_id=target_node.id, label=target_node.label,
+                        old_status=old_status, new_status="exploited",
+                    )
             else:
                 graph.update_edge_status(selected_edge.id, "failed")
 
@@ -384,8 +466,9 @@ class AttackGraphTopology:
                 yield extracted
                 blackboard.apply(extracted)
 
-            # Parse and apply graph mutations from REBUILD output
-            self._apply_rebuild(rebuild_output, graph)
+            # Parse and apply graph mutations from REBUILD output, emitting events
+            for ev in self._apply_rebuild_with_events(rebuild_output, graph, mission):
+                yield ev
 
             # Check if objective reached (via OBJECTIVE_REACHED or graph state)
             obj_reached = bool(re.search(
@@ -488,12 +571,15 @@ class AttackGraphTopology:
         return success_score > failure_score
 
     @staticmethod
-    def _apply_rebuild(rebuild_output: str, graph: AttackGraph) -> None:
-        """Parse NEW_NODES/NEW_EDGES/STATUS_UPDATES from REBUILD output and mutate graph.
+    def _apply_rebuild_with_events(
+        rebuild_output: str, graph: AttackGraph, mission: Mission,
+    ) -> list[DomainEvent]:
+        """Parse graph mutations from REBUILD output, apply them, and return events.
 
-        The LLM output format is free-form text with structured markers.
-        We parse conservatively — unknown formats are ignored with a warning.
+        Every graph mutation is captured as a DomainEvent for auditability.
         """
+        events: list[DomainEvent] = []
+
         # ── NEW_NODES ──────────────────────────────────────────────
         nodes_match = re.search(
             r"NEW_NODES\s*:\s*(.*?)(?=\n(?:NEW_EDGES|STATUS_UPDATES|OBJECTIVE_REACHED)\s*:|$)",
@@ -502,14 +588,15 @@ class AttackGraphTopology:
         if nodes_match:
             nodes_text = nodes_match.group(1).strip()
             if nodes_text.lower() not in ("none", "n/a", "-", ""):
-                # Parse each line as a node: "- NodeLabel (type: asset, status: discovered)"
                 for line in nodes_text.splitlines():
                     line = line.strip().lstrip("- •*")
                     if not line:
                         continue
-                    # Extract label and optional properties
                     label = re.split(r"\s*[\(\[]", line)[0].strip()
                     if not label:
+                        continue
+                    # Skip if node already exists
+                    if _find_node_by_label(graph, label):
                         continue
                     node_type = ""
                     type_m = re.search(r"type\s*[:=]\s*(\w+)", line, re.IGNORECASE)
@@ -521,6 +608,11 @@ class AttackGraphTopology:
                         status = status_m.group(1)
                     node = graph.add_node(GraphNode(
                         label=label, node_type=node_type, status=status,
+                    ))
+                    events.append(GraphNodeAdded(
+                        aggregate_id=mission.id, mission=mission.mission_type.value,
+                        node_id=node.id, label=label,
+                        node_type=node_type, status=status,
                     ))
                     logger.debug("REBUILD: added node %s (%s)", label, node.id[:8])
 
@@ -536,7 +628,6 @@ class AttackGraphTopology:
                     line = line.strip().lstrip("- •*")
                     if not line:
                         continue
-                    # Parse "Source → Target (technique)" or "Source -> Target: technique"
                     arrow_m = re.match(
                         r"(.+?)\s*(?:→|->|=>)\s*(.+?)(?:\s*[\(\[:]\s*(.+?)[\)\]]?\s*)?$",
                         line,
@@ -547,18 +638,51 @@ class AttackGraphTopology:
                     tgt_label = arrow_m.group(2).strip()
                     technique = (arrow_m.group(3) or "").strip() or f"{src_label} to {tgt_label}"
 
-                    # Resolve labels to node IDs (or create nodes)
+                    # Parse optional cost and probability
+                    cost = 1.0
+                    probability = 0.5
+                    cost_m = re.search(r"cost\s*=\s*([\d.]+)", line, re.IGNORECASE)
+                    if cost_m:
+                        try:
+                            cost = float(cost_m.group(1))
+                        except ValueError:
+                            pass
+                    prob_m = re.search(r"p\s*=\s*([\d.]+)", line, re.IGNORECASE)
+                    if prob_m:
+                        try:
+                            probability = float(prob_m.group(1))
+                        except ValueError:
+                            pass
+
                     src_node = _find_node_by_label(graph, src_label)
                     tgt_node = _find_node_by_label(graph, tgt_label)
                     if not src_node:
                         src_node = graph.add_node(GraphNode(label=src_label, node_type="asset"))
+                        events.append(GraphNodeAdded(
+                            aggregate_id=mission.id, mission=mission.mission_type.value,
+                            node_id=src_node.id, label=src_label,
+                            node_type="asset", status="discovered",
+                        ))
                     if not tgt_node:
                         tgt_node = graph.add_node(GraphNode(label=tgt_label, node_type="asset"))
+                        events.append(GraphNodeAdded(
+                            aggregate_id=mission.id, mission=mission.mission_type.value,
+                            node_id=tgt_node.id, label=tgt_label,
+                            node_type="asset", status="discovered",
+                        ))
 
                     edge = graph.add_edge(GraphEdge(
                         source_id=src_node.id,
                         target_id=tgt_node.id,
                         label=technique,
+                        cost=cost,
+                        probability=probability,
+                    ))
+                    events.append(GraphEdgeAdded(
+                        aggregate_id=mission.id, mission=mission.mission_type.value,
+                        edge_id=edge.id, source_label=src_label,
+                        target_label=tgt_label, technique=technique,
+                        cost=cost, probability=probability,
                     ))
                     logger.debug("REBUILD: added edge %s → %s (%s)", src_label, tgt_label, edge.id[:8])
 
@@ -574,7 +698,6 @@ class AttackGraphTopology:
                     line = line.strip().lstrip("- •*")
                     if not line:
                         continue
-                    # Parse "NodeLabel → status" or "NodeLabel: exploited"
                     sm = re.match(r"(.+?)\s*(?:→|->|:|=)\s*(\w+)", line)
                     if not sm:
                         continue
@@ -582,8 +705,16 @@ class AttackGraphTopology:
                     new_status = sm.group(2).strip().lower()
                     node = _find_node_by_label(graph, label)
                     if node:
+                        old_status = node.status
                         graph.update_node_status(node.id, new_status)
+                        events.append(GraphNodeStatusChanged(
+                            aggregate_id=mission.id, mission=mission.mission_type.value,
+                            node_id=node.id, label=label,
+                            old_status=old_status, new_status=new_status,
+                        ))
                         logger.debug("REBUILD: updated %s → %s", label, new_status)
+
+        return events
 
     async def _run_agent(
         self,

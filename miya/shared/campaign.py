@@ -51,8 +51,13 @@ class Campaign:
         p = Path(path)
         if p.exists():
             try:
+                import dataclasses
                 data = json.loads(p.read_text(encoding="utf-8"))
-                entries = [CampaignEntry(**e) for e in data.get("entries", [])]
+                _valid_fields = {f.name for f in dataclasses.fields(CampaignEntry)}
+                entries = [
+                    CampaignEntry(**{k: v for k, v in e.items() if k in _valid_fields})
+                    for e in data.get("entries", [])
+                ]
                 c = cls(name=data.get("name", "default"), entries=entries)
                 c._path = p
                 return c

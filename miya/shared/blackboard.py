@@ -155,6 +155,7 @@ class ReflectionRecord:
     assessment: str = ""
     decision: str = ""
     insights: str = ""
+    next_focus: str = ""
 
 
 @dataclass
@@ -459,6 +460,7 @@ class Blackboard:
             assessment=e.assessment,
             decision=e.decision,
             insights=e.insights,
+            next_focus=getattr(e, "next_focus", ""),
         ))
 
     def _on_OperatorMessage(self, e: OperatorMessage) -> None:
@@ -601,9 +603,12 @@ class Blackboard:
             shown = sorted_findings[:max_findings]
             omitted = len(sorted_findings) - len(shown)
             lines.append(f"\n### Findings ({len(self.findings)})")
-            # Recent findings: full detail
-            for f in shown[:recent_detail]:
-                lines.append(f"- {f.oneliner()}: {f.detail[:100]}")
+            # Recent findings: full detail + evidence snippet
+            for idx, f in enumerate(shown[:recent_detail]):
+                line = f"- {f.oneliner()}: {f.detail[:100]}"
+                if idx < 3 and f.evidence:
+                    line += f" | evidence: {f.evidence[:80]}"
+                lines.append(line)
             # Older findings: compressed one-liner
             if len(shown) > recent_detail:
                 lines.append(f"  (older {len(shown) - recent_detail}:)")

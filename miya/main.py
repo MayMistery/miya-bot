@@ -1702,7 +1702,7 @@ async def _interactive_loop(db: str, model: str = "opus", unlimited: bool = Fals
                         table.add_column("Context", style="yellow", width=10)
                         table.add_column("Time", style="dim", width=20)
                         table.add_column("Details", style="white", max_width=50)
-                        for i, ev in enumerate(all_ev[-limit:], len(all_ev) - limit + 1):
+                        for i, ev in enumerate(all_ev[-limit:], max(len(all_ev) - limit, 0) + 1):
                             style = _EVENT_STYLES.get(type(ev).__name__, "")
                             name = type(ev).__name__
                             if style:

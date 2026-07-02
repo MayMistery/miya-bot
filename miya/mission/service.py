@@ -435,12 +435,18 @@ class MissionService:
 
         # ── Unlimited mode: disable all timeouts / iteration limits ──
         is_unlimited = options.pop("unlimited", False)
+        _unlimited_env_backup: dict[str, str | None] = {}
         if is_unlimited:
             import os
-            os.environ["MIYA_OODA_MAX_ITERATIONS"] = "999"
-            os.environ["MIYA_MAX_TURNS"] = "999"
-            os.environ["MIYA_FANOUT_TIMEOUT"] = "999999"
-            os.environ["MIYA_SDK_IDLE_TIMEOUT"] = "99999"
+            _UNLIMITED_OVERRIDES = {
+                "MIYA_OODA_MAX_ITERATIONS": "999",
+                "MIYA_MAX_TURNS": "999",
+                "MIYA_FANOUT_TIMEOUT": "999999",
+                "MIYA_SDK_IDLE_TIMEOUT": "99999",
+            }
+            for k, v in _UNLIMITED_OVERRIDES.items():
+                _unlimited_env_backup[k] = os.environ.get(k)
+                os.environ[k] = v
             logger.info("Unlimited mode: timeouts and iteration limits disabled")
 
         # Get topology (pass coordinator for testability + runtime tunables)
@@ -551,6 +557,16 @@ class MissionService:
                 prompt=prompt,
                 options=dict(options),
             )
+        finally:
+            # Restore env vars modified by unlimited mode to avoid
+            # leaking into subsequent missions in the same REPL session.
+            if _unlimited_env_backup:
+                import os
+                for k, orig in _unlimited_env_backup.items():
+                    if orig is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = orig
 
         duration = (datetime.now(timezone.utc) - start_time).total_seconds()
         cost_snap = _cost_tracker.snapshot()
