@@ -1,0 +1,109 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create or update"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Build executable
+        run: |
+          uv run --with pyinstaller pyinstaller \
+            --onefile \
+            --name miya \
+            --clean \
+            --noconfirm \
+            --specpath build/spec \
+            miya/__main__.py
+
+      - name: Smoke test executable
+        run: ./dist/miya --help
+
+      - name: Package executable
+        id: package
+        shell: bash
+        run: |
+          os="$(printf '%s' "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')"
+          arch="$(printf '%s' "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')"
+          asset="miya-${os}-${arch}"
+          mkdir -p "release/${asset}"
+          cp dist/miya "release/${asset}/miya"
+          chmod +x "release/${asset}/miya"
+          tar -C "release/${asset}" -czf "${asset}.tar.gz" miya
+          python - <<'PY' "${asset}.tar.gz" > "${asset}.tar.gz.sha256"
+          import hashlib
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          digest = hashlib.sha256(path.read_bytes()).hexdigest()
+          print(f"{digest}  {path.name}")
+          PY
+          echo "asset=${asset}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.asset }}
+          path: |
+            miya-*.tar.gz
+            miya-*.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: miya-*
+          merge-multiple: true
+
+      - name: Create or update release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_INPUT: ${{ inputs.tag }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            tag="${TAG_INPUT}"
+          fi
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" artifacts/* --clobber
+          else
+            gh release create "$tag" artifacts/* \
+              --target "$GITHUB_SHA" \
+              --title "$tag" \
+              --notes "Prebuilt Miya CLI artifacts for Linux and macOS."
+          fi

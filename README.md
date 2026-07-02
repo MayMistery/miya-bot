@@ -28,6 +28,10 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ## Install
 
+Prebuilt CLI archives are available on the
+[GitHub Releases](https://github.com/MayMistery/miya-bot/releases) page. Assets
+are named `miya-<os>-<arch>.tar.gz` and contain a single `miya` executable.
+
 The installer clones the repo into `~/miya-bot`, syncs dependencies, and places
 the `miya` command on your `PATH`.
 
