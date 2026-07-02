@@ -1251,9 +1251,9 @@ class FanoutTopology:
         if operator_queue is None:
             logger.warning(
                 "No operator queue — cannot block for input. "
-                "Skipping unreachable challenges."
+                "Continuing with unreachable challenges."
             )
-            return reachable
+            return all_challenges
 
         # Block until we get a valid resolution for all unreachable challenges
         resolved: set[str] = set()

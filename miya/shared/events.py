@@ -119,6 +119,11 @@ class FingerprintCompleted(DomainEvent):
     technology_stack: tuple[str, ...] = ()
     context: str = "recon"
 
+    def __post_init__(self) -> None:
+        if not self.software_version and isinstance(self.version, str):
+            object.__setattr__(self, "software_version", self.version)
+            object.__setattr__(self, "version", 0)
+
 
 # ═══════════════════════════════════════════════════════════════════
 #  Vulnerability Events

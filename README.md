@@ -1,266 +1,242 @@
 # Miya
 
-DDD Pentest Agent — automated offensive security using Claude AI.
+Miya is a local CLI for running authorized security missions with Claude Agent
+SDK. It coordinates specialist agents, records structured domain events, and
+keeps a shared blackboard so each phase can build on previous findings.
 
-Supports three mission types:
-- **1-day** — exploit known CVEs against live services
-- **0-day** — discover unknown vulnerabilities in source code
-- **CTF** — solve capture-the-flag challenges
+It supports three mission types:
 
-Uses event sourcing (DDD), OODA/attack-graph topologies, and Claude Agent SDK with MCP tool servers.
+- `oneday`: assess known CVEs and exploit paths against a live target
+- `zeroday`: inspect a codebase for unknown vulnerabilities and optional PoC validation
+- `ctf`: solve single challenges or multi-challenge CTF sets
 
----
+Use Miya only on systems you own or are explicitly authorized to test.
 
 ## Requirements
 
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/) — `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- Anthropic API key
+- Python 3.10 or newer
+- `uv`
+- Anthropic credentials, unless your Claude Agent SDK environment supplies auth
+- Optional security tools on `PATH` for missions that need them, such as
+  `semgrep`, `nmap`, `nuclei`, `sqlmap`, `ghidra`, or `gdb`
 
----
+Install `uv` if needed:
 
-## Installation
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
 
-### One-click install
+## Install
+
+The installer clones the repo into `~/miya-bot`, syncs dependencies, and places
+the `miya` command on your `PATH`.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MayMistery/miya-bot/main/install.sh | bash
 ```
 
-This will:
-1. Install `uv` if not present
-2. Clone the repo to `~/miya-bot`
-3. Install all dependencies
-4. Add `miya` command to `~/.local/bin`
-
-### Manual install
+For local development:
 
 ```bash
 git clone https://github.com/MayMistery/miya-bot
 cd miya-bot
-make dev          # install with dev deps
-# or
-./run.sh          # auto-installs on first run
+make install-dev
+uv run miya --help
 ```
 
-### Update
+Update an installed checkout:
 
 ```bash
-make update           # pull latest + re-sync deps
+miya update
 # or
-./run.sh update
-# or
-./install.sh update
+make update
 ```
 
----
+## Configure
 
-## Configuration
-
-### API credentials
-
-Set environment variables (`.env` or shell):
+Set credentials in the shell or in a local `.env` file:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
-export ANTHROPIC_BASE_URL=https://api.anthropic.com   # optional, for proxies
-export MIYA_MODEL=opus                                  # optional, default: opus
+export ANTHROPIC_BASE_URL=https://api.anthropic.com
+export MIYA_MODEL=opus
 ```
 
-Or pass per-command:
+Every mission command also accepts per-run overrides:
 
 ```bash
-miya oneday --target 192.168.1.1 \
+miya oneday \
+  --target https://example.com \
   --api-key sk-ant-... \
-  --base-url https://my-proxy.example.com \
+  --base-url https://proxy.example.com \
   --model sonnet
 ```
 
-### Available models
+Supported model shortcuts are `opus`, `sonnet`, and `haiku`.
 
-| Value | Description |
-|-------|-------------|
-| `opus` | Claude Opus — most capable (default) |
-| `sonnet` | Claude Sonnet — fast + capable |
-| `haiku` | Claude Haiku — fastest |
+## Commands
 
----
+```bash
+miya --help
+miya health
+miya info
+miya interactive
+miya oneday --target <host|url|cidr>
+miya zeroday --target <path|repo-url>
+miya ctf --target <url|file>
+```
 
-## Usage
+Common options:
 
-### 1-day — exploit known CVEs
+- `--model`, `--api-key`, `--base-url`: Claude runtime settings
+- `--topology`: `ooda`, `attack_graph`, or `fanout`
+- `--db`: SQLite event database path
+- `--unlimited`: disable mission timeouts and iteration limits
+- `--prompt`: operator instructions for the mission
 
-Attack a live service:
+## Mission Examples
+
+Run a 1-day mission against a live service:
 
 ```bash
 miya oneday --target 192.168.1.100
-miya oneday --target 10.0.0.0/24 --topology attack_graph
+miya oneday --target https://app.example.com --topology attack_graph
 ```
 
-White-box mode (source code + live service):
+Add source code for white-box context:
 
 ```bash
-miya oneday --target https://example.com --source ./app-source/
+miya oneday --target https://app.example.com --source ./app-source
 ```
 
-When `--source` is provided, the vulnerability agent performs static analysis on the source code before scanning the live target, improving CVE detection accuracy.
-
-### 0-day — discover unknown vulnerabilities
-
-Analyze source code only:
+Analyze a codebase for 0-day issues:
 
 ```bash
-miya zeroday --target ./my-app --language python
+miya zeroday --target ./service --language python
 miya zeroday --target https://github.com/org/repo --language go
 ```
 
-Analyze source code and exploit the live service:
+Analyze source and validate against a running service:
 
 ```bash
-miya zeroday --target ./my-app --service https://app.example.com --language python
+miya zeroday --target ./service --service https://staging.example.com
 ```
 
-When `--service` is provided, after finding 0-day vulnerabilities in the source code the agent attempts to generate and validate a PoC exploit against the live service.
-
-### CTF — solve challenges
+Solve CTF challenges:
 
 ```bash
 miya ctf --target https://ctf.example.com/challenge/1 --category web
-miya ctf --target ./binary --category pwn
+miya ctf --target ./vuln --category pwn
 miya ctf --target ./ciphertext.txt --category crypto
 miya ctf --target ./crackme --category reverse
 ```
 
-### Interactive REPL (recommended)
+## Interactive Mode
 
-The interactive mode is the primary way to use Miya. It provides a persistent session with runtime configuration, mission history, and blackboard inspection.
+The REPL keeps mission history, runtime configuration, events, and blackboard
+state available across commands.
 
 ```bash
 miya interactive
-miya interactive --model sonnet --api-key sk-ant-...
+```
 
-# In the REPL:
-miya (opus) > set model sonnet              # switch model
-miya (sonnet) > set topology attack_graph   # change default topology
-miya (sonnet) > set api_key sk-ant-...      # set API key
-miya (sonnet) > set base_url https://...    # set base URL
+Typical session:
 
-miya (sonnet) > oneday 192.168.1.100
-miya (sonnet) > oneday 10.0.0.1 --source ./app-src   # white-box
-miya (sonnet) > zeroday ./my-app --language python
-miya (sonnet) > zeroday ./app --service https://app.example.com
-miya (sonnet) > ctf https://ctf.example.com/chall/1 --category web
-
-miya (sonnet) > status                      # show config + session stats
-miya (sonnet) > history                     # mission history
-miya (sonnet) > events                      # recent domain events
-miya (sonnet) > blackboard                  # current blackboard state
-miya (sonnet) > info                        # MCP server info
-miya (sonnet) > clear                       # clear screen
+```text
+miya (opus) > set model sonnet
+miya (sonnet) > set topology attack_graph
+miya (sonnet) > oneday https://app.example.com --source ./app
+miya (sonnet) > zeroday ./service --language python
+miya (sonnet) > ctf ./challenge.zip --category misc
+miya (sonnet) > status
+miya (sonnet) > events
+miya (sonnet) > blackboard
+miya (sonnet) > info
 miya (sonnet) > exit
 ```
 
----
-
 ## Topologies
 
-| Flag | Description |
-|------|-------------|
-| `ooda` (default) | OODA loop: Observe → Orient → Decide → Act → Reflect |
-| `attack_graph` | DAG-based attack path planning + tactical execution |
+| Topology | Use it when |
+| --- | --- |
+| `ooda` | You want a focused Observe -> Orient -> Decide -> Act loop with reflection. |
+| `attack_graph` | You want path planning across assets, vulnerabilities, and access states. |
+| `fanout` | You have multiple CTF challenges and want parallel per-challenge solving. |
 
-```bash
-miya oneday --target 10.0.0.1 --topology attack_graph
+## MCP Tools
+
+Miya can pass MCP server configs to Claude Agent SDK when a mission needs
+external tools. Tool availability is checked at runtime.
+
+| Tool | Used by | Purpose |
+| --- | --- | --- |
+| `semgrep` | 0-day | Static analysis |
+| `nmap` | 1-day | Host and service discovery |
+| `nuclei` | 1-day, CTF | Template-based scanning |
+| `shodan` | 1-day | Internet asset intelligence |
+| `metasploit` | 1-day | Exploit framework integration |
+| `sqlmap` | 1-day, CTF | SQL injection testing |
+| `exploitdb` | 1-day | Public exploit lookup |
+| `ghidra` | CTF | Reverse engineering |
+| `gdb` | CTF | Debugging |
+| `sage` | CTF | Math and crypto support |
+| `factordb` | CTF | Integer factorization lookup |
+| `cyberchef` | CTF | Encoding and transform chains |
+| `binwalk` | CTF | Firmware and file analysis |
+| `exiftool` | CTF | Metadata extraction |
+
+## How It Works
+
+Miya treats each state change as a domain event. Agents emit `[EVENT:...]`
+markers, Miya parses those markers, updates the blackboard, and persists the
+event stream in SQLite.
+
+```text
+CLI
+  -> MissionService
+  -> Topology
+  -> Claude Agent SDK
+  -> [EVENT:...] output
+  -> Blackboard projection
+  -> SQLite EventStore
+  -> MissionReport
 ```
 
----
+Main packages:
 
-## MCP Tool Servers
-
-Miya integrates these MCP servers for specialized tooling:
-
-| Server | Used By | Description |
-|--------|---------|-------------|
-| `semgrep` | 0-day | Static analysis (5000+ rules) |
-| `nmap` | 1-day | Network scanning |
-| `nuclei` | 1-day, CTF | Template vulnerability scanner |
-| `shodan` | 1-day | Internet asset intelligence |
-| `metasploit` | 1-day | Exploit framework |
-| `sqlmap` | 1-day, CTF | SQL injection |
-| `exploitdb` | 1-day | Public exploit DB |
-| `ghidra` | CTF | Binary reverse engineering |
-| `gdb` | CTF | Debugger |
-
----
+```text
+miya/
+  main.py                 CLI entrypoint
+  mission/service.py      Mission orchestration
+  topology/               OODA, attack graph, and fanout execution
+  shared/events.py        Domain event model
+  shared/blackboard.py    Event-sourced mission state
+  infra/event_store.py    SQLite event persistence
+  infra/mcp_registry.py   MCP server definitions
+  oneday/                 1-day bounded contexts
+  zeroday/                0-day bounded contexts
+  ctf/                    CTF bounded contexts
+```
 
 ## Development
 
 ```bash
-make dev          # install dev deps
-make test         # run all 241 tests
-make test-unit    # unit tests only
-make test-int     # integration tests only
-make test-e2e     # e2e tests only
-make test-cov     # with coverage report
-make lint         # ruff check
-make fmt          # ruff format
-make clean        # remove build artifacts
+make install-dev
+make lint
+make test-unit
+make test
 ```
 
-With `run.sh`:
+Useful direct commands:
 
 ```bash
-./run.sh test
-./run.sh test-unit
-./run.sh lint
-./run.sh fmt
+uv run ruff check miya tests
+uv run pytest tests/unit -v --tb=short
+uv run miya health
 ```
 
----
-
-## Architecture
-
-```
-miya/
-├── main.py               # CLI (click)
-├── mission/
-│   └── service.py        # MissionService — orchestrates everything
-├── topology/
-│   ├── base.py           # AgentHandle, TopologyRegistry, _sdk_env
-│   ├── ooda.py           # OODA loop topology
-│   └── attack_graph_topo.py  # Attack graph topology
-├── shared/
-│   ├── types.py          # Value objects (Mission, Target, Finding, ...)
-│   ├── events.py         # Domain events
-│   ├── blackboard.py     # Event-sourced state projection
-│   └── ports.py          # Ports (CoordinatorPort, EventStorePort)
-├── infra/
-│   ├── event_store.py    # SQLite event store
-│   └── mcp_registry.py  # MCP server configs
-├── oneday/               # 1-day bounded context agents
-├── zeroday/              # 0-day bounded context agents
-└── ctf/                  # CTF bounded context agents
-```
-
-### Event flow
-
-```
-CLI → MissionService → Topology → Claude Agent SDK
-                                       ↓
-                              [EVENT:...] markers in output
-                                       ↓
-                              Event extraction → Blackboard
-                                       ↓
-                              EventStore (SQLite)
-                                       ↓
-                              MissionReport
-```
-
-### Testing
-
-Tests use a `MockCoordinator` injected via the `CoordinatorPort` interface — no real API calls are made. Mock responses embed `[EVENT:...]` markers that are extracted and processed identically to production.
-
----
+Tests inject mock coordinators through the coordinator interface, so unit tests
+do not require real Claude API calls.
 
 ## License
 
